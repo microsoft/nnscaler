@@ -32,6 +32,20 @@ The nnScaler provides an easy-to-use interface so users can conveniently realize
 -	To mitigate unsupported issues, users may disable parallelization for the entire DNN model or certain parts of the model as an workaround.
 -	To mitigate incorrect execution, users may compare the parallelized programs and original DNN model execution on small datasets to confirm their consistency before deploying to large scale for long-term execution.
 
+## Reference
+
+Please cite nnScaler in your publications if it helps your research:
+
+```
+@inproceedings {nnscaler-osdi24,
+author = {Zhiqi Lin and Youshan Miao and Quanlu Zhang and Fan Yang and Yi Zhu and Cheng Li and Saeed Maleki and  Xu Cao and Ning Shang and Yilei Yang and Weijiang Xu and Mao Yang and Lintao Zhang and Lidong Zhou},
+title = {nnScaler: Constraint-Guided Parallelization Plan Generation for Deep Learning Training},
+booktitle = {18th {USENIX} Symposium on Operating Systems Design and Implementation ({OSDI} 24)},
+year = {2024},
+publisher = {{USENIX} Association},
+}
+```
+
 ## Contributing
 
 This project welcomes contributions and suggestions.  Most contributions require you to agree to a

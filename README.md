@@ -1,14 +1,36 @@
-# Project
+# nnScaler
 
-> This repo has been populated by an initial template to help get you started. Please
-> make sure to update the content to build a great experience for community-building.
+### What is nnScaler?
+The nnScaler is a system that takes a DNN model that designed for single device, e.g., GPU, and automatically convert it into the program that can execute concurrently on multiple devices. 
 
-As the maintainer of this project, please make a few updates:
+###	What can nnScaler do? 
+Under the hood, nnScaler analyzes the given DNN models, plans for appropriate parallelization strategies, and generates corresponding execution code. With nnScaler, users can focus on single device DNN model design, and offload the complex parallelization work to nnScaler, and easily achieve high performance parallel DNN execution.
+###	What is/are nnScaler’s intended use(s)?
+Due to high compatibility and extensibility, nnScaler can be used for innovation of a wide range of new DNN models and DNN systems, including new model structure, training patterns, as well as new parallelization techniques that are beyond existing data-parallelism, tensor-parallelism or pipeline parallelism.
+###	How was nnScaler evaluated? What metrics are used to measure performance?
+For execution performance, nnScaler can support new parallelisms that outperform existing parallel execution approaches: 1) fitting larger DNN model given the same hardware; 2) providing faster execution for the same model on the same hardware. (included in our OSDI’24 paper)
+For compatibility, nnScaler can support paralleling new DNN models by providing user-defined functions (a few lines of code) for the new operators unrecognized by the nnScaler.
+###	What are the limitations of nnScaler? How can users minimize the impact of nnScaler’s limitations when using the system?
+- It is possible certain DNN model architecture or execution patterns may violate the assumption of nnScaler, therefore cannot supported by nnScaler.
+- The nnScaler does not guarantee the optimality of parallelization, so it is possible for nnScaler to miss the optimal parallelization strategy given DNN model and device settings, while only providing suboptimal solutions.
+-	Even though we tried our best to make the parallelization process correct, it is possible for nnScaler that generates parallelized programs for concurrent execution inconsistent with the original DNN model for single device.
+###	What operational factors and settings allow for effective and responsible use of nnScaler?
+-	We provide documentation to guide users in the usage of the nnScaler.
+-	We provide parallelization examples that users can directly leverage for parallel execution if they intend to execute the same DNN models.
+-	We also provide certain cases of customization, including reconfiguring the device settings, adopting new DNN models in nnScaler, and supporting customized operators.
 
-- Improving this README.MD file to provide a great experience
-- Updating SUPPORT.MD with content about this project's support experience
-- Understanding the security reporting process in SECURITY.MD
-- Remove this section from the README
+## Extending nnScaler
+
+###	What are plugins and how does nnScaler use them?  
+The nnScaler supports extending DNN modules with new structure or execution pattern, which enable users to parallelize their own new DNN models. Then during parallelization, nnScaler will process the new modules like the ones that already supported by it.
+###	What can nnScaler provide to plug ins? 
+The nnScaler provides an easy-to-use interface so users can conveniently realize the plug-in DNN module by implementing a few user-defined-functions. 
+###	What kinds of issues may arise when using nnScaler enabled with plugins?  
+-	When paralleling new DNN models, users may try on some structures or execution patterns that violate the assumption and fail to support.
+-	When adapting new DNN models for parallelization, users may incorrectly implement the user-defined function, causing nnScaler producing incorrect parallelized programs.
+-	Certain unforeseen mistakes in nnScaler implementation may cause producing incorrect parallelized programs without warning, leading to incorrect execution.
+-	To mitigate unsupported issues, users may disable parallelization for the entire DNN model or certain parts of the model as an workaround.
+-	To mitigate incorrect execution, users may compare the parallelized programs and original DNN model execution on small datasets to confirm their consistency before deploying to large scale for long-term execution.
 
 ## Contributing
 

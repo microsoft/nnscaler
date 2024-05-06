@@ -1,0 +1,8 @@
+pytest
+mock
+pytest-mock
+tox
+coverage
+pytest-cov
+tabulate
+tox-conda

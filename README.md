@@ -1,5 +1,8 @@
 # nnScaler
 
+**NOTE:** *Artifact Evaluation guidance is [here](./AE.md)*
+
+
 ### What is nnScaler?
 The nnScaler is a system that takes a DNN model that designed for single device, e.g., GPU, and automatically convert it into the program that can execute concurrently on multiple devices. 
 

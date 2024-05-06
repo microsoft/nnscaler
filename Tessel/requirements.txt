@@ -1,0 +1,3 @@
+z3-solver
+more_itertools
+matplotlib

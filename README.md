@@ -1,6 +1,8 @@
 # nnScaler
 
-**NOTE:** *Artifact Evaluation guidance is [here](./AE.md)*
+**NOTE:** *A formal version of the system will be released soon. Please stay tuned!*
+
+*You may find the Artifact Evaluation for OSDI'24 with the guidance [here](https://github.com/microsoft/nnscaler/tree/osdi24ae)*
 
 
 ### What is nnScaler?

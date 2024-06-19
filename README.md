@@ -1,6 +1,6 @@
 # nnScaler
 
-**NOTE:** *Artifact Evaluation guidance is [here](./AE.md)*
+**NOTE:** *This branch is for OSDI'24 Artifact Evaluation, with the guidance [here](./AE.md)*
 
 
 ### What is nnScaler?

@@ -209,7 +209,7 @@ class SpmdSolver:
                 e.append(LpVariable.matrix(f"e[{src.cid}, {dst.cid}]",
                                            (range(nsrc * ndst),),
                                            cat='Binary'))
-                r.append(self.cost_model.get_pair_reshard_cost(src, dst, tp_size).flatten())
+                r.append(self.cost_model.get_pair_reshard_cost(src, dst, tp_size).flatten() / dp_size)
                 num_edges += 1
 
         # initial value: --skip

@@ -1,74 +1,232 @@
-# nnScaler
+<img src="docs/source/images/nnScaler-c-1.png" alt="drawing" width="100" align="left"/>  
 
-**NOTE:** *A formal version of the system will be released soon. Please stay tuned!*
+nnScaler: Compiling DNN models for Parallel Training over Multiple Devices
+==============
 
-*You may find the Artifact Evaluation for OSDI'24 with the guidance [here](https://github.com/microsoft/nnscaler/tree/osdi24ae)*
+
+# What is nnScaler?
+
+---------
+nnScaler is a parallelization engine that compiles a Deep neural network (DNN) model that designed for single-GPU execution into a program that capable of running in parallel across multiple GPUs.
+
+<img src="docs/source/images/nnScaler_flow.png" alt="drawing" width="600"/>
 
 
-### What is nnScaler?
-The nnScaler is a system that takes a DNN model that designed for single device, e.g., GPU, and automatically convert it into the program that can execute concurrently on multiple devices. 
+### System Highlights:
 
-###	What can nnScaler do? 
-Under the hood, nnScaler analyzes the given DNN models, plans for appropriate parallelization strategies, and generates corresponding execution code. With nnScaler, users can focus on single device DNN model design, and offload the complex parallelization work to nnScaler, and easily achieve high performance parallel DNN execution.
-###	What is/are nnScaler’s intended use(s)?
-Due to high compatibility and extensibility, nnScaler can be used for innovation of a wide range of new DNN models and DNN systems, including new model structure, training patterns, as well as new parallelization techniques that are beyond existing data-parallelism, tensor-parallelism or pipeline parallelism.
-###	How was nnScaler evaluated? What metrics are used to measure performance?
-For execution performance, nnScaler can support new parallelisms that outperform existing parallel execution approaches: 1) fitting larger DNN model given the same hardware; 2) providing faster execution for the same model on the same hardware. (included in our OSDI’24 paper)
-For compatibility, nnScaler can support paralleling new DNN models by providing user-defined functions (a few lines of code) for the new operators unrecognized by the nnScaler.
-###	What are the limitations of nnScaler? How can users minimize the impact of nnScaler’s limitations when using the system?
-- It is possible certain DNN model architecture or execution patterns may violate the assumption of nnScaler, therefore cannot supported by nnScaler.
-- The nnScaler does not guarantee the optimality of parallelization, so it is possible for nnScaler to miss the optimal parallelization strategy given DNN model and device settings, while only providing suboptimal solutions.
--	Even though we tried our best to make the parallelization process correct, it is possible for nnScaler that generates parallelized programs for concurrent execution inconsistent with the original DNN model for single device.
-###	What operational factors and settings allow for effective and responsible use of nnScaler?
--	We provide documentation to guide users in the usage of the nnScaler.
--	We provide parallelization examples that users can directly leverage for parallel execution if they intend to execute the same DNN models.
--	We also provide certain cases of customization, including reconfiguring the device settings, adopting new DNN models in nnScaler, and supporting customized operators.
+* Ease of Use: Only a few lines of code need to be changed to enable automated parallelization.
+* Pythonic: The parallelization output is in PyTorch code, making it easy for users to understand and convenient for further development or customization.
+* Extensibility: nnScaler exposes an API to support new operators for emerging models.
+* Reliability: Verified through various end-to-end training sessions, nnScaler is a dependable system.
+* Performance: By exploring a large parallelization space, nnScaler can significantly enhance parallel training performance.
 
-## Extending nnScaler
+For **_DNN scientists_**, they can concentrate on model design with PyTorch on single GPU, while leaving parallelization complexities to nnScaler. It introduces innovative parallelism techniques that surpass existing methods in performance. Additionally, nnScaler supports the extension of DNN modules with new structures or execution patterns, enabling users to parallelize their custom DNN models.
 
-###	What are plugins and how does nnScaler use them?  
-The nnScaler supports extending DNN modules with new structure or execution pattern, which enable users to parallelize their own new DNN models. Then during parallelization, nnScaler will process the new modules like the ones that already supported by it.
-###	What can nnScaler provide to plug ins? 
-The nnScaler provides an easy-to-use interface so users can conveniently realize the plug-in DNN module by implementing a few user-defined-functions. 
-###	What kinds of issues may arise when using nnScaler enabled with plugins?  
--	When paralleling new DNN models, users may try on some structures or execution patterns that violate the assumption and fail to support.
--	When adapting new DNN models for parallelization, users may incorrectly implement the user-defined function, causing nnScaler producing incorrect parallelized programs.
--	Certain unforeseen mistakes in nnScaler implementation may cause producing incorrect parallelized programs without warning, leading to incorrect execution.
--	To mitigate unsupported issues, users may disable parallelization for the entire DNN model or certain parts of the model as an workaround.
--	To mitigate incorrect execution, users may compare the parallelized programs and original DNN model execution on small datasets to confirm their consistency before deploying to large scale for long-term execution.
+For **_DNN system experts_**, they can leverage nnScaler to explore new DNN parallelization mechanisms and policies for emerging models. By providing user-defined functions for new operators not recognized by nnScaler, it ensures seamless parallelization of novel DNN models. For example, to facilitate long sequence support in LLMs.
 
-## Reference
 
+# Quick start
+
+---------
+
+## Installation
+
+### Prerequisite
+
+Install the following packages before the installation of cube:
+
+    Python >= 3.8, < 3.11 (3.10 is recommanded)
+
+    PyTorch >= 2.0, < 2.4 (2.2.0 is recommanded)
+
+### (Option 1) Install nnScaler from source
+Execute below commands in nnScaler directory: 
+
+    pip install -r requirements.txt
+    pip install -e .
+
+Besides, to avoid *cppimport* error, it also needs to include nnScaler directory in environment variable **PYTHONPATH**:
+
+    export NNSCALER_HOME=$(pwd)
+    export PYTHONPATH=${NNSCALER_HOME}:$PYTHONPATH
+
+[//]: # (Reference output: Successfully installed MarkupSafe-2.1.5 contourpy-1.3.0 cppimport-22.8.2 cycler-0.12.1 dill-0.3.8 filelock-3.15.4 fonttools-4.53.1 fsspec-2024.6.1 importlib-resources-6.4.4 jinja2-3.1.4 kiwisolver-1.4.5 mako-1.3.5 matplotlib-3.9.2 more-itertools-10.4.0 mpmath-1.3.0 networkx-3.3 numpy-2.1.0 nvidia-cublas-cu12-12.1.3.1 nvidia-cuda-cupti-cu12-12.1.105 nvidia-cuda-nvrtc-cu12-12.1.105 nvidia-cuda-runtime-cu12-12.1.105 nvidia-cudnn-cu12-9.1.0.70 nvidia-cufft-cu12-11.0.2.54 nvidia-curand-cu12-10.3.2.106 nvidia-cusolver-cu12-11.4.5.107 nvidia-cusparse-cu12-12.1.0.106 nvidia-nccl-cu12-2.20.5 nvidia-nvjitlink-cu12-12.6.68 nvidia-nvtx-cu12-12.1.105 packaging-24.1 pillow-10.4.0 psutil-6.0.0 pulp-2.9.0 pybind11-2.13.5 pyparsing-3.1.4 python-dateutil-2.9.0.post0 pyyaml-6.0.2 six-1.16.0 sympy-1.13.2 torch-2.4.0 tqdm-4.66.5 triton-3.0.0 typing-extensions-4.12.2)
+
+### (Option 2) Install nnScaler from whl package
+
+To get started, install the latest wheel by visiting [DevOps Artifacts](https://msrasrg.visualstudio.com/SuperScaler/_artifacts/feed/nightly/PyPI/nnscaler/overview/). You may follow DevOps guide to set up the repository, or alternatively download the **.whl** file from the “Files” section of the website, then install locally:
+
+    python -m pip install nnscaler-*.whl
+
+## Example Llama-3
+
+### Prerequisite for Llama-3
+
+Install packages required to run Llama-3. Besides, a certain version of CUDA library is needed during flash-attn installation. For example, [CUDA V11.8](https://developer.nvidia.com/cuda-11-8-0-download-archive) is needed if using PyTorch 2.20. 
+
+    python -m pip install transformers==4.40.0 flash-attn==2.5.5 tensorboard
+
+### Model Access
+
+Obtain access of Llama-3 model from [HuggingFace](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct), where you will receive an access token which should be set as an environment variable: 
+
+    export HF_TOKEN=<HUGGINGFACE_ACCESS_TOKEN>
+
+### Code Changes for Parallelization
+
+You can find all the example code at `examples/llama3_8B_128K`. As shown below, a user needs to:
+* Wrap the Model: Include loss computation and other necessary components.
+* Configure Components: Set up the model, optimizer, and dataloader.
+* Initialize and Start: In the main function, create an nnScaler trainer with the above configurations and start the training process.
+
+```python
+# import the nnScaler build-in parallelization-capable trainer
+from nnscaler.cli.trainer import Trainer
+
+# wrap model to include loss computing, etc.
+class WrapperModel(torch.nn.Module):
+    def __init__(self, model_id):
+        super().__init__()
+        self.model = AutoModelForCausalLM.from_pretrained(model_id, attn_implementation='flash_attention_2')
+
+    def forward(self, samples):
+        outputs = self.model.model(
+            input_ids=samples['net_input']['src_tokens'],
+            use_cache=False,
+            return_dict=False,
+        )
+        loss = torch.sum(chunk_linear_cross_entropy(outputs[0], self.model.lm_head.weight, samples['target'], ...))
+        return loss, samples['ntokens'], samples['nsentences']
+
+def main(args):
+    # data config
+    dataloader_config = ...
+    
+    # model config
+    model_config = ModelConfig(
+        type=WrapperModel,
+        args={
+            'model_id': args.model_id,
+        },
+    )
+    # optimizer hyperparameters 
+    optimizer_config = OptimizerConfig(
+        type=MixedPrecisionAdamW,
+        args={'lr': 2e-5, 'betas': (0.9, 0.95), 'weight_decay': 0.0, 'fused': True},
+        #...
+    )
+    #...
+    
+    # setup trainer with configs of dataloader/model/optimizer, etc. 
+    trainer = Trainer(train_args=TrainerArgs(
+            #...
+            model=model_config,
+            optimizer=optimizer_config,
+            dataloader=dataloader_config,
+            #...
+        ))
+    trainer.run()
+
+```
+
+### Run the example Llama-3 training
+
+Then we can start the example, and all the parallelization tasks will be finished by nnScaler automatically. 
+
+```shell
+cd examples/llama3_8B_128K
+
+# prepare training data:
+python bookcorpus.py --data_path_or_name bookcorpus/bookcorpus --tokenizer_path_or_name meta-llama/Meta-Llama-3-8B-Instruct --save_path ./bookcorpus_llama3_4K --sequence_length 4096
+
+# build the mini model
+python create_mini_model.py --model_id meta-llama/Meta-Llama-3-8B-Instruct --output_id ./llama3_mini
+
+#compile and run using data parallelism + zero1
+torchrun --nproc_per_node=2 train.py --plan_ngpus 1 --runtime_ngpus 2 --name llama3_debug --model_id ./llama3_mini --dataset_path ./bookcorpus_llama3_4K
+
+```
+
+## Example nanoGPT
+
+We also provide an example to demonstrate how to parallelize a model through a [PyTorch Lightning](https://lightning.ai/docs/pytorch/stable/)-compatible interface in nnScaler.
+
+* Find the [nanoGPT](https://github.com/karpathy/nanoGPT) example in nnScaler repo:
+
+
+    cd MagicCube/examples/nanogpt
+
+* Install nanoGPT's dependencies:
+
+
+    pip install -r requirements.txt
+
+* Prepare dataset:
+
+
+    python nanoGPT/data/shakespeare_char/prepare.py
+
+* Test with Single GPU
+
+Now you can run ``train_nnscaler.py`` with `torchrun <https://pytorch.org/docs/stable/elastic/run.html>`_:
+
+    torchrun --nproc_per_node=1 train_nnscaler.py nanoGPT/config/train_shakespeare_char.py
+
+This will train a baby GPT model on a single GPU.
+It will take several minutes and the best validation loss will be around 1.47.
+
+* Test with Multi-GPU
+
+By default, nnScaler parallelizes a model over GPUs with _data parallelism_.
+If you have 4 GPUs on one node:
+
+    torchrun --nproc_per_node=4 train_nnscaler.py nanoGPT/config/train_shakespeare_char.py
+
+Or if you have multiple nodes, for example 2 nodes with 4 GPUs each:
+
+    # on each node
+    torchrun --nnodes=2 --nproc_per_node=4 --rdzv-id=NNSCALER_NANOGPT --rdzv-backend=c10d --rdzv-endpoint=<IP> \
+        train_nnscaler.py nanoGPT/config/train_shakespeare_char.py
+
+NOTE: The local batch size is fixed by default, so using more workers will result in a larger global batch size.
+
+💡 _For advanced usages, please stay tuned for our future release.
+
+
+# Success Stories
+
+nnScaler has been adopted by multiple projects, including both product and research explorations:
+* [(YOCO)You only cache once: Decoder-decoder architectures for language models](https://arxiv.org/abs/2405.05254)
+* [LongRoPE: Extending LLM context window beyond 2 million tokens](https://arxiv.org/abs/2402.13753)
+* Post training for the long context version of [Phi-3 series](https://arxiv.org/abs/2404.14219)
+
+# Reference
+
+---------
+You may find the Artifact Evaluation for OSDI'24 with the guidance [here](https://github.com/microsoft/nnscaler/tree/osdi24ae). 
 Please cite nnScaler in your publications if it helps your research:
 
-```
-@inproceedings {nnscaler-osdi24,
-author = {Zhiqi Lin and Youshan Miao and Quanlu Zhang and Fan Yang and Yi Zhu and Cheng Li and Saeed Maleki and  Xu Cao and Ning Shang and Yilei Yang and Weijiang Xu and Mao Yang and Lintao Zhang and Lidong Zhou},
-title = {nnScaler: Constraint-Guided Parallelization Plan Generation for Deep Learning Training},
-booktitle = {18th {USENIX} Symposium on Operating Systems Design and Implementation ({OSDI} 24)},
-year = {2024},
-publisher = {{USENIX} Association},
-}
-```
+    @inproceedings{lin2024nnscaler,
+    title = {nnScaler: Constraint-Guided Parallelization Plan Generation for Deep Learning Training},
+    author={Lin, Zhiqi and Miao, Youshan and Zhang, Quanlu and Yang, Fan and Zhu, Yi and Li, Cheng and Maleki, Saeed and Cao, Xu and Shang, Ning and Yang, Yilei and Xu, Weijiang and Yang, Mao and Zhang, Lintao and Zhou, Lidong},
+    booktitle={18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24)},
+    pages={347--363},
+    year={2024}
+    }
 
 ## Contributing
 
-This project welcomes contributions and suggestions.  Most contributions require you to agree to a
-Contributor License Agreement (CLA) declaring that you have the right to, and actually do, grant us
-the rights to use your contribution. For details, visit https://cla.opensource.microsoft.com.
+This project welcomes contributions and suggestions. Most contributions require you to agree to a Contributor License Agreement (CLA) declaring that you have the right to, and actually do, grant us the rights to use your contribution. For details, visit https://cla.opensource.microsoft.com.
 
-When you submit a pull request, a CLA bot will automatically determine whether you need to provide
-a CLA and decorate the PR appropriately (e.g., status check, comment). Simply follow the instructions
-provided by the bot. You will only need to do this once across all repos using our CLA.
+When you submit a pull request, a CLA bot will automatically determine whether you need to provide a CLA and decorate the PR appropriately (e.g., status check, comment). Simply follow the instructions provided by the bot. You will only need to do this once across all repos using our CLA.
 
-This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/).
-For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or
-contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
+This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/). For more information, see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
 
 ## Trademarks
 
-This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft 
-trademarks or logos is subject to and must follow 
-[Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general).
-Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship.
-Any use of third-party trademarks or logos are subject to those third-party's policies.
+This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft trademarks or logos is subject to and must follow [Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general). Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship. Any use of third-party trademarks or logos is subject to those third-party's policies.
+
+## Contact
+
+You may find our public repo from <https://github.com/microsoft/nnscaler> or microsoft internal repo <https://aka.ms/ms-nnscaler>.
+For any questions or inquiries, please contact us at [nnscaler@service.microsoft.com](mailto:nnscaler@service.microsoft.com).

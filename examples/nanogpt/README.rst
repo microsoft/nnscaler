@@ -1,0 +1,1 @@
+../../docs/source/nanogpt_example.rst

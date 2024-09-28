@@ -1,0 +1,67 @@
+compute_config:
+  plan_ngpus: 1
+  constant_folding: true
+  use_zero: false
+  use_end2end: true
+
+init_env_fn: examples.nanogpt.train_cli.init_env
+run_mode: run
+pas_policy: autodist
+micro_batch_size: 64
+grad_accumulation_steps: 1
+max_train_steps: 5000
+max_val_steps: 200
+val_every_n_train_steps: 250
+enable_progress_bar: true
+# precision: bf16
+
+model:
+  type: examples.nanogpt.train_cli.Model
+  args:
+    init_from: scratch
+    n_layer: 6
+    n_head: 6
+    n_embd: 384
+    dropout: 0.0
+    bias: false
+    block_size: 256
+    meta_path: ./nanoGPT/data/shakespeare_char/meta.pkl
+
+optimizer:
+  type: torch.optim.AdamW
+  args:
+    lr: 1e-3
+    betas:
+    - 0.9
+    - 0.99
+    fused: true
+  clip_gnorm: 0.0
+
+lr_scheduler:
+  type: examples.nanogpt.train_cli.Scheduler
+  args:
+    warmup_iters: 100
+    learning_rate: 1e-3
+    lr_decay_iters: 5000
+    min_lr: 1e-4
+  interval: step
+
+dataset:
+  type: examples.nanogpt.train_cli.NanoGptDataset
+  train_args:
+    data_dir: ./nanoGPT/data/shakespeare_char
+    split: train
+    block_size: 256
+  val_args:
+    data_dir: ./nanoGPT/data/shakespeare_char
+    split: val
+    block_size: 256
+
+checkpoint:
+  keep_last_n_checkpoints: 10
+  every_n_train_steps: 250
+  save_type: deduped
+
+# hook:
+#   on_train_step_end: examples.nanogpt.train_cli.on_train_step_end
+#   on_val_step_end: examples.nanogpt.train_cli.on_val_step_end

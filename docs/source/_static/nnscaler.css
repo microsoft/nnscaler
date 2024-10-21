@@ -1,0 +1,4 @@
+/* remove "nnScaler documentation" text below icon in the left side bar */
+.sidebar-brand-text {
+    display: none;
+}

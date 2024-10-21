@@ -147,23 +147,20 @@ torchrun --nproc_per_node=2 train.py --plan_ngpus 1 --runtime_ngpus 2 --name lla
 We also provide an example to demonstrate how to parallelize a model through a [PyTorch Lightning](https://lightning.ai/docs/pytorch/stable/)-compatible interface in nnScaler.
 
 * Find the [nanoGPT](https://github.com/karpathy/nanoGPT) example in nnScaler repo:
-
-
+```shell
     cd examples/nanogpt
-
+```
 * Install nanoGPT's dependencies:
-
-
+```shell
     pip install -r requirements.txt
-
+```
 * Prepare dataset:
-
-
+```shell
     python nanoGPT/data/shakespeare_char/prepare.py
-
+```
 * Test with Single GPU
 
-Now you can run ``train_nnscaler.py`` with `torchrun <https://pytorch.org/docs/stable/elastic/run.html>`_:
+Now you can run ``train_nnscaler.py`` with `torchrun <https://pytorch.org/docs/stable/elastic/run.html>`:
 
     torchrun --nproc_per_node=1 train_nnscaler.py nanoGPT/config/train_shakespeare_char.py
 
@@ -185,7 +182,7 @@ Or if you have multiple nodes, for example 2 nodes with 4 GPUs each:
 
 NOTE: The local batch size is fixed by default, so using more workers will result in a larger global batch size.
 
-💡 _For advanced usages, please stay tuned for our future release.
+💡 For advanced usages, please stay tuned for our future release.
 
 
 # Success Stories

@@ -1357,7 +1357,7 @@ def _reshape_anno(in_shape: List[int], ou_shape: List[int], kwarg_name: str) -> 
             if bracket[hdim] not in spatial:
                 bracket[hdim] = str(shape_map[bracket[hdim]])
 
-    def modifier(kwargs: Dict, idx, dim, num: int) -> Dict:
+    def modifier(kwargs: Dict, idx, dim, num: int, subnode_idx: int) -> Dict:
         kwargs = dict(**kwargs)
         identifier = ifirst[dim]
         oidx = ofirst.index(identifier)
@@ -1566,7 +1566,26 @@ def Pad(input, pad, mode='constant', value=0.0, signature = None):
     """
     torch.nn.functional.pad(input, pad, mode='constant', value=0.0)
     """
-    return IRPad(signature, [input], 'pad', pad=pad, mode=mode, value=value)
+    if mode != 'constant':
+        raise ValueError(f"Currently only support mode='constant' but got {mode}")
+
+    pad_vals, _ = extract_variadic(pad)
+    if len(pad_vals) % 2 != 0:
+        raise ValueError(f"pad should be a list of even length but got {pad}")
+
+    pad_vals = [(pad_l, pad_r) for pad_l, pad_r in zip(pad_vals[::2], pad_vals[1::2])]
+    pad_vals.reverse()
+    pad_dim_num = len(pad_vals)
+
+    gener = iter(string.ascii_lowercase)
+    prefix_anno = ShapeAnno.create_shape_str(input.shape[:-pad_dim_num], iterator=gener)
+    in_pad_dim_anno = [str(dim) for dim in input.shape[-pad_dim_num:]]
+    out_pad_dim_anno = [str(dim + pad_l + pad_r) for dim, (pad_l, pad_r) in zip(input.shape[-pad_dim_num:], pad_vals)]
+    in_anno = prefix_anno + in_pad_dim_anno
+    out_anno = prefix_anno + out_pad_dim_anno
+    anno = OpAnno.create_op_str([in_anno], [out_anno])
+
+    return IRDimops(Pad, 'pad', signature, [anno], [input], pad=pad, mode=mode, value=value)
 
 
 # def Conv2D(signature, inputs):
@@ -2719,7 +2738,7 @@ def Conv1D(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1, 
         raise ValueError(f'Input shape and weight shape are not compatible for the number of groups. input shape: {input.shape}, weight shape: {weight.shape}, groups: {groups_val}')
     if oC % groups_val != 0:
         raise ValueError('The output channels of weight must be divisible by the number of groups.')
-    def modifier(kwargs: Dict, idx, dim, num: int) -> Dict:
+    def modifier(kwargs: Dict, idx, dim, num: int, subnode_idx: int) -> Dict:
         # only for partitioning groups
         kwargs = dict(**kwargs)
         kw_groups = kwargs['groups']
@@ -2868,7 +2887,7 @@ def Conv2D(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1, 
     if oC % groups_val != 0:
         raise ValueError('The output channels of weight must be divisible by the number of groups.')
 
-    def modifier(kwargs: dict, idx, dim, num: int) -> dict:
+    def modifier(kwargs: dict, idx, dim, num: int, subnode_idx: int) -> dict:
         # only for partitioning groups
         kwargs = dict(**kwargs)
         kw_groups = kwargs['groups']

@@ -44,7 +44,10 @@ nnscaler.register_op('(h^ m^) kd+, kd+ n -> h^ m^ n', name='matmul_custom')(oper
 def register_op(
     annotation: Union[str, Callable],
     name: Optional[str] = None,
-    code_impl_pattern: str = 'import'
+    code_impl_pattern: str = 'import',
+    emit_fn: Callable[[IRFwOperation, List[str], Dict[str, str], int, int, int], str] = None,
+    transform_rules: Tuple[TransformRule] = None,
+    input_gen_fn: Callable[IRFwOperation, List[torch.Tensor]] = None) -> Callable:
 ) -> Callable:
     ...
 ```
@@ -99,6 +102,22 @@ This function has the following parameters:
     taks inputs and kwargs as arguments and returns the operator annotation.
 - `name` (`str | None`): operator name. Only usable when `node_repr` is a string.
 - `code_impl_pattern` (`str`): It can only be 'import' or 'source'. If 'import' (default), will generate code with import statement. If 'source', will take the source code directly.
+- `emit_fn` (`Callable`): special emit function for codegen, it accepts the node, repred args, repred kwargs, runtime_devid,
+    plan_ndevs, runtime_ndevs as input and returns the generated code. Check examples/customized_ops/ring_attention/zigzag_attn.py for more details.
+    Default: None.
+- `transform_rules` (`Tuple[TransformRule]`): a tuple of special TransformRules which will be used when partitioning the node.
+    Default: None.
+- `input_gen_fn` (`Callable`): input generator function for profiler, this function accepts the IRFwOperation as input and returns
+    the list of input tensors, which is used during operator profiling. kwargs are same as that in the input node. By default, nnScaler's
+    profiler will use `torch.rand` for floating point data types and `torch.zeros` for special types like `torch.int64` and `torch.bool`.
+    However, input tensors' contents may influence operator's behavior and speed dramatically.
+    Take function `nnscaler_moe_gmm` in `examples/deepseek_coder_v2_lite/modeling/modeling_deepseek_modifier.py` as an example. It dispatches
+    tokens (`hidden_states`) to experts according to another input tensor `topk_idx`. In most of the training time, tokens are distributed
+    evenly among experts with indices in `[local_expert_start, local_expert_end]`. Since `top_idx`'s type is `torch.int64`, if we generate
+    it with `torch.zeros` then all of the tokens are dispatched to the 1st expert, which can be ilegal and far from the real profile statistics
+    of the operator. By using `input_gen_fn`, we can provide compatible input tensors to the profiler so that the solver can generate a
+    good distributed plan.
+    Default: None.
 
 
 ## Dimension Annotion Operations

@@ -38,12 +38,20 @@ class LifeCycle:
             inputs : Iterable[IRObject]
 
             if isinstance(node, (IRSegment, ExeReuseCell)):
+                # this is only for scheduler to track the lifetime of tensors
+                # for module code generation, no IRSegment/ExeReuseCell will be used.
+                # so will not go into this branch.
+
                 # forward segment
                 if node.isfw():
                     outputs = node.outputs()
                     inputs = node.inputs()
                 # backward segment
                 else:
+                    # in `_train_step`, we will explicitly call backward to generate gradients.
+                    # When pipeline is enabled, there will be multiple backward calls in the same segment.
+                    # So we also need to track the temporary gradient tensors
+                    # and delete them after the backward call to save memory.
                     fw_inputs, fw_outputs, output_grads, input_grads = \
                         func_emission.get_backward_callsite_io_tensors(node)
                     # remove loss gradient

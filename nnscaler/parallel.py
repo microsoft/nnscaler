@@ -78,6 +78,11 @@ class ComputeConfig:
 
     use_zero: bool = False
     zero_ngroups: int = 1
+    # whether to use reduce scatter for zero
+    # Please note
+    # 1. this only works when `use_zero` is True and `zero_ngroups` is 1.
+    # 2. In some cases, it can introduce parity issue. So use it with caution.
+    zero_use_reduce_scatter: bool = False
 
     # whether the generated code is for inference only
     inference_only: bool = False
@@ -87,6 +92,15 @@ class ComputeConfig:
     #  2. the first return value of `module.forward` must be the loss
     #  which must be a scalar tensor
     use_end2end: bool = False
+
+    # whether to use async reducer
+    # if True, the gradient all-reduce will be async,
+    # This only works when the `use_end2end` is `True` for now.
+    use_async_reducer: bool = False
+    # the maximal reducer weight bytes for one allreduce in megabytes
+    # It is also effective for sync reducer.
+    # None/0 means using the default value. (25MB for async, no limit for sync)
+    reducer_bucket_cap_mb: Optional[float] = None
 
     # PAS policy settings
     # you can also put any other settings that can affect code generation here.
@@ -139,6 +153,18 @@ class ComputeConfig:
             logger.warning(f"use_zero is False, but zero_ngroups is {self.zero_ngroups}. Will set zero_ngroups to 1.")
             # have to use __setattr__ for frozen dataclass
             super().__setattr__('zero_ngroups', 1)
+
+        if self.use_async_reducer and not self.use_end2end:
+            raise ValueError("use_async_reducer is only supported in end2end mode.")
+
+        if self.reducer_bucket_cap_mb and self.reducer_bucket_cap_mb < 0:
+            raise ValueError(f"reducer_bucket_cap_mb {self.reducer_bucket_cap_mb} should not be negative.")
+
+        # TODO: Please note in current implementation of Bucket,
+        # zero_use_reduce_scatter still works when zero_ngroups > 1 in sync mode
+        # Let's hide this feature for now for consistency.
+        if self.use_zero and self.zero_use_reduce_scatter and self.zero_ngroups != 1:
+            raise ValueError("zero_use_reduce_scatter is only supported when zero_ngroups is 1.")
 
     def apply_pipeline_scheduler(
             self,
@@ -294,9 +320,13 @@ def _flags(flags, /, **kwargs):
 def _compile_flags(compute_config: ComputeConfig):
     return _flags(
         CompileFlag,
-        async_reducer=False, reducer_op='sum', async_comm=False,
+        async_reducer=compute_config.use_async_reducer, reducer_op='sum',
+        max_reducer_bucket=int(compute_config.reducer_bucket_cap_mb * 1024 * 1024)
+                if compute_config.reducer_bucket_cap_mb else None,
+        async_comm=False,
         use_zero=compute_config.use_zero,
         zero_ngroups=compute_config.zero_ngroups,
+        zero_use_reduce_scatter=compute_config.zero_use_reduce_scatter,
         trace_strategy=compute_config.trace_strategy,
     )
 
@@ -858,6 +888,7 @@ def _load_parallel_module_class(
     # parallel_module_class.__module__ = module_class.__module__
     parallel_module_class.__orig_module_class__ = module_class  # save the original module class
     # override train_step and infer_step only if they are defined in the generated module (end2end module only)
+    parallel_module_class.runtime_version = getattr(gen_imported, 'runtime_version', None)
     parallel_module_class._train_step = getattr(gen_imported, '_train_step', parallel_module_class._train_step)
     parallel_module_class._infer_step = getattr(gen_imported, '_infer_step', parallel_module_class._infer_step)
     return parallel_module_class

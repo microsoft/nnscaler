@@ -597,7 +597,12 @@ class TransformRule:
     """
     Partition rule
     """
-    def __init__(self, irules: Tuple[DimopSplit], orules: Tuple[DimopSplit], kwarg_modifier: Optional[Callable] = None) -> None:
+    def __init__(
+        self,
+        irules: Tuple[DimopSplit],
+        orules: Tuple[DimopSplit],
+        kwarg_modifier: Optional[Callable[[Dict, int, Union[int, str], int, int], Dict]] = None,
+    ) -> None:
         self._inputs = tuple(irules)
         self._outputs = tuple(orules)
         modifier = kwarg_modifier if kwarg_modifier is not None else TransformRule.default_modifier
@@ -624,7 +629,7 @@ class TransformRule:
         return f'{inputs} -> {outputs}'
 
     @staticmethod
-    def default_modifier(kwargs: Dict, idx: int, dim: Union[int, str], num: int) -> Dict:
+    def default_modifier(kwargs: Dict, idx: int, dim: Union[int, str], num: int, subnode_idx: int) -> Dict:
         return kwargs
 
 

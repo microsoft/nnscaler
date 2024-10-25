@@ -13,12 +13,15 @@ import torch
 import torch.distributed as dist
 
 from nnscaler.graph.parser.fx.parser import FxModuleParser
+
 from nnscaler.runtime.device import DeviceGroup
 from nnscaler.runtime.adapter.reducer import Reducer
 from nnscaler.runtime.executor import Executor
 from nnscaler.runtime.gnorm import ParamsInfo
-from nnscaler.flags import CompileFlag
 from nnscaler.runtime.utils import microbatches
+
+from nnscaler import __version__ as runtime_version
+from nnscaler.flags import CompileFlag
 from nnscaler.utils import accum_mode
 
 if TYPE_CHECKING:
@@ -234,6 +237,10 @@ class CubeModule(torch.nn.Module):
         reducer_pids = set()
         for reducer in self._reducers:
             param_names = [paramid2name[id(p)] for p in reducer.params]
+            # we should use `parameters_for_optimizer` here since calculating gnorm
+            # is ahead of the optimizer step. When ZeRO is enabled, each device only
+            # maintains a subset of the parameters. As a result, `param_names` may not
+            # align with the value of `reducer.parameters_for_optimizer()`.
             params_info = ParamsInfo(reducer.ranks, reducer.parameters_for_optimizer(),
                                      param_names, reducer.zero_ngroups)
             params_info_for_gnorm.append(params_info)
@@ -759,11 +766,18 @@ class ParallelModule(CubeModule):
     EXTRA_STATE_KEY = 'CUBE_EXTRA_STATE'
     # the rank of the module, will be assigned in the generated subclasses
     rank: int
+    # the runtime version of the module when it is generated, will be assigned in the generated subclasses
+    runtime_version: str
 
     def __init__(self):
         if self.__class__  == ParallelModule:  # not init via super().__init__()
             raise RuntimeError(f"ParallelModule should not be initialized directly. Please derive it first")
 
+        rv = getattr(self, 'runtime_version', None)
+        if rv != runtime_version:
+            _logger.warning(
+                f"Runtime version mismatch: {rv} vs {runtime_version}. "
+            )
         super().__init__()
         # this is used to allow multiple sync_grad() calls
         self._sync_grad_required = False

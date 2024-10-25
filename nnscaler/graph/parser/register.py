@@ -5,14 +5,15 @@
 Register cutomized function
 """
 
-from typing import Dict, Callable, Optional, Union, List
+from typing import Dict, Callable, Optional, Union, List, Tuple
 from functools import partial
 import inspect
 import logging
 
+import torch
 from torch import ScriptFunction
 
-from nnscaler.graph.function.dimops import IRDimops, OpAnno
+from nnscaler.graph.function.dimops import IRDimops, OpAnno, TransformRule
 from nnscaler.graph.parser.fx.concrete_trace_utils.wrap_utils import is_autograd_apply
 from nnscaler.ir.operator import IRTensor, IRFwOperation
 
@@ -32,6 +33,10 @@ class CustomizedOps:
     # It accepts the node, repred args, repred kwargs, runtime_devid, plan_ndevs, runtime_ndevs
     # as input and returns the generated code.
     kOpEmit: Dict[str, Callable[[IRFwOperation, List[str], Dict[str, str], int, int, int], str]] = {}
+    # signature -> input generator function
+    # It accepts the IRFwOperation as input and returns the list of input tensors, which is used
+    # during operator profiling.
+    kOpInputGen: Dict[str, Callable[[IRFwOperation], List[torch.Tensor]]] = {}
 
     @staticmethod
     def map(signature: str) -> Callable:
@@ -54,7 +59,8 @@ class CustomizedOps:
 
     @staticmethod
     def register(signature: str, op_create_fn: Callable, code: str, runtime_fn: Callable,
-                 emit_fn: Callable[[IRFwOperation, List[str], Dict[str, str], int, int, int], str] = None):
+                 emit_fn: Callable[[IRFwOperation, List[str], Dict[str, str], int, int, int], str] = None,
+                 input_gen_fn: Callable[[IRFwOperation], List[torch.Tensor]] = None) -> None:
         """Register an operator
 
         Args:
@@ -65,6 +71,8 @@ class CustomizedOps:
             emit_fn (Callable): special emit function for codegen, will use default emit function if emit_fn is None.
                                 It accepts the node, repred args, repred kwargs, runtime_devid, plan_ndevs, runtime_ndevs
                                 as input and returns the generated code.
+            input_gen_fn (Callable): input generator function for profiler, will use default input generator function
+                                     if input_gen_fn is None. kwargs are same as that in the input node.
 
         Returns:
             None
@@ -78,10 +86,15 @@ class CustomizedOps:
         CustomizedOps.kOpCodeDef[signature] = code
         if emit_fn is not None:
             CustomizedOps.kOpEmit[signature] = emit_fn
+        if input_gen_fn is not None:
+            CustomizedOps.kOpInputGen[signature] = input_gen_fn
 
 
 def register_op(annotation: Union[str, Callable], name: Optional[str] = None,
-             code_impl_pattern: str = 'import', emit_fn: Callable[[IRFwOperation, List[str], Dict[str, str], int, int, int], str] = None) -> Callable:
+                code_impl_pattern: str = 'import',
+                emit_fn: Callable[[IRFwOperation, List[str], Dict[str, str], int, int, int], str] = None,
+                transform_rules: Tuple[TransformRule] = None,
+                input_gen_fn: Callable[[IRFwOperation], List[torch.Tensor]] = None) -> Callable:
     """
     Register a function with IRDimops annotations.
 
@@ -136,9 +149,17 @@ def register_op(annotation: Union[str, Callable], name: Optional[str] = None,
             can only be 'import' or 'source'. If 'import', will generate code with
             import statement. If 'source', will take the source code directly.
             Default: 'import'.
-        emit_fn (Callable): special emit function for codegen, this emit accepts the node, repred args, repred kwargs, runtime_devid,
-            plan_ndevs, runtime_ndevs as input and returns the generated code. Check examples/zigzag_ring_attention/zigzag_attn.py
+        emit_fn (Callable): special emit function for codegen, it accepts the node, repred args, repred kwargs, runtime_devid,
+            plan_ndevs, runtime_ndevs as input and returns the generated code. Check examples/customized_ops/ring_attention/zigzag_attn.py
             for more details.
+            Default: None.
+        transform_rules (Tuple[TransformRule]): a tuple of special TransformRules which will be used when partitioning the node.
+            Default: None.
+        input_gen_fn (Callable): input generator function for profiler, this function accepts the IRFwOperation as input and returns
+            the list of input tensors, which is used during operator profiling. kwargs are same as that in the input node. By default, the
+            profiler will use `torch.rand` for floating point data types and `torch.zeros` for special types like `torch.int64` and `torch.bool`.
+            However, input tensors' contents may influence the speed dramatically. The mask in attention and dispatched expert index in MoE
+            are real examples. To handle this scenario, user can provide the customized `input_gen_fn`.
             Default: None.
 
     Returns:
@@ -234,11 +255,11 @@ def register_op(annotation: Union[str, Callable], name: Optional[str] = None,
             kwarg_vals = args[ninputs:]
             for name, val in zip(kwarg_names, kwarg_vals):
                 kwargs[name] = val
-            return IRDimops(udfop, op_name, signature, [repr(anno)], tensors, **kwargs)
+            return IRDimops(udfop, op_name, signature, [repr(anno)], tensors, **kwargs, transform_rules=transform_rules)
 
         # step 4. register in CustomizedOps
         _logger.info(f'registering op {fsig}...')
-        CustomizedOps.register(fsig, udfop, code, fn, emit_fn)
+        CustomizedOps.register(fsig, udfop, code, fn, emit_fn, input_gen_fn)
         return fn
 
     return decorator

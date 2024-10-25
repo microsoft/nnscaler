@@ -204,7 +204,7 @@ class SignFx2Op:
 
         __ttemplate('neg'): function.Neg,
         '_operator.neg': function.Neg,
-        #
+
         __ttemplate('gt'): function.CompareGT,
         '_operator.gt': function.CompareGT,
         __ttemplate('lt'): function.CompareLT,
@@ -213,11 +213,11 @@ class SignFx2Op:
         '_operator.ge': function.CompareGE,
         __ttemplate('le'): function.CompareLE,
         '_operator.le': function.CompareLE,
-        #
+
         __ttemplate('sin'): function.Sin,
-        #
+
         __ttemplate('cos'): function.Cos,
-        #
+
         __tttemplate('view'): function.View,
         __tttemplate('contiguous'): function.Contiguous,
 
@@ -227,32 +227,32 @@ class SignFx2Op:
         __ftemplate('conv1d'): function.Conv1D,
         __ttemplate('conv_transpose1d'): function.ConvTranspose1D,
         __ftemplate('conv_transpose1d'): function.ConvTranspose1D,
-        #
+
         __ttemplate('conv2d'): function.Conv2D,
         __ftemplate('conv2d'): function.Conv2D,
         __ttemplate('conv_transpose2d'): function.ConvTranspose2D,
         __ftemplate('conv_transpose2d'): function.ConvTranspose2D,
-        #
+
         # __ttemplate('conv3d'): function.Conv3D,
-        #
-        # __ttemplate('pad'): function.Pad,
-        #
+
+        __ftemplate('pad'): function.Pad,
+
         # __ttemplate('select'): function.Select,
         #
         # __ttemplate('slice'): function.Slice,
         #
         # #pytorch1.11
         # __ttemplate('select_scatter'): function.SelectScatter,
-        #
+
         __tttemplate('repeat'): function.Repeat,
         __ttemplate('cat'): function.Cat,
         __ttemplate('stack'): function.Stack,
         __ttemplate('chunk'): function.Chunk,
         __ttemplate('flatten'): function.Flatten,
         # __ttemplate('roll'): function.Roll,
-        #
+
         # __ttemplate('adaptive_avg_pool1d'): function.AdaptiveAvgPool1d,
-        #
+
         # runtime functions
         __rtemplate('anchor'): function.GraphAnchor,
         __rtemplate('ifexpr'): function.Ifexpr,

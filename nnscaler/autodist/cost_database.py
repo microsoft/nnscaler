@@ -138,6 +138,12 @@ class CostDatabase:
         self.ignore_small_tensor_threshold = self.autodist_config.ignore_small_tensor_threshold
 
     def profile_comp(self, partition_degree: int):
+        def insert_profile_info(info: List[Tuple[str, str, ProfiledMetrics]]):
+            for sign, serialized, profiled_metrics in info:
+                _logger.debug(f'profiled {sign} in {serialized} with {profiled_metrics}')
+                if not self.db.exist_serialized(sign, serialized):
+                    self.db.insert(sign, serialized, profiled_metrics)
+
         if self.autodist_config.parallel_profile:
             _logger.info('Profiling in parallel')
             # use spawn to make sure the profiling process is independent from each other
@@ -155,10 +161,7 @@ class CostDatabase:
             # put queue.get() before join to avoid deadlock
             for p in processes:
                 ret = results.get()
-                for sign, serialized, profiled_metrics in ret:
-                    _logger.debug(f'profiled {sign} in {serialized} with {profiled_metrics}')
-                    if not self.db.exist_serialized(sign, serialized):
-                        self.db.insert(sign, serialized, profiled_metrics)
+                insert_profile_info(ret)
             results.close()
 
             for p in processes:
@@ -166,7 +169,8 @@ class CostDatabase:
         else:
             _logger.info('Profiling in serial')
             node_to_profile = _filter_nodes(self.graph, self.db)
-            _profile_nodes(node_to_profile, self.db, partition_degree, self.autodist_config.re_profile)
+            ret = _profile_nodes(node_to_profile, self.db, partition_degree, self.autodist_config.re_profile)
+            insert_profile_info(ret)
 
         self.db.dump_ops(self.comp_profile_path, override=True)
 

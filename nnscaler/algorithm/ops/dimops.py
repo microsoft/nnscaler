@@ -158,12 +158,12 @@ class DimSplitEinops(GenericDistAlgo):
         ous = list()
         for split, otensor in zip(rule.outputs(), node.outputs()):
             ous.append(transform(otensor, split))
-        kwargs = rule.modifier()(node.kwargs, idx, dim, num)
 
         sub_nodes = list()
         for nid in range(num):
             inputs = [t[nid] for t in ins]
             outputs = [t[nid] for t in ous]
+            kwargs = rule.modifier()(node.kwargs, idx, dim, num, nid)
             sub_node: IRDimops = node.new(inputs, outputs, **kwargs)
             sub_node.infer_shape()
             sub_nodes.append(sub_node)
@@ -233,7 +233,7 @@ class DimSplitEinops(GenericDistAlgo):
                     )
                 otransform.append(DimopSplit.D(dims))
         # modifier
-        def modify(kwargs: Dict, idx: int, dim: int, num: int):
+        def modify(kwargs: Dict, idx: int, dim: int, num: int, pos: int):
             updated_kwargs = dict(**kwargs)
             if adim in updated_kwargs:
                 assert updated_kwargs[adim] % num == 0, \

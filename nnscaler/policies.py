@@ -160,6 +160,9 @@ def pas_hybrid(graph: IRGraph, cfg: 'ComputeConfig'):
     """
     if not cfg.use_end2end:
         raise ValueError("Hybrid policy only supports end2end module")
+    if cfg.use_async_reducer:
+        raise ValueError("Hybrid policy does not support async reducer")
+
     ngpus: int = cfg.plan_ngpus
     nstages = cfg.pas_config.get('pipeline_nstages', cfg.plan_ngpus)
     nmicros = cfg.pas_config['pipeline_nmicros']
@@ -211,6 +214,9 @@ def pas_autodist(graph: IRGraph, cfg: 'ComputeConfig') -> IRGraph:
     explore_pipeline = pas_cfg.get('explore_pipeline', False)
     if explore_pipeline and not cfg.use_end2end:
         raise ValueError("explore_pipeline cannot be enabled if use_end2end is False")
+    if explore_pipeline and cfg.use_async_reducer:
+        raise ValueError("explore_pipeline cannot be enabled if use_async_reducer is True")
+
     pipeline_scheduler = pas_cfg.get('pipeline_scheduler', '1f1b')
     if pipeline_scheduler != '1f1b':
         raise ValueError(f"Only 1f1b scheduler is supported in autodist.")

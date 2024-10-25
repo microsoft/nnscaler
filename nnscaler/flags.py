@@ -47,8 +47,9 @@ class CompileFlag:
     use_zero = _to_bool('USE_ZERO')
     # use async communication to overlap gradient synchronization and backward computation
     async_reducer = _to_bool('ASYNC_REDUCER')  # use async reducer
-    # maximal reducer weight bytes for one allreduce (only effective for async): default 128MB
-    max_reducer_bucket = _to_int('MAX_REDUCER_BUCKET', default=137217728)
+    # maximal reducer weight bytes for one allreduce (only effective for async):
+    # default 0 means using the default value in reducer
+    max_reducer_bucket = _to_int('MAX_REDUCER_BUCKET', default=0)
     # perform reducer op on gradients, can be sum, avg, mean, max, min. Default is sum
     reducer_op = os.environ.get('REDUCER_OP', default='sum')
     # zero_ngroups is the number of subgroups in each original ZeRO gruop (e.g., weights reducer)
@@ -56,6 +57,12 @@ class CompileFlag:
     # it helps reduce communication cost of allgather weights in ZeRO, but increase the weights'
     # optimization states on each GPU.
     zero_ngroups = _to_int('ZERO_NUM_GROUPS', default=1)
+    # whether to use reduce scatter for zero (default False).
+    # By default we use `allreduce` for zero, which is due to
+    # 1) `reduce_scatter` will make some parameters have stale gradient after synchronization,
+    #    hence break the consistency of `.data` and `.grad` of parameters. Need to be careful when using optimizer.
+    # 2) `reduce_scatter`` doesn't significantly improve performance comparing with `allreduce`.
+    zero_use_reduce_scatter = _to_bool('ZERO_USE_REDUCE_SCATTER')
 
     # use automate mixture precision training, where weights, gradients
     # and optimizer status are kept in its original data type (can be float32),

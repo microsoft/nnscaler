@@ -150,10 +150,15 @@ def profile(node: IRFwOperation, func: Callable, shapes: Shapes, dtypes: DTypes,
         constructor = torch.zeros if dtype in (torch.int64, torch.int32, torch.bool) else torch.rand
         return constructor(tuple(shape), dtype=dtype, device=torch.cuda.current_device(), requires_grad=requires_grad)
 
-    tensors = tuple(
-        gen_torch_tensors(shape, dtype, requires_grad) if isinstance(value, IRTensor) else value \
-            for shape, dtype, requires_grad, value in zip(shapes, dtypes, requires_grads, values)
-    )
+    if CustomizedOps.kOpInputGen.get(node.signature, None) is not None:
+        in_tensors = CustomizedOps.kOpInputGen[node.signature](node)
+    else:
+        in_tensors = tuple(
+            gen_torch_tensors(shape, dtype, requires_grad) if isinstance(value, IRTensor) else value \
+                for shape, dtype, requires_grad, value in zip(shapes, dtypes, requires_grads, values)
+        )
+    # add clone() to avoid error "RuntimeError: a view of a leaf Variable that requires grad is being used in an in-place operation."
+    tensors = tuple([t.clone() if torch.is_tensor(t) else t for t in in_tensors])
     total_input_size = sum(t.numel() * t.element_size() for t in tensors if torch.is_tensor(t))
     require_backward = any([t.requires_grad for t in tensors if hasattr(t, 'requires_grad')])
     # FIXME: reconsidering requires_grad
@@ -173,6 +178,13 @@ def profile(node: IRFwOperation, func: Callable, shapes: Shapes, dtypes: DTypes,
 
     # run one sample
     outputs = func(*tensors, **train_kwargs)
+
+    # check whether func is a in-place operation
+    for t1, t2 in zip(in_tensors, tensors):
+        if torch.is_tensor(t1) and not torch.equal(t1, t2):
+            _logger.warning(f"{node}: in-place operation detected, the input tensor is modified, will not profile backward")
+            require_backward = False
+
     # only profile IRDimops currently, which has at least one tensor output and
     # may have non-tensor outputs (like list, tuple, dict, etc.). In addition,
     # we assume that non-tensor outputs will not be used in backward.

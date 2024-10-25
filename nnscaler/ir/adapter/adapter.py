@@ -4,6 +4,8 @@
 from typing import List, Optional, Dict
 import copy
 
+import torch
+
 from nnscaler.ir.adapter.prim import IRAdapterPrim, IdentityPrim
 from nnscaler.ir.tensor import IRSubTensor
 from nnscaler.ir.cten import IRCell
@@ -112,7 +114,7 @@ class IRAdapter(IRCell):
         inputs = []
         for itensor in self.inputs():
             if devid in itensor.device and itensor not in inputs:
-                inputs.append(itensor) 
+                inputs.append(itensor)
         outputs = []
         for otensor in self.outputs():
             if devid in otensor.device and otensor not in outputs:
@@ -173,6 +175,9 @@ class IRWeightReducer(IRCell):
     def __init__(self, weights: List[IRSubTensor], name='reducer'):
         if not all(isinstance(w, IRSubTensor) and w.is_param() for w in weights):
             raise RuntimeError("Expected a list of gradient IRSubTensor")
+        if len(set(w.dtype for w in weights)) != 1:
+            raise RuntimeError("All weights should have the same dtype")
+
         signature = None
         super().__init__(name, signature, len(weights), 0)
         for idx, weight in enumerate(weights):
@@ -180,7 +185,7 @@ class IRWeightReducer(IRCell):
 
     def isfw(self) -> bool:
         return False
-    
+
     def dispatch(self, device: int):
         return self
 
@@ -190,3 +195,23 @@ class IRWeightReducer(IRCell):
 
     def module_repr(self) -> str:
         return repr(self)
+
+    @classmethod
+    def from_weights(cls, weights: List[IRSubTensor], devices, name='reducer') -> List['IRWeightReducer']:
+        """!
+        Create reducers from a list of weights
+        """
+        if not weights:
+            return []
+
+        dtype_groups: Dict[torch.dtype, List[IRSubTensor]] = {}
+        for sub in weights:
+            dtype_groups.setdefault(sub.dtype, []).append(sub)
+
+        reducers = []
+        for typed_subws in dtype_groups.values():
+            reducer = IRWeightReducer(typed_subws, name)
+            reducer.device = devices
+            reducers.append(reducer)
+
+        return reducers

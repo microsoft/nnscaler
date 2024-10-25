@@ -615,8 +615,8 @@ class SPMDSolver:
             cur_p_fathers = self.p_fathers[i]
             partitions = [None] * p_num
             for j, p_father in enumerate(self.p_fathers[i]):
-                if p_father == -1:
-                    raise RuntimeError(f'find -1 in p_fathers for operator {i}')
+                if p_father == -1 or partitions[p_father] is not None:
+                    raise RuntimeError(f'illegal p_fathers {self.p_fathers[i]} for {self.get_operator(i).ir_cell}')
                 partitions[p_father] = self._op_partitions[i][j]
             self._op_partitions[i] = partitions
             self.p_fathers[i] = list(range(p_num))

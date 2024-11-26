@@ -1,4 +1,5 @@
-# Register a new operator/function
+# Customized Operator
+[//]: # (# Register a new operator/function)
 
 ## Overview
 
@@ -38,7 +39,7 @@ nnscaler.register_op('(h^ m^) kd+, kd+ n -> h^ m^ n', name='matmul_custom')(oper
 ```
 
 
-## Api Explains
+## API Explained
 
 ```python
 def register_op(

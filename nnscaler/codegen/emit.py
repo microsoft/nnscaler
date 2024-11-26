@@ -341,21 +341,31 @@ class FuncEmission(CodeEmission):
         tnames : Generator = (self.tensor_name(t) for t in tensors)
         return 'del ' + ', '.join(tnames)
 
-    def get_backward_callsite_io_tensors(self, bwop: IRCell) -> Tuple:
+    def get_backward_callsite_io_tensors(
+        self, bwop: IRCell
+    ) -> Tuple[List[IRSubTensor], List[IRSubTensor], List[IRSubTensor], List[IRSubTensor]]:
         """
         Get backward inputs and outputs
+
+        A tuple of 4 lists will be returned:
         ```
         (input_tensors, output_tensors, output_grads, input_grads)
         #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~  ~~~~~~~~~~~
         #inputs to 'backward'                         outputs of 'backward'
         ```
+        See `nnscaler.runtime.executor.backward` for more details.
 
-        @return input_tensors List[IRSubTensor]: forward input tensors (backward input)
-        @return output_tensors List[IRSubTensor]: forward output tensors (backward output)
-        @return output_grads List[IRSubTensor]: gradient of forward output tensors
-            (backward input)
-        @return input_grads List[IRSubTensor]: gradient of forward input tensors
-            (backward output)
+        Args:
+            bwop (IRCell): backward node
+
+        Returns:
+            tupe of 4 lists:
+            input_tensors (List[IRSubTensor]): forward input tensors (also backward iutput)
+            output_tensors (List[IRSubTensor]): forward output tensors (also backward input)
+            output_grads (List[IRSubTensor]): gradient of forward output tensors
+                (also backward input)
+            input_grads (List[IRSubTensor]): gradient of forward input tensors
+                (also backward output)
         """
         assert not bwop.isfw()
         fwop: IRCell = bwop.mirror

@@ -1,6 +1,7 @@
 #  Copyright (c) Microsoft Corporation.
 #  Licensed under the MIT License.
 
+from contextlib import contextmanager
 from typing import Optional, List, Tuple, Union, Any
 import torch
 import torch.nn.functional as TorchF
@@ -31,6 +32,49 @@ def anchor(name: str):
     return None
 
 
+@contextmanager
+def constant_folding(constant_folding: bool = True):
+    """
+    Context manager to enable/disable constant folding.
+    You can put it inside your forward function to control the constant folding behavior.
+    Please note as we don't set it as leaf function in tracer,
+    it will not be present in the traced graph.
+    """
+    from nnscaler.graph.tracer.metadata import _GLOBAL_OP_CONTEXT
+
+    old_constant_folding = _GLOBAL_OP_CONTEXT.constant_folding
+    _GLOBAL_OP_CONTEXT.constant_folding = constant_folding
+    try:
+        yield
+    finally:
+        _GLOBAL_OP_CONTEXT.constant_folding = old_constant_folding
+
+
+def no_constant_folding():
+    """
+    Context manager to disable constant folding.
+    """
+    return constant_folding(constant_folding=False)
+
+
+def fold_constant(a: Any) -> Any:
+    """
+    Fold a constant(non-tensor) if constant folding is enabled.
+
+    Please note this should be only used in `constant_folding` block
+    to make sure the input to a `constant_folding` block is not wrapped in an IRObject in the graph.
+
+    Example:
+    ```
+    a = some_func()  # the value is wrapped in IRObject in graph
+    with constant_folding():
+        a = fold_constant(a)  # unwrap value
+        torch.add(t, a)       #  in graph a is a constant
+    ```
+    """
+    return a
+
+
 def multiref(tensor: torch.Tensor, times: int) -> Tuple[torch.Tensor]:
     """
     identity forward. Create multiple same tensor.
@@ -39,6 +83,8 @@ def multiref(tensor: torch.Tensor, times: int) -> Tuple[torch.Tensor]:
 
 
 def to(tensor: torch.Tensor, dtype_or_device: Union[torch.device, torch.dtype]) -> torch.Tensor:
+    # deprecated
+    # keep it only for backward compatibility
     return tensor.to(dtype_or_device)
 
 

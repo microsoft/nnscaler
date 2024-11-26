@@ -1,4 +1,5 @@
-# Pytorch Lightning support
+# PyTorch Lightning
+[//]: # (# Pytorch Lightning support)
 
 We support Pytorch Lightning by `NnScalerStrategy` and `NnScalerPrecision`. You can use `nnscaler` strategy in pytorch lightning like this:
 
@@ -75,8 +76,9 @@ def merge_checkpoint(cls, checkpoint_files: List[str], output_file: str) -> None
 ```
 where `checkpoint_files` is a list of checkpoint files to merge, and `output_file` is the output file path.
 
-## Limitation
+## Limitations
 
-1. Only one optimizer is supported.
-2. Only one lr scheduler is supported.
-3. Only one parameter group is supported.
+Currently, nnScaler only supports: 
+- single parameter group.
+- single optimizer.
+- single learning rate scheduler.

@@ -136,6 +136,12 @@ class ScheduleCodeGen(FuncEmission):
                 f.write(code)
         return code
 
+    def emit_detach(self, tensor: IRTensor) -> str:
+        """
+        Emit detach code
+        """
+        return f'{self.tensor_name(tensor)} = {self.tensor_name(tensor)}.detach()'
+
     def emit_node(self, node: IRCell, force_no_grad: bool = False) -> List[str]:
         """
         Emit node / subgraph code
@@ -158,13 +164,13 @@ class ScheduleCodeGen(FuncEmission):
         if isinstance(unwrap_node, IRSegment):
             # emit forward segment
             if node.isfw():
-                code = fsign.format(
+                codes = [fsign.format(
                     outputs = outputs,
                     name = f"'{name}'",
                     model = f'model.{name}',
                     inputs = inputs,
                     req_grad = req_grad
-                )
+                )]
             else:
                 # get gradient computation arguments
                 input_tensors, output_tensors, output_grads, input_grads = \
@@ -173,38 +179,54 @@ class ScheduleCodeGen(FuncEmission):
                 for idx, tensor in enumerate(output_grads):
                     if isinstance(tensor, IRSubTensor) and tensor.is_loss():
                         output_grads[idx] = None
-                code = bsign.format(
+                codes = [bsign.format(
                     name = f"'{self.node_name(unwrap_node.mirror)}'",
                     input_grads = self.return_name(input_grads),
                     input_tensors = self.tuple_name(input_tensors, skip_attr=True, prefix_attr='model.'),
                     output_tensors = self.tuple_name(output_tensors, skip_attr=True, prefix_attr='model.'),
                     output_grads = self.tuple_name(output_grads, skip_attr=True, prefix_attr='model.')
-                )
+                )]
+                """
+                In the end2end mode, although the graph's output may contain tensors that requires grad,
+                like the loss tensor, the backward pass has been done by the nnscaler runtime by calling
+                `nnscaler.runtime.executor.backward` in the generated code. In other words, the returned
+                loss cannot be used by `loss.backward()`.
+                In pipeline parallelism, loss tensors of micro-batches are generated at the last stage and
+                transferred to remaining stages at the end for `_train_step` function. We add the detach
+                operation here so that the backward graph's tensors can be deallocated right after the
+                backward pass.
+                """
+                plan_outputs = IRCell.get_objects_from_complex(self.execplan.outputs())
+                for tensor in output_tensors:
+                    if not isinstance(tensor, IRTensor):
+                        continue
+                    if tensor in plan_outputs:
+                        codes.append(self.emit_detach(tensor))
 
         elif isinstance(unwrap_node, IRDataOperation):
-            code = f'{outputs} = {unwrap_node.signature}(*{inputs})'
+            codes = [f'{outputs} = {unwrap_node.signature}(*{inputs})']
 
         elif isinstance(unwrap_node, IRAdapter):
-            code = asign.format(
+            codes = [asign.format(
                 outputs = outputs,
                 model = f'model.{name}',
                 inputs = inputs,
                 req_grad = req_grad
-            )
+            )]
 
         elif isinstance(unwrap_node, IRWeightReducer):
-            code = asign.format(
+            codes = [asign.format(
                 outputs = outputs,
                 model=f'model.{name}',
                 inputs='()',
                 req_grad=req_grad
-            )
+            )]
 
         else:
             raise RuntimeError(f"Unspported node type: {type(unwrap_node)}")
 
         if CompileFlag.line_timer:
             type_str = type(unwrap_node).__name__
-            return [f'nnscaler.runtime.function.print_time({repr(type_str)})', code]
+            return [f'nnscaler.runtime.function.print_time({repr(type_str)})'] + codes
         else:
-            return [code]
+            return codes

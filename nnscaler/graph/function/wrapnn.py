@@ -14,6 +14,7 @@ Currently, this file wraps the following nn modules:
 At last, we provide a utility function to replace the original nn modules with the wrapped nn modules.
 """
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Tuple, List, Dict
 from typing import Tuple
@@ -127,10 +128,6 @@ def wrap_batchnorm2d_func(
         )
 
 
-def unwrap_if_irobject(x):
-    return x.value if isinstance(x, IRObject) and not isinstance(x, IRTensor) else x
-
-
 def batchnorm2d_annotation_fn(*inputs, **kwargs):
     assert (
         len(inputs) == 6
@@ -138,20 +135,20 @@ def batchnorm2d_annotation_fn(*inputs, **kwargs):
     input, weight, bias, running_mean, running_var, num_batches_tracked = inputs
     """
      Restrictions:
-    1. If `weight` is None, then `bias` must also be None. This is because in the absence of `weight`, 
+    1. If `weight` is None, then `bias` must also be None. This is because in the absence of `weight`,
        BatchNorm2d does not apply affine transformation, which means there is no need for `bias`.
-    2. If `running_mean` is None, then `running_var` and `num_batches_tracked` must also be None. 
-       This is because `running_mean` and `running_var` are used for tracking the statistics of 
-       the batch normalization during training. If `running_mean` is not provided, it implies 
-       that the module should not track statistics, hence `running_var` and `num_batches_tracked` 
+    2. If `running_mean` is None, then `running_var` and `num_batches_tracked` must also be None.
+       This is because `running_mean` and `running_var` are used for tracking the statistics of
+       the batch normalization during training. If `running_mean` is not provided, it implies
+       that the module should not track statistics, hence `running_var` and `num_batches_tracked`
        should also be absent.
        Reference: https://pytorch.org/docs/stable/generated/torch.nn.BatchNorm2d.html
     """
-    weight = unwrap_if_irobject(weight)
-    bias = unwrap_if_irobject(bias)
-    running_mean = unwrap_if_irobject(running_mean)
-    running_var = unwrap_if_irobject(running_var)
-    num_batches_tracked = unwrap_if_irobject(num_batches_tracked)
+    weight = IRObject.try_unwrap(weight)
+    bias = IRObject.try_unwrap(bias)
+    running_mean = IRObject.try_unwrap(running_mean)
+    running_var = IRObject.try_unwrap(running_var)
+    num_batches_tracked = IRObject.try_unwrap(num_batches_tracked)
 
     if weight is None:
         assert bias is None
@@ -270,11 +267,11 @@ register_op(batchnorm2d_annotation_fn, emit_fn=emit_batchnorm2d)(wrap_batchnorm2
 
 """
     This function wraps the original InstanceNorm2d forward function.
-    
+
     The logic in this function is exactly the same as in the original PyTorch implementation.
-    We copied the logic here to register it as a customized operation because nnscaler's 
-    `register_op` only supports functions, not nn.Module classes. Therefore, this function 
-    serves as a wrapper around the InstanceNorm2d forward logic, treating the entire function 
+    We copied the logic here to register it as a customized operation because nnscaler's
+    `register_op` only supports functions, not nn.Module classes. Therefore, this function
+    serves as a wrapper around the InstanceNorm2d forward logic, treating the entire function
     as a black-box leaf node in nnscaler.
 """
 
@@ -378,10 +375,10 @@ def instancenorm2d_annotation_fn(*inputs, **kwargs):
     ), "Expected 5 inputs: input, weight, bias, running_mean, running_var"
     input, weight, bias, running_mean, running_var = inputs
 
-    weight = unwrap_if_irobject(weight)
-    bias = unwrap_if_irobject(bias)
-    running_mean = unwrap_if_irobject(running_mean)
-    running_var = unwrap_if_irobject(running_var)
+    weight = IRObject.try_unwrap(weight)
+    bias = IRObject.try_unwrap(bias)
+    running_mean = IRObject.try_unwrap(running_mean)
+    running_var = IRObject.try_unwrap(running_var)
 
     if weight is None:
         assert bias is None
@@ -451,10 +448,16 @@ wrapped_modules = {
 }
 
 
-def convert_to_wrapnn(module: torch.nn.Module):
+_ORIGINAL_MODULE_ATTR = "__nnscaler_original_module__"
+
+
+def convert_to_wrapnn(module: torch.nn.Module) -> torch.nn.Module:
     """Traverse the module and replace the original nn module with its wrapped version
     if it is in the `wrapped_modules`.
     Currently `wrapped_modules` contains `BatchNorm2d` and `InstanceNorm2d`.
+
+    Please note the child modules of the input module will be replaced in-place.
+    You can use `undo_convert_to_wrapnn` to revert the changes.
 
     It is necessary to call this function on user instantiated model before parallelizing
     the it, otherwise the modules in `wrapped_modules` cannot be partitioned, but be always
@@ -464,10 +467,48 @@ def convert_to_wrapnn(module: torch.nn.Module):
     does not have the modules in `wrapped_modules`.
     """
     if type(module) in wrapped_modules:
-        return wrapped_modules[type(module)](module)
+        wrapped = wrapped_modules[type(module)](module)
+        # module will be save to children module if we use setattr(wrapped,...)
+        object.__setattr__(wrapped, _ORIGINAL_MODULE_ATTR, module)
+        return wrapped
 
     for name, child in module.named_children():
         module.add_module(
             name, convert_to_wrapnn(child)
         )  # will inplace replace the module with the same name
     return module
+
+
+def undo_convert_to_wrapnn(module: torch.nn.Module) -> torch.nn.Module:
+    """
+    Undo the effect of `convert_to_wrapnn` function.
+    """
+    if hasattr(module, _ORIGINAL_MODULE_ATTR):
+        origin_module = getattr(module, _ORIGINAL_MODULE_ATTR)
+        delattr(module, _ORIGINAL_MODULE_ATTR)
+        return origin_module
+
+    for name, child in module.named_children():
+        module.add_module(
+            name, undo_convert_to_wrapnn(child)
+        )  # will inplace replace the module with the same name
+    return module
+
+
+@contextmanager
+def wrapnn(module: torch.nn.Module, *, restore: bool = True):
+    """
+    wrap the nn module and undo the wrap after the context.
+    Args:
+        module: the nn module to wrap
+        restore: whether to restore the original module after the context
+    Returns:
+        the wrapped module
+    """
+    try:
+        yield convert_to_wrapnn(module)
+    finally:
+        # just restore the original module inplace
+        # return value is discarded
+        if restore:
+            undo_convert_to_wrapnn(module)

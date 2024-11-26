@@ -1,10 +1,10 @@
 #######
-Trainer
+Native Trainer
 #######
 
-We provide a ``Trainer`` class that can be used to train and evaluate models.
-It will firstly parallelize the model on multiple GPUs with ``parallelize`` API,
-and then train the model with the given dataset and optimizer in a distributed way.
+``nnScaler`` provides a ``Trainer`` class for training and evaluating model parallelization.
+Let's start from an example to demonstrate how to parallelize a model using the ``parallelize`` API.
+Next, we'll illustrate how to train the model across multiple GPUs using the provided dataset and optimizer.
 
 *********
 Arguments
@@ -429,6 +429,10 @@ Please note
    we will run validation on the validation dataset and save the validation loss to the checkpoint file.
    The validation run will ignore the ``val_every_n_train_steps`` and ``val_every_n_epochs`` configurations.
    If no valid dataset is provided, validation is skipped and ``valid_loss`` is set to ``train_loss`` by default.
+
+#. The sharded checkpoints will contain PyTorch's RNG state, but not Python's or NumPy's.
+   The checkpoint's RNG state will be resumed right before training start, which means the initialization stage will use `TrainerArgs.seed` instead.
+   Merged checkpoints will discard the RNG state.
 
 Other configs
 =============

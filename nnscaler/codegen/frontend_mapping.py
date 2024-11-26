@@ -11,7 +11,7 @@ from nnscaler.ir.cten import IRTensor
 from nnscaler.ir.operator import IRFwOperation
 from nnscaler.graph.parser.register import CustomizedOps
 
-from nnscaler.graph.parser.fx.parser import SELF_GETATTR_SIG
+from nnscaler.graph.parser.parser import SELF_GETATTR_SIG
 
 
 class Sign2EmitRule:

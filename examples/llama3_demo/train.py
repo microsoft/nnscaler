@@ -42,7 +42,7 @@ def prepare_data(max_seq_len, dataset_path=None):
     if dataset_path is None:
         dataset_path = f'./bookcorpus-{max_seq_len}'
 
-    dataset = datasets.load_dataset(dataset_id)['train']
+    dataset = datasets.load_dataset(dataset_id, trust_remote_code=True)['train']
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
     
     def _tokenize(sample):
@@ -271,4 +271,8 @@ def main():
 
 
 if __name__ == '__main__':
+    if os.getenv('DETERMINISTIC'):  # reduce randomness for integration test
+        os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+        torch.use_deterministic_algorithms(True)
+
     main()

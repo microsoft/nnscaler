@@ -8,9 +8,10 @@ from typing import List, Optional, Dict, Tuple, Callable
 import copy
 import numpy as np
 import logging
+from contextlib import contextmanager
 
 from nnscaler.ir.tensor import IRFullTensor, IRSubTensor, IndexMap, ValueMap
-from nnscaler.ir.adapter.prim import IRAdapterPrim
+from nnscaler.ir.adapter.prim import IRAdapterPrim, ReduceScatterPrim, AllToAllPrim
 from nnscaler.ir.adapter import IRAdapter
 from nnscaler.ir.adapter.prim import SelectPrim, MovePrim, SumPrim, MergeDimPrim
 from nnscaler.ir.adapter.prim import BroadcastPrim
@@ -31,10 +32,18 @@ if CompileFlag.disable_comm_fusion:
     _logger.warning('Detected disabling general communication fusion, which may have big impact on performance in certain cases.')
 
 
+@contextmanager
+def _temp_disable_reduce_scatter_adapter():
+    assert not CompileFlag.disable_reduce_scatter_adapter, "Already disabled"
+    CompileFlag.disable_reduce_scatter_adapter = True
+    yield
+    CompileFlag.disable_reduce_scatter_adapter = False
+
+
 class ConcurrentGener:
 
     @staticmethod
-    def gen(fptensors: List[IRSubTensor], fctensors: List[IRSubTensor], 
+    def gen(fptensors: List[IRSubTensor], fctensors: List[IRSubTensor],
             bptensors: List[IRSubTensor], bctensors: List[IRSubTensor],
             cost_fn: Optional[Callable] = None) -> Optional[IRAdapter]:
         """
@@ -90,7 +99,7 @@ class ConcurrentGener:
         # warnings.warn('The adapter is generated using P2P communication')
         if fadapter is None:
             fadapter = ConcurrentGener.gen_general(fptensors, fctensors, bptensors, bctensors)
-        
+
         if set(pdevs) == set(cdevs) and fadapter.mirror is not None:
             fadapter.differentiable = True
             fadapter.mirror.differentiable = True
@@ -98,7 +107,46 @@ class ConcurrentGener:
         return fadapter
 
     @staticmethod
-    def gen_intra_rvd(fptensors: List[IRSubTensor], fctensors: List[IRSubTensor], 
+    def _path(
+        path_fn: Callable,
+        ilayout: RVDLayout, olayout: RVDLayout,
+        cost_fn: Optional[Callable] = None
+    ) -> List[IRAdapterPrim]:
+        prims = path_fn(ilayout, olayout, cost_fn)
+        if any(isinstance(prim, AllToAllPrim) and not prim.is_valid() for prim in prims):
+            if not CompileFlag.disable_reduce_scatter_adapter \
+                and any(isinstance(prim, ReduceScatterPrim) for prim in prims):
+                _logger.warning(
+                    'Detected invalid AllToAllPrim, retrying with reduce-scatter disabled.'
+                    'Please report this issue to the developers.'
+                )
+                # the problem may be caused by the ReduceScatterPrim
+                # let's retry without it.
+                with _temp_disable_reduce_scatter_adapter():
+                    prims = path_fn(ilayout, olayout, cost_fn)
+
+        if any(not prim.is_valid() for prim in prims):
+            # will use `ConcurrentGener.gen_general` to generate adapter
+            raise RuntimeError('Invalid primitives detected. Please report this issue to the developers.')
+
+        return prims
+
+    @staticmethod
+    def _intra_path(
+        ilayout: RVDLayout, olayout: RVDLayout,
+        cost_fn: Optional[Callable] = None
+    ) -> List[IRAdapterPrim]:
+        return ConcurrentGener._path(IntraPathFinder.path, ilayout, olayout, cost_fn)
+
+    @staticmethod
+    def _inter_path(
+        ilayout: RVDLayout, olayout: RVDLayout,
+        cost_fn: Optional[Callable] = None
+    ) -> List[IRAdapterPrim]:
+        return ConcurrentGener._path(InterPathFinder.path, ilayout, olayout, cost_fn)
+
+    @staticmethod
+    def gen_intra_rvd(fptensors: List[IRSubTensor], fctensors: List[IRSubTensor],
                       bptensors: List[IRSubTensor], bctensors: List[IRSubTensor],
                       cost_fn: Optional[Callable] = None) -> IRAdapter:
         """
@@ -109,7 +157,7 @@ class ConcurrentGener:
         @param bptensors List[IRSubTensor]: backward produced tensors
         @param bctensors List[IRSubTensor]: backward consumed tensors
         @param cost_fn Optional[Callable]: takes in an IRAdapterPrim and outputs a cost in float
-        
+
         @return adapter IRAdapter: forward IRAdapter with backward (if has) in its .mirror attribute.
         """
         ftensor = fptensors[0].parent
@@ -124,7 +172,7 @@ class ConcurrentGener:
         assert all(t is not None for t in ctensors), f"empty device slot {ctensors}"
         olayout = RVDLayout.togrid(ftensor, ctensors)
         # get forward primitives
-        fprims = IntraPathFinder.path(ilayout, olayout, cost_fn)
+        fprims = ConcurrentGener._intra_path(ilayout, olayout, cost_fn)
 
         fadapter = IRAdapter(fptensors, fctensors)
         fadapter.prims = fprims
@@ -143,7 +191,7 @@ class ConcurrentGener:
             ilayout = RVDLayout.togrid(grad, ptensors)
             olayout = RVDLayout.togrid(grad, bctensors)
             # paths, bprims = ilayout.path(olayout)
-            bprims = IntraPathFinder.path(ilayout, olayout, cost_fn)
+            bprims = ConcurrentGener._intra_path(ilayout, olayout, cost_fn)
             # generate backward adapter
             badapter = IRAdapter(bptensors, bctensors)
             badapter.prims = bprims
@@ -152,7 +200,7 @@ class ConcurrentGener:
         return fadapter
 
     @staticmethod
-    def gen_inter_rvd(fptensors: List[IRSubTensor], fctensors: List[IRSubTensor], 
+    def gen_inter_rvd(fptensors: List[IRSubTensor], fctensors: List[IRSubTensor],
                       bptensors: List[IRSubTensor], bctensors: List[IRSubTensor],
                       cost_fn: Optional[Callable] = None) -> IRAdapter:
         """
@@ -170,7 +218,7 @@ class ConcurrentGener:
         ftensor = fptensors[0].parent
         ilayout = RVDLayout.togrid(ftensor, fptensors)
         olayout = RVDLayout.togrid(ftensor, fctensors)
-        fprims = InterPathFinder.path(ilayout, olayout, cost_fn)
+        fprims = ConcurrentGener._inter_path(ilayout, olayout, cost_fn)
         fadapter = IRAdapter(fptensors, fctensors)
         fadapter.prims = fprims
 
@@ -178,7 +226,7 @@ class ConcurrentGener:
         if len(bptensors) > 0 or len(bctensors) > 0:
             ilayout = RVDLayout.togrid(grad, bptensors)
             olayout = RVDLayout.togrid(grad, bctensors)
-            bprims = InterPathFinder.path(ilayout, olayout, cost_fn)
+            bprims = ConcurrentGener._inter_path(ilayout, olayout, cost_fn)
             badapter = IRAdapter(bptensors, bctensors)
             badapter.prims = bprims
             IRAdapter.make_pair(fadapter, badapter)
@@ -189,7 +237,7 @@ class ConcurrentGener:
                     bptensors: List[IRSubTensor], bctensors: List[IRSubTensor]) -> IRAdapter:
         """
         A general way to generate adapter.
-        
+
         @param ftensor IRFullTensor
         @return adapter IRAdapter
         """
@@ -250,7 +298,7 @@ class ConcurrentGener:
                     fuse_broadcast = False
                     break
         # fuse to broadcast
-        if fuse_broadcast:  
+        if fuse_broadcast:
             cdev_tensors, pdev_tensors = dict(), dict()
             for ptensor in ptensors:
                 pdev_tensors.setdefault(ptensor.device[0], []).append(ptensor)
@@ -278,7 +326,7 @@ class ConcurrentGener:
     def gen_subtensor(ctensor: IRSubTensor, ptensors: List[IRSubTensor], workload: Dict[int, int]) -> List[IRAdapterPrim]:
         """
         Generate communiction primitives for ctensor
-        
+
         @param ctensor IRSubTensor: the consumed tensor as destination
         @param ptensors List[IRSubTensor]: the produced tensors as source
 

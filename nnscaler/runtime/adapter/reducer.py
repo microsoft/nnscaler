@@ -3,6 +3,7 @@
 
 from typing import List, Dict, Tuple, Any, Callable, Optional, Set, Sequence
 from functools import partial
+import math
 import logging
 import torch
 from torch.utils.hooks import RemovableHandle
@@ -12,6 +13,33 @@ from nnscaler.profiler.timer import CudaTimer
 from nnscaler.flags import RuntimeFlag
 
 _logger = logging.getLogger(__name__)
+
+
+# According to https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#device-memory-accesses
+# Any address of a variable residing in global memory or returned by one of the memory allocation 
+# routines from the driver or runtime API is always aligned to at least 256 bytes.
+# But in our practice, we found that 16 bytes alignment is enough, it can be modified if unaligned access is detected.
+ALIGNED_BYTES = 16
+
+
+def _aligned_nbyte(nelement: int, element_size: int, align_size: int = ALIGNED_BYTES) -> int:
+    """
+    Align the number of elements, so the total byte size of elements is multiple of `align_size`
+    Returns:
+        the aligned number of bytes
+    """
+    if align_size % element_size != 0:
+        raise ValueError(f"align_size {align_size} must be divisible by element_size {element_size}")
+    return (nelement * element_size + align_size - 1) // align_size * align_size
+
+
+def _aligned_nelement(nelement: int, element_size: int, align_size: int = ALIGNED_BYTES) -> int:
+    """
+    Align the number of elements, so the total byte size of elements is multiple of `align_size`
+    Returns:
+        the aligned number of elements
+    """
+    return _aligned_nbyte(nelement, element_size, align_size) // element_size
 
 
 def _get_reduce_op(reduce_op: str) -> torch.distributed.ReduceOp:
@@ -39,6 +67,7 @@ class Bucket:
                  zero_subgroup: torch.distributed.ProcessGroup = None,
                  zero_crossgroup: torch.distributed.ProcessGroup = None,
                  zero_use_reduce_scatter: bool = False,
+                 align_size: int = ALIGNED_BYTES,
     ):
         """
         Create a communication unit for parameter allreduce.
@@ -57,6 +86,7 @@ class Bucket:
             zero_subgroup (torch.distributed.ProcessGroup): the subgroup for zero optimization the current rank belongs to
             zero_crossgroup (torch.distributed.ProcessGroup): the communication group for cross zero group allreduce when reduce scatter is enabled
             zero_use_reduce_scatter (bool): whether to use reduce scatter for zero optimization
+            align_size (int): the alignment size in bytes for each parameter
         """
 
         self._params: List[torch.nn.Parameter] = params
@@ -78,8 +108,12 @@ class Bucket:
         # the parameter exposed for optimizer
         self._param_for_optimizer: torch.nn.Parameter = None
         # total number of parameters
+        self._align_size: int = align_size
+        if self._align_size % ALIGNED_BYTES != 0:
+            raise ValueError(f"align_size {self._align_size} must be divisible by {ALIGNED_BYTES}")
+
         self._numel: int = sum(p.numel() for p in self._params)
-        self._padding: int = self._contiguous_grads.size(0) - self._numel
+        self._aligned_numel: int = sum(_aligned_nelement(p.nelement(), p.element_size(), self._align_size) for p in self._params)
 
         self._zero_subgroup = self._group if zero_subgroup is None else zero_subgroup
         self._zgroup_sz: int = torch.distributed.get_world_size(group=self._zero_subgroup)
@@ -108,6 +142,12 @@ class Bucket:
         """Whether enable zero for this bucket"""
         return self._zero
 
+    def get_aligned_numel(self, param) -> int:
+        """
+        Get the aligned number of elements for a parameter
+        """
+        return _aligned_nelement(param.nelement(), param.element_size(), self._align_size)
+
     def _group_reduce_scatter(self):
         """currently this function is only used in synchronous mode"""
         rank = torch.distributed.get_rank(group=self._zero_subgroup)
@@ -133,15 +173,14 @@ class Bucket:
         Build offset for each parameter
         This should only be called once during the construction of bucket.
         """
-        self._numel = sum(p.numel() for p in self._params)
         ofst = 0
         for param in self._params:
             self._pofset[param] = ofst
-            ofst += param.numel()
+            ofst += _aligned_nelement(param.nelement(), param.element_size(), self._align_size)
         # build parameter for optimizer (shared storage).
         # Its gradient will be updated everytime calling `self.sync_grads()`
         if not self._zero:
-            opt = self._contiguous_params[:self._numel]
+            opt = self._contiguous_params
         else:
             rank = torch.distributed.get_rank(group=self._zero_subgroup)
             assert len(self._contiguous_params) % self._zgroup_sz == 0
@@ -209,7 +248,7 @@ class Bucket:
             # same trick with FSDP and Megatron
             # reference: https://github.com/pytorch/pytorch/blob/v1.13.1/torch/distributed/fsdp/fully_sharded_data_parallel.py#L3177-L3188
             param_tmp = param.expand_as(param)
-            # gets its AccumulateGrad object.
+            # gets its AccumulateGrad object
             grad_acc = param_tmp.grad_fn.next_functions[0][0]
             hook = grad_acc.register_hook(partial(post_grad_hook, param))
             # grad_acc must keep, otherwise the hook won't take effect
@@ -253,7 +292,7 @@ class Bucket:
             grad = self._contiguous_grads.chunk(self._zgroup_sz, dim=0)[rank]
             self._param_for_optimizer.grad = grad
         else:
-            self._param_for_optimizer.grad = self._contiguous_grads[:self._numel]
+            self._param_for_optimizer.grad = self._contiguous_grads
 
         # apply post-hooks
         self._apply_post_hooks()
@@ -297,7 +336,7 @@ class Bucket:
         The pre-hooks will be applied one by one following the order of registration.
         """
         if len(self._pre_hooks) == 0: return
-        grads = self._contiguous_grads[:self._numel]
+        grads = self._contiguous_grads
         for hook in self._pre_hooks:
             hook(grads)
 
@@ -307,7 +346,7 @@ class Bucket:
         The post-hooks will be applied one by one following the order of registration.
         """
         if len(self._post_hooks) == 0: return
-        grads = self._contiguous_grads[:self._numel]
+        grads = self._contiguous_grads
         for hook in self._post_hooks:
             hook(grads)
 
@@ -335,6 +374,7 @@ class Reducer:
                  reduce_op: str = 'sum', async_op: bool = False,
                  zero: bool = False, zero_ngroups: int = 1,
                  zero_use_reduce_scatter: bool = False,
+                 align_size: int = ALIGNED_BYTES
     ):
         """
         Create a reducer applied on a set of weights for weight reduction
@@ -352,12 +392,14 @@ class Reducer:
             zero (bool): whether to apply ZeRO optimization on gradients
             zero_ngroups (int): number of ZeRO subgroups in the original ZeRO group
             zero_use_reduce_scatter (bool): whether to use reduce scatter for zero optimization
+            align_size (int): the alignment size in bytes for each parameter
         """
         self._params: List[torch.nn.Parameter] = list()
         self._param_ids: Set[int] = set()
         self._numel: int = 0
         self._ranks = ranks
         self._group = DeviceGroup().get_group(ranks)
+        self._wsz: int = torch.distributed.get_world_size(group=self._group)
 
         self._bucket_size: Optional[int] = max_bucket_size_bytes
         if not self._bucket_size and async_op:
@@ -369,6 +411,10 @@ class Reducer:
         self._async: bool = async_op
         self._zero: bool = zero
         self._zero_use_reduce_scatter = zero_use_reduce_scatter
+        self._align_size: int = align_size
+        if self._align_size % ALIGNED_BYTES != 0:
+            raise ValueError(f"align_size {self._align_size} must be divisible by {ALIGNED_BYTES}")
+
         # contiguous parameter buffer and gradient buffer
         self._contiguous_params: torch.Tensor = None
         self._contiguous_grads: torch.Tensor = None
@@ -489,7 +535,7 @@ class Reducer:
         )
         for param in self._params:
             if param.requires_grad:
-                cur_byte_size = param.nelement() * param.element_size()
+                cur_byte_size = _aligned_nelement(param.nelement(), param.element_size(), self._align_size) * param.element_size()
                 # also work when cur_byte_size > bucket_size
                 # It will go the `else` branch
                 # and finish the current bucket and start a new bucket.
@@ -510,8 +556,11 @@ class Reducer:
         starts, stops = [], []
         for params in seq_buckets:
             starts.append(buffer_length)
-            numel = sum(p.numel() for p in params)
-            padding = (len(self._ranks) - numel % len(self._ranks)) % len(self._ranks)
+            numel = sum(_aligned_nelement(p.nelement(), p.element_size(), self._align_size) for p in params)
+            # this pad is for zero, which needs numels in each Bucket can be divided by the number of ranks in this group * _align_size
+            # so that each chunck during zero can be divided by _align_size
+            align_nelements = self._align_size // params[0].element_size() * len(self._ranks)
+            padding = (align_nelements - numel % align_nelements) % len(self._ranks)
             buffer_length += numel + padding
             stops.append(buffer_length)
 
@@ -521,7 +570,7 @@ class Reducer:
             (buffer_length,), dtype=self._params[0].dtype,
             device=torch.cuda.current_device(), requires_grad=False)
         # parameter buffer
-        self._contiguous_params: torch.Tensor = torch.empty(
+        self._contiguous_params: torch.Tensor = torch.zeros(
             (buffer_length,), dtype=self._params[0].dtype,
             device=torch.cuda.current_device(), requires_grad=False)
 
@@ -534,7 +583,8 @@ class Reducer:
                 with torch.no_grad():
                     self._contiguous_params[ofst:ofst+param.numel()].copy_(param.data.view(-1))
                     param.data = self._contiguous_params[ofst:ofst+param.numel()].view(param.size())
-                ofst += param.numel()
+                aligned_nelements = _aligned_nelement(param.nelement(), param.element_size(), self._align_size)
+                ofst += aligned_nelements
             # initialize buckets
             bucket = Bucket(
                 params,
@@ -547,6 +597,7 @@ class Reducer:
                 self._zero_subgroup,
                 self._zero_crossgroup,
                 self._zero_use_reduce_scatter,
+                self._align_size,
             )
             buckets.append(bucket)
         torch.cuda.empty_cache()

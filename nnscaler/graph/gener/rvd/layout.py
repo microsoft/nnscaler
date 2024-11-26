@@ -1,7 +1,7 @@
 #  Copyright (c) Microsoft Corporation.
 #  Licensed under the MIT License.
 
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, Iterator, List, Tuple, Optional
 import copy
 import numpy as np
 
@@ -19,8 +19,27 @@ class RVDLayout:
     This class assumes a full-tensor can only be
     uniformly partitioned / replicated on dimensions and values.
 
-    A partition plan N-dim tensor layout can be represented as
+    DNN clusters are usually equipped with homogeneous accelerator devices.
+    Therefore, most parallelization plans partition operators evenly.
+    Thus, a partition plan N-dim tensor layout can be simply represented as
     <R, V, dim1, ...,dimN>: R (replica), V (value), dim_i (dimension)
+
+    which means:
+     1) R(i), the tensor is replicated to i copies;
+     2) V(j), value split, the tensor is decomposed to j copies with the same shape;
+     3) D(k1,k2,...,kn), uniformly partition the tensor into k1 parts in
+        the first dimension, k2 parts in the second dimension, so on
+        so forth.
+
+    We use RVD to denote the transformation of a tensor.
+    For example, R(1)V(2)D(1,2) indicates a 2-D pTensor
+    requires no replication, is decomposed into 2 vTensors with
+    the same shape, and each is partitioned into 2 vTensors by
+    partitioning the second axis.
+    Thus, R(1)V(2)D(1,2) can represent 4 vTensors.
+
+    RVD can represent both producer vTensors and consumer vTensors
+    as they are both transformed from the pTensor.
     """
 
     def __init__(self, ftensor: IRFullTensor, subtensors: List[IRSubTensor], mats: np.ndarray):
@@ -73,7 +92,7 @@ class RVDLayout:
     def __repr__(self):
         dscp = f'T{self.ftensor._id}<R({self.R}),V({self.V}),D({self.D})>'
         return dscp
-    
+
     def __copy__(self):
         tensors = []
         for t in self.mat.flatten():
@@ -91,7 +110,7 @@ class RVDLayout:
 
         @param layout RVDLayout
 
-        @return same bool: 
+        @return same bool:
         """
         if not isinstance(layout, RVDLayout):
             return False
@@ -109,7 +128,23 @@ class RVDLayout:
 
     def inner_transpose(self, dim: int, chunks: int):
         """
-        transpose ordering of tensor within a dimension.
+        Transpose ordering of tensor within a dimension.
+        The only goal is to shuffle the tensors (but RVD values are the same) in a dimension
+        to try to find a better path.
+
+        Currently only R abd V dim are using this function.
+        If dim is 0 (R), then the tensor is shuffled in the first dimension.
+            which means the dp units are shuffled.
+            For example, we have 8 devices, and R=4, chunks=2, then
+             before: devices of 0~3 replica: [0, 1], [2, 3], [4, 5], [6, 7]
+             after: devices of 0~3 replica: [0, 1], [4, 5], [2, 3], [6, 7]
+        If dim is 1 (V), we have similar behavior.
+            For example, we have 8 devices, and R=1 V=4, chunks=2, then
+             before: devices of 0~3 value partitions: [0, 1], [2, 3], [4, 5], [6, 7]
+             after: devices of 0~3 value partitions: [0, 1], [4, 5], [2, 3], [6, 7]
+
+        You can see after the shuffle, nothing is changed except the device assignment order.
+
         """
         assert 0 <= dim and dim < len(self._mats.shape)
         assert self.vec[dim] % chunks == 0
@@ -125,6 +160,24 @@ class RVDLayout:
 
     @staticmethod
     def dim2last(mat: np.ndarray, dim: int, chunk: int) -> np.ndarray:
+        """
+        Move the dimension that needs to be operated on to the last.
+        So in the following operation we can operate on the last dimension, like
+        ```
+        for itensors, otensors in zip(imat.reshape(-1, chunks), omat.reshape(-1, chunks)):
+                prims.append(primitive(itensors, otensors))
+        ```
+        For example, if we want to transform R(1)V(2)D(1, 4) to R(1)V(1)D(1, 8).
+        Essentially, we want to transform
+            `imat[*, *, 0, *, *]` and `imat[*, *, 1, *, *]`
+            to
+            `omat[*, *, 0, *, *, 0] and `omat[*, *, 0, *, *, 1]`
+
+            and reshape omat to R(1)V(1)D(1, 8)
+
+        We don't bother to use a nested for loop, instead,
+        we move the related dimension to the last, imat[*, *, V, *, *] -> imat[*, *, *, *, V]
+        """
         shape = list(mat.shape)
         assert shape[dim] % chunk == 0
         shape[dim] = shape[dim] // chunk
@@ -135,9 +188,29 @@ class RVDLayout:
         return mat
 
     @staticmethod
-    def grid(ftensor: IRFullTensor, r: int, v: int, dims: Tuple[int], devices: Optional[Tuple[int]] = None):
+    def grid(ftensor: IRFullTensor, r: int, v: int, dims: Tuple[int], devices: Optional[Tuple[int, ...]] = None):
         """
         partition a ftensor using grid layout of <r, v, *dims>
+
+        For device assignment, if devices is not None, assign devices in order.
+        For example, you have 8 devices, and r=2, v=2, dims=(1, 2) Then
+        1. Split devices into r groups, which mean the outmost is data parallelism.
+           So (0, 1, 2, 3) is a sub group, and (4, 5, 6, 7) is another sub group
+           These two sub groups are replicated.
+        2. Split devices in each r-group into v groups.
+           V is for value parallelism.
+           When V > 1, the value is partitioned.
+           That happens when previous forward op splits reducer dimention (the `+` in dimop annoation).
+           For the example above, (0, 1, 2, 3) will be splitted into (0, 1) and (2, 3)
+        3. Split devices in each v-group into dims groups. It is tensor parallelism,
+           and is the innermost.
+           So (0, 1) is splitted into (0,) and (1,)
+
+        Please note that is not the only way to assign devices. But it is our best guess.
+        `.inner_transpose()` can be used to shuffle the tensor within a dimension,
+        and hope to find a match for devices
+
+        TODO: We need to support more flexible device assignment.
         """
         dims = tuple(dims)
         def dummy_assign(tensor: IRSubTensor, devid: int):
@@ -147,7 +220,7 @@ class RVDLayout:
         mats = np.empty((r, v) + dims, dtype=IRSubTensor)
         all_subtensors = []
 
-        def iter_idx(dims: List[int]) -> Tuple[int]:
+        def iter_idx(dims: List[int]) -> Iterator[Tuple[int, ...]]:
             if len(dims) == 0:
                 yield ()
             else:
@@ -182,30 +255,44 @@ class RVDLayout:
     @staticmethod
     def togrid(ftensor: IRFullTensor, subtensors: List[IRSubTensor]):
         """
-        convert ftensor and subtensors into a RVDLayout.
+        Convert ftensor and subtensors into a RVDLayout.
+        Here we requires all subtensors are well formed, and can be organized as R(...)V(...)D(...) format.
 
-        If failed, raise error
+        Please note the devices are kept as it is, and may be different with how `.grid()` assigns the devices.
+
+        Args:
+            ftensor (IRFullTensor): full tensor
+            subtensors (List[IRSubTensor]): subtensors of the full tensor.
+        Returns:
+            RVDLayout: rvd layout
+        Raises:
+            RuntimeError: if subtensors are not well formed.
         """
         _replica: int = None
         _value: int = None
         _dims: List[int] = [None] * len(ftensor.shape)
+        # id(subtensor) -> [replica_index, value_index, dim1_index, dim2_index, ...]
+        # Plese note key is not subtensor.id, but id(subtensor)
         _tindex: Dict[int, List[int]] = dict()
 
         ndims = len(ftensor.shape)
 
+        # Key: subtensor id
+        # Please note subtensors with same indmap and valmap have the same tid.
+        # which indicates they are replicated.
         replicas: Dict[int, List[IRSubTensor]] = dict()
         vchunks: set = set()
         dchunks: List[set] = [set() for _ in range(ndims)]
 
         for subtensor in subtensors:
-            tid = id(subtensor)
+            oid = id(subtensor)
             # set up replica
             if subtensor.tid not in replicas:
                 replicas[subtensor.tid] = []
-            _tindex[tid] = [len(replicas[subtensor.tid])]
+            _tindex[oid] = [len(replicas[subtensor.tid])]
             replicas[subtensor.tid].append(subtensor)
             # setup value
-            _tindex[tid].append(subtensor.valmap[0])
+            _tindex[oid].append(subtensor.valmap[0])
             vchunks.add(subtensor.valmap[1])
             # setup dimensions
             for dim in range(ndims):
@@ -219,7 +306,7 @@ class RVDLayout:
                         f"full nele: {fnele}, sub nele: {snele}, start: {start}"
                     )
                 dchunks[dim].add(fnele // snele)
-                _tindex[tid].append(start // snele)
+                _tindex[oid].append(start // snele)
         # replica (R)
         nreplicas = set(len(ts) for ts in replicas.values())
         if len(nreplicas) != 1:
@@ -255,6 +342,7 @@ class RVDInspector:
         """
         import matplotlib.pyplot as plt
         from matplotlib.patches import Rectangle
+        import matplotlib.axes
 
         max_dev = max(
             max(t.device[0] for t in prvd.subtensors), max(t.device[0] for t in crvd.subtensors)
@@ -266,6 +354,7 @@ class RVDInspector:
         plt.close('all')
         plt.rcParams['figure.figsize'] = (4.0 * devlen, 7.0)
         fig, ax = plt.subplots()
+        ax: matplotlib.axes.Axes
 
         fontsize = 30
 
@@ -285,7 +374,7 @@ class RVDInspector:
             subx_nchunks = t.parent.shape[1] // t.shape[1]
             subw = recflen / subx_nchunks
             subx = x + subw * (t.indmap[1][0] // t.shape[1])
-            
+
             suby_nchunks = t.parent.shape[0] // t.shape[0]
             subh = recflen / suby_nchunks
             suby = y + subh * (t.indmap[0][0] // t.shape[0])
@@ -293,7 +382,7 @@ class RVDInspector:
             # if t.valmap != (0, 1):
             ax.text(x=x+recflen/2, y=y+recflen+recflen/2, s=f'val({t.valmap[0]}/{t.valmap[1]})',
                     fontsize=fontsize, ha='center', va='center', color='black')
-            
+
             subrec = Rectangle((subx, suby), subw, subh, color=color, ec='black', lw=2.0)
             ax.add_artist(rec)
             ax.add_artist(subrec)
@@ -311,9 +400,10 @@ class RVDInspector:
 
         ax.text(x=-1, y=0.5+recflen/2, s='Consumer',
                 fontsize=fontsize, ha='center', va='center', color='black')
-        
+
         for tick in ax.xaxis.get_major_ticks():
-            tick.label.set_fontsize(fontsize)
+            tick.label1.set_fontsize(fontsize)
+            tick.label2.set_fontsize(fontsize)
 
         ax.spines['bottom'].set_color('white')
         ax.spines['top'].set_color('white')
@@ -323,4 +413,3 @@ class RVDInspector:
         ax.get_yaxis().set_visible(False)
         plt.savefig(outfile)
 
-            

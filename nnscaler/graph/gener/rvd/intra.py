@@ -25,6 +25,10 @@ from nnscaler.graph.gener.rvd.layout import RVDLayout
 
 from nnscaler.graph.gener.utils import tensor_vd_repr
 
+from nnscaler.utils import classproperty
+from nnscaler.flags import CompileFlag
+
+
 _logger = logging.getLogger(__name__)
 TShape = Tuple[int, ...]
 TRVD = Tuple[int, ...]
@@ -104,7 +108,7 @@ class IntraTransition:
     @staticmethod
     def r2d(rvd: TRVD, dim: int, chunks: int) -> Tuple:
         """
-        intra-RVD primitive V->D: schunk
+        intra-RVD primitive R->D: schunk
 
         @param dim int: tensor axis
         @param chunks int: the number of chunks to transfer
@@ -120,9 +124,8 @@ class IntraTransition:
     @staticmethod
     def r2v(rvd: TRVD, chunks: int) -> Tuple:
         """
-        intra-RVD primitive V->D: schunk
+        intra-RVD primitive R->V: vchunk
 
-        @param dim int: tensor axis
         @param chunks int: the number of chunks to transfer
 
         @return rvd Tuple[int]: output RVD
@@ -173,13 +176,16 @@ class IntraTransition:
         """
         Transfer from source RVD to destination RVD.
         Get all possible device-placement choices for RVD
+        (for returned RVDLayout, only device placement are different.)
         given the fixed device placement of RVD.
 
-        @param src_layout RVDLayout: source ilayout
-        @param dst_rvd Tuple[int]: destination RVD
+        Args:
+            src_layout (RVDLayout): source ilayout
+            dst_rvd (Tuple[int, ...]): destination RVD
 
-        @return rets List[Tuple[GridLayout, List[IRAdapterPrim]], ...]:
-            tuple of pairs of <layout, [prims]> with each has a different device mapping.
+        Returns:
+            List[Tuple[GridLayout, List[IRAdapterPrim]], ...]:
+                tuple of pairs of <layout, [prims]> with each has a different device mapping.
         """
         src_rvd = src_layout.vec
         if src_rvd == dst_rvd: return [(src_layout, [])]
@@ -198,6 +204,7 @@ class IntraTransition:
         ilayouts: List[RVDLayout] = [src_layout]
         olayouts: List[RVDLayout] = [RVDLayout.grid(src_layout.ftensor, r=dst_rvd[0], v=dst_rvd[1], dims=dst_rvd[2:])]
         # setup ilayout choices
+        # add alternative choices for device placement with inner-transpose
         if decd in optional_dims:
             ftensor = src_layout.ftensor
             for k in range(2, src_rvd[decd]):
@@ -219,7 +226,7 @@ class IntraTransition:
                     otensor.cell = itensor.cell
                 prims = []
                 for itensors, otensors in zip(imat.reshape(-1, chunks), omat.reshape(-1, chunks)):
-                    prims.append(primitive(itensors, otensors))
+                    prims.append(primitive(itensors.tolist(), otensors.tolist()))
                 rets.append((olayout, prims))
         return rets
 
@@ -228,11 +235,29 @@ class IntraPathFinder:
     """
     intra-RVD Path finder for generating communication plans for RVDLayout
     """
-
+    # Key is configuration.
+    # Currently only CompileFlag.disable_reduce_scatter_adapter is considered
     # intra-shard: cached nodes. paths[shape][i][j] = List[int] of indices from (src -> dst]
-    _cached_intra_nodes: Dict[Tuple[TShape, int], Tuple[TRVD]] = {}
-    _cached_intra_edges: Dict[Tuple[TShape, int], np.ndarray] = {}
-    _cached_intra_paths: Dict[Tuple[TShape, int], Dict[TRVD, List[List[int]]]] = {}
+    _config_cached_intra_nodes: Dict[Tuple, Dict[Tuple[TShape, int], Tuple[TRVD]]] = {}
+    _config_cached_intra_edges: Dict[Tuple, Dict[Tuple[TShape, int], np.ndarray]] = {}
+    _config_cached_intra_paths: Dict[Tuple, Dict[Tuple[TShape, int], Dict[TRVD, List[List[int]]]]] = {}
+
+    @classproperty
+    def _cached_intra_nodes(cls):
+        return cls._config_cached_intra_nodes.setdefault((CompileFlag.disable_reduce_scatter_adapter,), {})
+
+    @classproperty
+    def _cached_intra_edges(cls):
+        return cls._config_cached_intra_edges.setdefault((CompileFlag.disable_reduce_scatter_adapter,), {})
+
+    @classproperty
+    def _cached_intra_paths(cls):
+        return cls._config_cached_intra_paths.setdefault((CompileFlag.disable_reduce_scatter_adapter,), {})
+
+    # type annotation because type cannot be inferred from `classproperty`
+    _cached_intra_nodes: Dict[Tuple[TShape, int], Tuple[TRVD]]
+    _cached_intra_edges: Dict[Tuple[TShape, int], np.ndarray]
+    _cached_intra_paths: Dict[Tuple[TShape, int], Dict[TRVD, List[List[int]]]]
 
     @staticmethod
     def path(ilayout: RVDLayout, olayout: RVDLayout,
@@ -307,17 +332,30 @@ class IntraPathFinder:
 
     @staticmethod
     def device_align(ilayout: RVDLayout, olayout: RVDLayout,
-                     rvd_path: Tuple[TRVD], _all_prims: Optional[None] = None) -> Tuple[bool, List[IRAdapterPrim]]:
+                     rvd_path: Tuple[TRVD, ...], _all_prims: Optional[None] = None) -> Tuple[bool, List[IRAdapterPrim]]:
         """
         Align devices for intra-RVD
+        We recursively search for the correct device mapping from `ilayout` to `olayout`
+        The success of the search is determined by the device placement of `ilayout` and `olayout`.
 
-        @param ilayouts RVDLayout: source layout
-        @param olayout RVDLayout: target layout with correct device mapping
-        @param rvd_hops: Tuple[TRVD]: the hops from ilayout to olayout, which
-            contains ilayout and olayout at beginning and last, respectively.
+        `rvd_path` is the transition path from ilayout to olayout.
+        The first item can be assumed ilayout (R/V/D are same but device placement may be different in recursive calls),
+        and the last item is olayout.
 
-        @return success bool: True if found device, else False.
-        @return primitives List[IRAdapterPrim]: the correspoinding primitives
+        The exit condition is when the length of `rvd_path` is 1,
+        which means ilayout and olayout have the same R/V/D,
+        and we just check the device placement are compatible (via `RVDLayout.align`).
+
+        Args:
+            ilayouts (RVDLayout): source layout
+            olayout (RVDLayout): target layout with correct device mapping
+            rvd_hops (Tuple[TRVD, ...]): the hops from ilayout to olayout, which
+                contains ilayout and olayout at beginning and last, respectively.
+            _all_prims (List[IRAdapterPrim]): the previous primitives, only for recursive calls
+        Returns:
+            Tuple[bool, List[IRAdapterPrim]]:
+                - success bool: True if found device, else False.
+                - primitives List[IRAdapterPrim]: the correspoinding primitives
         """
         _all_prims = [] if _all_prims is None else _all_prims
         assert ilayout.vec == rvd_path[0] and olayout.vec == rvd_path[-1]
@@ -424,15 +462,16 @@ class IntraPathFinder:
         return left + right[1:]
 
     @staticmethod
-    def get_device_space(ftensor: IRFullTensor, rvd_paths: List[TRVD], placement: Tuple[int]) -> Set[Tuple[int]]:
+    def get_device_space(ftensor: IRFullTensor, rvd_paths: List[TRVD], placement: Tuple[int, ...]) -> Set[Tuple[int, ...]]:
         """
-        Get all possible device placement of the last RVD given the rvd transition paths.
+        Get all possible device placement of the destination RVD given the rvd transition paths.
 
-        @param ftensor IRFullTensor
-        @param rvd_paths Tuple[TRVDS]: transition RVD paths from source to destination
-        @param placement Tuple[int]: device placement of the first RVD in rvd_paths
-
-        @return placements Set[Tuple[int]]: all possible device placement
+        Args:
+            ftensor (IRFullTensor): the full tensor
+            rvd_paths (List[TRVDS]): transition RVD paths from source to destination
+            placement (Tuple[int, ...]): device placement of the first RVD in rvd_paths
+        Returns:
+            Set[Tuple[int, ...]]: all possible device placement of the destination RVD
         """
         init, hops = rvd_paths[0], rvd_paths[1:]
         rvds: List[RVDLayout] = [RVDLayout.grid(ftensor, r=init[0], v=init[1], dims=init[2:], devices=placement)]
@@ -475,16 +514,13 @@ class IntraPathFinder:
     @staticmethod
     def get_rvd_space(ftensor: IRFullTensor, ndevs: int) -> List[Tuple[int, ...]]:
         """
-        Get all possible RVD representations given ftensor.
+        Get all possible RVD representations given ftensor and device number.
 
-        This space is pruned by limiting partition number of each RVD dimension
-        in the range of [min(ilayout[dim], olayout[dim]), max(ilayout[dim], olayout[dim])]
-
-        @param ftensor IRFullTensor
-        @param ilayout GridLayout: input layout
-        @param olayout GridLayout: output layout
-
-        @return layouts List[GridLayout]:
+        Args:
+            ftensor (IRFullTensor): the full tensor
+            ndevs (int): the number of devices
+        Returns:
+            List[Tuple[int, ...]]: all possible RVD representations
         """
         all_layouts: List[int] = []
 
@@ -527,7 +563,7 @@ class IntraPathFinder:
             olayout: RVDLayout = RVDLayout.grid(ftensor, r=hop[0], v=hop[1], dims=hop[2:])
             imat = RVDLayout.dim2last(ilayout.mat, decd, chunks)
             omat = RVDLayout.dim2last(olayout.mat, incd, chunks)
-            prim = primitive(imat.reshape(-1, chunks)[0], omat.reshape(-1, chunks)[0])
+            prim = primitive(imat.reshape(-1, chunks)[0].tolist(), omat.reshape(-1, chunks)[0].tolist())
             cost += cost_fn(prim)
             src = hop
         return cost
@@ -616,21 +652,22 @@ class IntraAutoPlacer:
                fw_src_rvd: TRVD, fw_dst_rvd: TRVD,
                bw_src_rvd: Optional[TRVD], bw_dst_rvd: Optional[TRVD],
                src_placement: List[int],
-               cost_fn: Optional[Callable] = None) -> Tuple[Tuple[int], float]:
+               cost_fn: Optional[Callable] = None) -> Tuple[Tuple[int, ...], float]:
         """
-        Search for a good device placement for
-        source and destination RVD partition
+        Search for a good device placement for destination RVD partition (fw_dst_rvd and bw_src_rvd)
 
-        @param shape Tuple[int]: full tensor shape
-        @param fw_src_rvd Tuple[int]: forward producer RVD layout vector
-        @param fw_dst_rvd Tuple[int]: forward consumer RVD layout vector
-        @param bw_src_rvd Optional[Tuple[int]]: backward producer RVD layout vector
-        @param bw_dst_rvd Optional[Tuple[int]]: backward consumer RVD layout vector
-        @param cost_fn Optional[Callable]: cost function of each primitive.
-            Default (None) will use communication volume as metrics
-
-        @return devices Tuple[int]: device sequence for RVD tensors
-        @return cost float: Cost of communication plan
+        Args:
+            shape (Tuple[int]): full tensor shape
+            fw_src_rvd (TRVD): forward producer RVD layout vector
+            fw_dst_rvd (TRVD): forward consumer RVD layout vector
+            bw_src_rvd (Optional[TRVD]): backward producer RVD layout vector
+            bw_dst_rvd (Optional[TRVD]): backward consumer RVD layout vector
+            src_placement (List[int]): device placement of source RVD
+            cost_fn (Optional[Callable]): cost function of each primitive.
+                Default (None) will use communication volume as metrics
+        Returns:
+            Tuple[int, ...]: best device placement for RVD tensors
+            float: Cost of communication plan
         """
         src_placement = tuple(src_placement)
         ftensor = IRFullTensor(shape, dtype=torch.float16)
@@ -661,6 +698,8 @@ class IntraAutoPlacer:
 
         placement = None
         # - if find, choose one
+        # FIXME: looks the above code (`devices = fw_consumer_devices` as a fallback) should be removed.
+        # so here we check whether we have found a valid placement.
         if len(devices) > 0:
             placement = list(devices)[0]
         # - if not find, keep forward one as optimal and adopt backup plan for backward one

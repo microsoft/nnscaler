@@ -10,6 +10,7 @@ from nnscaler.ir.operator import IRBpOperation, IRDataOperation
 
 from nnscaler.graph import IRGraph
 from nnscaler.graph import parser
+from nnscaler.graph.function.wrapnn import wrapnn
 
 from nnscaler.runtime.module import CubeModule
 from nnscaler.runtime.device import DeviceGroup
@@ -233,10 +234,11 @@ class SemanticModel:
                     dummy_input[str(name)] = value
                 self.dummy_input = dummy_input
             # parse graph
-            self._ir_graph = parser.convert_model(
-                self.model,
-                dummy_input=self.dummy_input,
-                attr_savedir=self.attr_savedir,
-                constant_folding=self.constant_folding
-            )
+            with wrapnn(self.model) as wrapped_model:
+                self._ir_graph = parser.convert_model(
+                    wrapped_model,
+                    dummy_input=self.dummy_input,
+                    attr_savedir=self.attr_savedir,
+                    constant_folding=self.constant_folding
+                )
             return self._ir_graph(*args)

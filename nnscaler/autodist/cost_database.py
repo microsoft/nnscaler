@@ -113,13 +113,12 @@ def _profile_graph(dilled_info: str, dev_id: int, partition_degree: int, re_prof
 
 class CostDatabase:
 
-    def __init__(self, graph: IRGraph, config: AutoDistConfig):
+    def __init__(self, graph: IRGraph, profile_dir: str, memory_granularity: int, ignore_small_tensor_threshold: int):
         self.comm_info = {}
 
         self.graph = graph
-        self.autodist_config = config
 
-        self.profile_dir = Path(config.profile_dir)
+        self.profile_dir = Path(profile_dir)
         self.db = ProfileDataBase()
         self.comp_profile_path = self.profile_dir / 'comp'
         if not self.comp_profile_path.exists():
@@ -134,17 +133,17 @@ class CostDatabase:
             with open(comm_dir / fname, 'r') as f:
                 self.comm_info[fname] = json.load(f)
 
-        self.memory_granularity = self.autodist_config.memory_granularity
-        self.ignore_small_tensor_threshold = self.autodist_config.ignore_small_tensor_threshold
+        self.memory_granularity = memory_granularity
+        self.ignore_small_tensor_threshold = ignore_small_tensor_threshold
 
-    def profile_comp(self, partition_degree: int):
+    def profile_comp(self, partition_degree: int, parallel_profile: bool, re_profile: bool):
         def insert_profile_info(info: List[Tuple[str, str, ProfiledMetrics]]):
             for sign, serialized, profiled_metrics in info:
                 _logger.debug(f'profiled {sign} in {serialized} with {profiled_metrics}')
                 if not self.db.exist_serialized(sign, serialized):
                     self.db.insert(sign, serialized, profiled_metrics)
 
-        if self.autodist_config.parallel_profile:
+        if parallel_profile:
             _logger.info('Profiling in parallel')
             # use spawn to make sure the profiling process is independent from each other
             # and the main process, this is also required by torch
@@ -154,7 +153,7 @@ class CostDatabase:
             processes = []
             for i in range(torch.cuda.device_count()):
                 p = mp_context.Process(target=_profile_graph,
-                                       args=(self.graph.dumps(), i, partition_degree, self.autodist_config.re_profile, self.comp_profile_path, results))
+                                       args=(self.graph.dumps(), i, partition_degree, re_profile, self.comp_profile_path, results))
                 processes.append(p)
                 p.start()
 
@@ -169,7 +168,7 @@ class CostDatabase:
         else:
             _logger.info('Profiling in serial')
             node_to_profile = _filter_nodes(self.graph, self.db)
-            ret = _profile_nodes(node_to_profile, self.db, partition_degree, self.autodist_config.re_profile)
+            ret = _profile_nodes(node_to_profile, self.db, partition_degree, re_profile)
             insert_profile_info(ret)
 
         self.db.dump_ops(self.comp_profile_path, override=True)
@@ -209,12 +208,31 @@ class CostDatabase:
             memory_results[memory_type] = mem
         return memory_results
 
-    def get_mem_and_buffer(self, op_partition, is_train: bool, stage_num: int):
+    def get_mem_and_buffer(
+        self, 
+        op_partition, 
+        is_train: bool, 
+        stage_num: int, 
+        world_size: int, 
+        plan_ngpus: int, 
+        zero_stage: int, 
+        zero_ngroups: int, 
+        opt_resident_coef: float, 
+        opt_transient_coef: float
+    ) -> Tuple[int, int, int, int, int]:
         """
         Get the memory consumption and buffer memory consumption of a partition option.
 
         Args:
             op_partition: the partition option to be calculated
+            is_train: whether the partition is for training
+            stage_num: the number of stages
+            world_size: the total number of devices
+            plan_ngpus: the number of GPUs planned
+            zero_stage: the zero optimization stage
+            zero_ngroups: the number of zero optimization groups
+            opt_resident_coef: the coefficient for optimizer resident memory
+            opt_transient_coef: the coefficient for optimizer transient memory
 
         Returns:
             node_mem: the memory consumption of the partition option
@@ -225,55 +243,51 @@ class CostDatabase:
         """
         memory_results = self.get_mems(op_partition)
         activation_mem = memory_results['train']
-        if not self.autodist_config.zero_stage in [0, 1]:
-            raise RuntimeError(
-                f'invalid zero stage {self.autodist_config.zero_stage}')
+        if zero_stage not in [0, 1]:
+            raise RuntimeError(f'invalid zero stage {zero_stage}')
+
         # estimate optimizer memory consumption for training.
         # no gradient no memory consumption,
         # weight_mem should be 0 when require_grad is false.
         opt_resident_mem, opt_transient_mem = 0, 0
         if is_train and memory_results['param'] > 0:
-            if self.autodist_config.zero_stage == 0:
+            if zero_stage == 0:
                 weight_mem = memory_results['param']
             else:
                 # if zero-1 is used, we assume the full weight is distributed equally
                 # among all devices
                 weight_mem = self.query_single_mem(op_partition, 'full_weight')
-            opt_resident_mem = self.autodist_config.opt_resident_coef * weight_mem
-            opt_transient_mem = self.autodist_config.opt_transient_coef * weight_mem
-            if self.autodist_config.zero_stage == 1:
+            opt_resident_mem = opt_resident_coef * weight_mem
+            opt_transient_mem = opt_transient_coef * weight_mem
+            if zero_stage == 1:
                 if op_partition.is_replicated():
-                    assert self.autodist_config.world_size % self.autodist_config.ngpus == 0
-                    scale_factor = self.autodist_config.world_size // self.autodist_config.ngpus
-                    divisor = scale_factor // self.autodist_config.zero_ngroups
+                    assert world_size % plan_ngpus == 0, f'world_size {world_size} is not divisible by ngpus {plan_ngpus}'
+                    scale_factor = world_size // plan_ngpus
+                    divisor = scale_factor // zero_ngroups
                 else:
-                    assert self.autodist_config.world_size % self.autodist_config.zero_ngroups == 0
-                    divisor = self.autodist_config.world_size // self.autodist_config.zero_ngroups
+                    assert world_size % zero_ngroups == 0
+                    divisor = world_size // zero_ngroups
                 opt_resident_mem = opt_resident_mem // divisor
                 opt_transient_mem = opt_transient_mem // divisor
 
         # optimizer state + saved activation tensors for backward + param
         # + gradients + buffer tensors (has deduplicated with the saved tensors)
-        node_mem = opt_resident_mem + memory_results[
-            'train'] + 2 * memory_results['param'] + memory_results['buffer']
-        node_mem = node_mem + (stage_num - 1) * activation_mem \
-            if is_train else node_mem
-        node_buffer = max(memory_results.values()) \
-            if is_train else memory_results['infer']
+        node_mem = opt_resident_mem + memory_results['train'] + 2 * memory_results['param'] + memory_results['buffer']
+        node_mem = node_mem + (stage_num - 1) * activation_mem if is_train else node_mem
+        node_buffer = max(memory_results.values()) if is_train else memory_results['infer']
 
         if node_mem != 0:
-
             def to_mb(x):
                 return x / 1024 / 1024
 
             _logger.debug(
                 f'{op_partition.operator.ir_cell.cid}, {op_partition.ir_cell}, '
-                + f'node mem: {to_mb(node_mem)} MB, ' +
-                f'activation mem: {to_mb(activation_mem)} MB, ' +
-                f'optimizer transient mem: {to_mb(opt_transient_mem)} MB')
+                + f'node mem: {to_mb(node_mem)} MB, '
+                + f'activation mem: {to_mb(activation_mem)} MB, '
+                + f'optimizer transient mem: {to_mb(opt_transient_mem)} MB'
+            )
 
-        return node_mem, node_buffer, activation_mem, opt_transient_mem, memory_results[
-            'input']
+        return node_mem, node_buffer, activation_mem, opt_transient_mem, memory_results['input']
 
     def query_single_mem(self, obj, memory_type, round=True) -> int:
         """

@@ -4,8 +4,6 @@
 from typing import Callable, Dict, List, Tuple, Optional, Set, Union
 from functools import partial
 import numpy as np
-import sys
-import copy
 
 from nnscaler.ir.tensor import IRFullTensor
 
@@ -17,7 +15,9 @@ from nnscaler.ir.adapter.prim import RDGatherPrim, RVGatherPrim
 
 from nnscaler.graph.gener.rvd.layout import RVDLayout
 from nnscaler.graph.gener.rvd.intra import IntraPathFinder
-from nnscaler.graph.gener.utils import tensor_vd_repr
+
+from nnscaler.utils import classproperty
+from nnscaler.flags import CompileFlag
 
 
 TShape = Tuple[int, ...]
@@ -140,6 +140,8 @@ class InterTransition:
         decd = [dim for dim, (d1, d2) in enumerate(zip(src_rvd, dst_rvd)) if d1 > d2]
         if len(incd) == 0 and len(decd) == 0:
             decd = [0]
+        # only support one dimension change
+        # this only happens when the device number changes
         if len(incd) + len(decd) != 1: return trans_fn
         if len(incd) == 1:
             incd = incd[0]
@@ -215,11 +217,28 @@ class InterPathFinder:
     """
     inter-RVD Path finder for generating communication plans for RVDLayout
     """
+    # Key is configuration.
+    # Currently only CompileFlag.disable_reduce_scatter_adapter is considered
+    _config_cached_inter_nodes: Dict[Tuple, Dict[Tuple[TShape, int, int], Tuple[Tuple[InterRVD]]]] = {}
+    _config_cached_inter_edges: Dict[Tuple, Dict[Tuple[TShape, int, int], Tuple[np.ndarray]]] = {}
+    _config_cached_inter_paths: Dict[Tuple, Dict[Tuple[TShape, int, int], Dict[TRVD, List[List[int]]]]] = {}
 
-    _cached_inter_nodes: Dict[Tuple[TShape, int, int], Tuple[Tuple[InterRVD]]] = {}
-    _cached_inter_edges: Dict[Tuple[TShape, int, int], Tuple[np.ndarray]] = {}
-    _cached_inter_paths: Dict[Tuple[TShape, int, int], Dict[TRVD, List[List[int]]]] = {}
+    @classproperty
+    def _cached_inter_nodes(cls):
+        return cls._config_cached_inter_nodes.setdefault((CompileFlag.disable_reduce_scatter_adapter,), {})
 
+    @classproperty
+    def _cached_inter_edges(cls):
+        return cls._config_cached_inter_edges.setdefault((CompileFlag.disable_reduce_scatter_adapter,), {})
+
+    @classproperty
+    def _cached_inter_paths(cls):
+        return cls._config_cached_inter_paths.setdefault((CompileFlag.disable_reduce_scatter_adapter,), {})
+
+    # type annotation because type cannot be inferred from `classproperty`
+    _cached_inter_nodes: Dict[Tuple[TShape, int, int], Tuple[Tuple[InterRVD]]]
+    _cached_inter_edges: Dict[Tuple[TShape, int, int], Tuple[np.ndarray]]
+    _cached_inter_paths: Dict[Tuple[TShape, int, int], Dict[TRVD, List[List[int]]]]
 
     @staticmethod
     def path(ilayout: RVDLayout, olayout: RVDLayout, cost_fn: Optional[Callable] = None) -> List[IRAdapterPrim]:
@@ -396,7 +415,7 @@ class InterPathFinder:
             IntraPathFinder._cached_intra_edges[(shape, src_ndevs)] = src_edges
             IntraPathFinder._cached_intra_paths[(shape, src_ndevs)] = {}
 
-        if (shape, dst_ndevs) in InterPathFinder._cached_inter_edges:
+        if (shape, dst_ndevs) in IntraPathFinder._cached_intra_nodes:
             dst_nodes = IntraPathFinder._cached_intra_nodes[(shape, dst_ndevs)]
             dst_edges = IntraPathFinder._cached_intra_edges[(shape, dst_ndevs)]
         else:

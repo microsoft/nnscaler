@@ -21,7 +21,7 @@ for i in range(N):
 # our code ends
 
 prof.disabled()
-prof.dump_stats('cube_RANK%d.prof' % torch.distributed.get_rank()) # or use TID/PID, if to profile multi-thread/-process program.
+prof.dump_stats('nnScaler_RANK%d.prof' % torch.distributed.get_rank()) # or use TID/PID, if to profile multi-thread/-process program.
 ```
 
 After the modification, run the Python file using the same command line with `torchrun` as usual.
@@ -30,7 +30,7 @@ After dumping the profiling data, we can use `snakeviz` to visualize it:
 
 ```shell
 pip install snakeviz
-snakeviz cube_RANK0.prof
+snakeviz nnScaler_RANK0.prof
 ```
 
 ### Use viztracer

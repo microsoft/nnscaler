@@ -385,23 +385,6 @@ class IRAdapterGener:
                     bctensors = bctensors + tuple(fwop.output(0).grad for fwop in input_producer[ftensor])
                 bctensors = expand_devices(bctensors, consumer=True)
                 assert all(len(ctensor.device) == 1 for ctensor in bctensors), "Not support for multi-device"
-                # special case for loss tensor:
-                # 1) Since loss is the output of the whole graph, we don't have a backward producer node for loss.
-                #    Therefore, bptensors is empty for loss tensor.
-                # 2) We must make sure bptensors to be non-empty to generate correct communication prims. If bptensor
-                #    is empty, grad communication (the backward adapter) will not be generated, so only forward 'all-reduce'
-                #    will be used. As a result, the loss tensor's requires_grad will be set to False at runtime.
-                # 3) According to loss's semantics in current deep learning, the backward prim should be `identity`. When
-                #    the loss tensor is partitioned along the value dimension, since it is reduced by `add` operation, it is
-                #    safe to use `identity` as the backward prim.
-                # 4) To generated `identity`, we follow the implementation at activation -> graph/segment output below: create
-                #    dummy producer tensor and assign device information. Note, it is equivalent to copy bptensors from bctensors.
-                if ftensor.is_loss() and ftensor.requires_grad:
-                    assert len(bptensors) == 0, f'expect no backward producer for loss tensor {ftensor}, but got {bproducers} with {bptensors}'
-                    assert ftensor in output_consumer, f'expect loss tensor {ftensor} in output_consumer'
-                    bptensors = tuple(fwop.input(0).grad for fwop in output_consumer[ftensor])
-                    bptensors = expand_devices(bptensors, producer=True)
-
 
             fadapters = []
 
@@ -414,13 +397,15 @@ class IRAdapterGener:
 
             # (activation -> graph/segment output) generation: generate communication adapters between
             # producer operators and graph/segment output tensors. Note graph/segment output tensors
-            # always require for full-shape/value for output, while consumers may partition them. Therefore,
+            # always require for full-shape/value for output, while producers may partition them. Therefore,
             # we need to additionally generate adapters for this case.
             if ftensor in output_consumer:
                 out_fctensors = tuple(fwop.input(0) for fwop in output_consumer[ftensor])
                 out_fctensors = expand_devices(out_fctensors, consumer=True)
-                # dedup adapter if the output is same with activation tensor
+                out_bptensors = [t.grad for t in out_fctensors if isinstance(t, IRSubTensor)]
+                # skip if the output is same with activation tensor
                 if set(out_fctensors) == set(fctensors) and \
+                   set(out_bptensors) == set(bptensors) and \
                    set(t.device[0] for t in out_fctensors) == set(t.device[0] for t in fctensors):
                     pass
                 else:

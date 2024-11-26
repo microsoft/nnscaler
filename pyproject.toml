@@ -16,6 +16,9 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
 ]
 
+[project.scripts]
+nnscaler-train = "nnscaler.cli.train:main"
+
 [project.urls]
 Homepage = "https://github.com/microsoft/nnscaler"
 

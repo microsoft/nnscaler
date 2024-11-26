@@ -431,7 +431,7 @@ if __name__ == "__main__":
     # add model name to FxModuleParser log
     fxparser_warning_path = args.log_dir / FXMODULE_PARSER_WARNING_FNAME
     file_handler = logging.FileHandler(fxparser_warning_path)
-    from  nnscaler.graph.parser.fx.parser import _logger
+    from  nnscaler.graph.parser.parser import _logger
     _logger.addHandler(file_handler)
     _logger.warning(f"\n{args.model_name}")
 

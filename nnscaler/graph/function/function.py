@@ -94,6 +94,15 @@ def Ifexpr(cond: Any, true_value: Any, false_value: Any, signature = None) -> IR
     )
 
 
+def FoldConstant(value: Any, signature = None):
+    if any_ir_object_satisfy(value, lambda x: isinstance(x, IRTensor)):
+        raise ValueError("FoldConstant doesn't support IRTensor")
+
+    # always return a constant
+    # no node will be created
+    return IRObject.try_unwrap(value)
+
+
 def MultiRef(tensor: IRTensor, times: int, signature = None):
     """
     nnscaler.runtime.function.multiref(itensor: torch.Tensor, times: int) -> Tuple[torch.Tensor]
@@ -2213,32 +2222,135 @@ def Dim(tensor, signature=None) -> Union[List[int], IRPyFunc]:
     return len(tensor.shape)
 
 
-def To(tensor: IRTensor, dtype_or_device=None, *, device=None, dtype=None, out=None, signature = None):
+def _resolve_overload_args(
+    args: List[Any],
+    kwargs: Dict[str, Any],
+    positional_arg_names: List[List[str]],
+    kwarg_names: List[List[str]],
+    arg_types: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Resolve the arguments of a function with multiple overloads.
+    """
+
+    def _find_first_invalid_arg_name(arg_values, overload_idx):
+        for arg_name in arg_values:
+            if arg_name not in positional_arg_names[overload_idx] \
+                and arg_name not in kwarg_names[overload_idx]:
+                return arg_name
+        return None
+
+    arg_values = dict(kwargs)
+
+    if args:
+        # some parameters are passed as positional arguments
+        # overload matching is done by checking the type of the first positional argument
+        # here we use unwrapped value,
+        # because if it's a wrapped IRObject, it's impossible for us to select the correct overload
+        arg0 = IRObject.try_unwrap(args[0])
+        for overload_idx in range(len(positional_arg_names)):
+            # if arg[0] is None, use the first overload
+            if arg0 is None or isinstance(arg0, arg_types[positional_arg_names[overload_idx][0]]):
+                if len(args) > len(positional_arg_names[overload_idx]):
+                    raise ValueError('Received too many positional arguments')
+
+                for i, arg in enumerate(args):
+                    arg_name = positional_arg_names[overload_idx][i]
+                    if arg_name in arg_values:
+                        raise ValueError(f'{arg_name} is specified as a keyword argument and as a positional argument')
+                    # TODO: check the type of arg
+                    #       Currently we assume that the type of arg is correct
+                    #       We may need to add type checking in the future
+                    #       when we know 100% how pytorch handles the overloads
+                    arg_values[arg_name] = arg
+
+                if invalid_arg_name := _find_first_invalid_arg_name(arg_values, overload_idx):
+                    raise ValueError(f'{invalid_arg_name} is not a valid argument for this overload')
+
+                break
+        else:
+            raise ValueError('Received an invalid combination of arguments')
+    else:
+        # no positional arguments are passed
+        # In this case, we dont' know which overload to use
+        # Here we will check the arguments and report error if it doesn't match any overloads.
+        invalids = [_find_first_invalid_arg_name(arg_values, i) for i in range(len(positional_arg_names))]
+        if all(invalids): # all overloads have error
+            # just report the invalid argument of first overload
+            raise ValueError(f'{invalids[0]} is not a valid argument')
+
+    return arg_values
+
+
+def To(
+    input: IRTensor,
+    *args,
+    **kwargs,
+):
     """
     torch.Tensor.to(*args, **kwargs) → Tensor
+    three overloads:
+    ```
+        to(Device device=None, ScalarType dtype=None, bool non_blocking=False, bool copy=False, *, MemoryFormat? memory_format=None)
+        to(ScalarType dtype, bool non_blocking=False, bool copy=False, *, MemoryFormat? memory_format=None)
+        to(Tensor tensor, bool non_blocking=False, bool copy=False, *, MemoryFormat? memory_format=None)
+    ```
+    Pytorch will try to match the overloads from top to bottom.
+    We will mimic the behavior here.
     """
-    assert out is None
-    # FIXME: support full version of torch.Tensor.to
-    dtype_or_device = dtype if dtype is not None else dtype_or_device
-    dtype_or_device = device if dtype_or_device is None else dtype_or_device
-    if isinstance(dtype_or_device, torch.device) or isinstance(device, torch.device):
-        warn_msg = 'Cube will handle the tensor device placement, the call of torch.Tensor.to(device=...) will be ignore, ' \
+    assert kwargs.pop('out', None) is None
+    signature = kwargs.pop('signature', 'torch.Tensor.to')
+
+    args_types ={
+        'device': (int, str, torch.device),
+        'dtype': torch.dtype,
+        'tensor': IRTensor,
+        'non_blocking': bool,
+        'copy': bool,
+        'memory_format': torch.memory_format,
+    }
+
+    positional_arg_names = [
+        ('device', 'dtype', 'non_blocking', 'copy'),  # 1st overload
+        ('dtype', 'non_blocking', 'copy'),            # 2nd overload
+        ('tensor', 'non_blocking', 'copy'),           # 3rd overload
+    ]
+
+    kwarg_names = [
+        ('memory_format',),
+        ('memory_format',),
+        ('memory_format',),
+    ]
+
+    arg_values = _resolve_overload_args(
+        args,
+        kwargs,
+        positional_arg_names,
+        kwarg_names,
+        args_types,
+    )
+
+    if arg_values.get('device', None) is not None:
+        warn_msg = 'nnscaler will handle the tensor device placement, the call of torch.Tensor.to(device=...) will be ignore, ' \
                    'if you really want to put the tensor on cpu to excute some op, please wrap all related ops in an independent function ' \
-                   'and using nnscaler.graph.parser.register to register this function.'
+                   'and using nnscaler.register_op to register this function.'
         _logger.warning(warn_msg)
-    # create "to" in cube runtime functions because dtype if not kwarg in torch.Tensor.to
-    signature = 'nnscaler.runtime.function.to'
+
     annos = ['* -> *']
-    if isinstance(dtype_or_device, torch.device):
-        # skip device movement as policy can determine device for the tensor.
-        return Identity(tensor)
-    elif isinstance(dtype_or_device, torch.dtype):
-        return IRDimops(To, 'to', signature, annos, [tensor], dtype_or_device=dtype_or_device)
-    elif isinstance(dtype_or_device, IRTensor):
-        dtype = dtype_or_device.dtype
-        return IRDimops(To, 'to', signature, annos, [tensor], dtype_or_device=dtype)
-    else:
-        raise RuntimeError(f'function.To with unknown arg: {dtype_or_device}')
+    if 'tensor' in arg_values:  # overload 3
+        # Here we keep tensor.dtype,
+        # and discard tensor.device, because we will handle the device placement
+        arg_values['dtype'] = arg_values['tensor'].dtype
+        arg_values.pop('tensor')
+        # TODO: It may be better if we wrap dtype in an IRObject but it will introduce a lot of code.
+        #       (e.g. we need to insert a getattr op in the graph)
+        return IRDimops(To, 'to', signature, annos, [input], **arg_values)
+    elif 'device' not in arg_values and 'dtype' in arg_values:  # overload 2
+        return IRDimops(To, 'to', signature, annos, [input], **arg_values)
+    else:  # overload 1
+        # remove device from kwargs because we will handle the device placement
+        filtered_kwargs = {k: v for k, v in arg_values.items() if k != 'device'}
+        return IRDimops(To, 'to', signature, annos, [input], **filtered_kwargs)
 
 
 def GetItem(a: Any, b: Any, signature = None) -> Union[Any, IRPyFunc]:
@@ -2693,23 +2805,19 @@ def Erf(input, *, out=None, signature=None):
     return IRDimops(Erf, 'erf', signature, annos, [input])
 
 
-def unwrap_if_irobject(x):
-        return x.value if isinstance(x, IRObject) else x
-
-
 def Conv1D(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1, signature=None):
     """
     torch.nn.functional.conv1d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1) → Tensor
     """
     if len(input.shape) not in [2, 3]:
         raise ValueError(f"Expected input tensor to have 2 or 3 dimensions, but got {input.shape}")
-    stride_val = unwrap_if_irobject(stride)
-    padding_val = unwrap_if_irobject(padding)
-    dilation_val = unwrap_if_irobject(dilation)
-    groups_val = unwrap_if_irobject(groups)
-    if isinstance(stride_val, int): 
+    stride_val = IRObject.try_unwrap(stride)
+    padding_val = IRObject.try_unwrap(padding)
+    dilation_val = IRObject.try_unwrap(dilation)
+    groups_val = IRObject.try_unwrap(groups)
+    if isinstance(stride_val, int):
         stride_val = (stride_val,)
-    if isinstance(dilation_val, int): 
+    if isinstance(dilation_val, int):
         dilation_val = (dilation_val,)
     kW = weight.shape[-1]
     effective_kernel_size = (kW - 1) * dilation_val[0]
@@ -2789,11 +2897,11 @@ def ConvTranspose1D(input, weight, bias=None, stride=1, padding=0, output_paddin
     """
     if len(input.shape) not in [2, 3]:
         raise ValueError(f"Expected input tensor to have 2 or 3 dimensions, but got {input.shape}")
-    stride_val = unwrap_if_irobject(stride)
-    padding_val = unwrap_if_irobject(padding)
-    output_padding_val = unwrap_if_irobject(output_padding)
-    dilation_val = unwrap_if_irobject(dilation)
-    groups_val = unwrap_if_irobject(groups)
+    stride_val = IRObject.try_unwrap(stride)
+    padding_val = IRObject.try_unwrap(padding)
+    output_padding_val = IRObject.try_unwrap(output_padding)
+    dilation_val = IRObject.try_unwrap(dilation)
+    groups_val = IRObject.try_unwrap(groups)
     if isinstance(stride_val, int):
         stride_val = (stride_val,)
     if isinstance(padding_val, int):
@@ -2828,7 +2936,7 @@ def ConvTranspose1D(input, weight, bias=None, stride=1, padding=0, output_paddin
                     [f'(groups group_size^) {iW}, (groups group_size^) oC {kW}, oC -> (groups oC) {oW}']
             return IRDimops(ConvTranspose1D, 'conv_transpose1d', signature, annos, [input, weight, bias],
                         stride=stride, padding=padding, output_padding=output_padding, groups=groups, dilation=dilation)
-    if len(input.shape) == 3:    
+    if len(input.shape) == 3:
         if bias is None:
             annos = [f'n iC+ {iW}, iC+ oC {kW} -> n oC {oW}'] if groups_val == 1 else \
                     [f'n (groups group_size^) {iW}, (groups group_size^) oC {kW} -> n (groups oC) {oW}']
@@ -2850,13 +2958,13 @@ def Conv2D(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1, 
     """
     if len(input.shape) not in [3, 4]:
         raise ValueError(f"Expected input tensor to have 3 or 4 dimensions, but got {input.shape}")
-    stride_val = unwrap_if_irobject(stride)
-    padding_val = unwrap_if_irobject(padding)
-    dilation_val = unwrap_if_irobject(dilation)
-    groups_val = unwrap_if_irobject(groups)
-    if isinstance(stride_val, int): 
+    stride_val = IRObject.try_unwrap(stride)
+    padding_val = IRObject.try_unwrap(padding)
+    dilation_val = IRObject.try_unwrap(dilation)
+    groups_val = IRObject.try_unwrap(groups)
+    if isinstance(stride_val, int):
         stride_val = (stride_val, stride_val)
-    if isinstance(dilation_val, int): 
+    if isinstance(dilation_val, int):
         dilation_val = (dilation_val, dilation_val)
     if isinstance(padding_val, str):
         if padding_val == 'same':
@@ -2941,18 +3049,18 @@ def ConvTranspose2D(input, weight, bias=None, stride=1, padding=0, output_paddin
     """
     if len(input.shape) not in [3, 4]:
         raise ValueError(f"Expected input tensor to have 3 or 4 dimensions, but got {input.shape}")
-    stride_val = unwrap_if_irobject(stride)
-    padding_val = unwrap_if_irobject(padding)
-    output_padding_val = unwrap_if_irobject(output_padding)
-    dilation_val = unwrap_if_irobject(dilation)
-    groups_val = unwrap_if_irobject(groups)
-    if isinstance(stride_val, int): 
+    stride_val = IRObject.try_unwrap(stride)
+    padding_val = IRObject.try_unwrap(padding)
+    output_padding_val = IRObject.try_unwrap(output_padding)
+    dilation_val = IRObject.try_unwrap(dilation)
+    groups_val = IRObject.try_unwrap(groups)
+    if isinstance(stride_val, int):
         stride_val = (stride_val, stride_val)
-    if isinstance(padding_val, int): 
+    if isinstance(padding_val, int):
         padding_val = (padding_val, padding_val)
-    if isinstance(output_padding_val, int): 
+    if isinstance(output_padding_val, int):
         output_padding_val = (output_padding_val, output_padding_val)
-    if isinstance(dilation_val, int): 
+    if isinstance(dilation_val, int):
         dilation_val = (dilation_val, dilation_val)
     if not (len(stride_val) == 2 and len(padding_val) == 2 and len(output_padding_val) == 2 and len(dilation_val) == 2):
         raise ValueError("stride, padding, output_padding, and dilation must have a length of 2")
@@ -2979,7 +3087,7 @@ def ConvTranspose2D(input, weight, bias=None, stride=1, padding=0, output_paddin
                     [f'(groups group_size^) {iH} {iW}, (groups group_size^) oC {kH} {kW}, oC -> (groups oC) {oH} {oW}']
             return IRDimops(ConvTranspose2D, 'conv_transpose2d', signature, annos, [input, weight, bias],
                             stride=stride, padding=padding, output_padding=output_padding, groups=groups, dilation=dilation)
-    if len(input.shape) == 4:    
+    if len(input.shape) == 4:
         if bias is None:
             annos = [f'n iC+ {iH} {iW}, iC+ oC {kH} {kW} -> n oC {oH} {oW}'] if groups_val == 1 else \
                     [f'n (groups group_size^) {iH} {iW}, (groups group_size^) oC {kH} {kW} -> n (groups oC) {oH} {oW}']

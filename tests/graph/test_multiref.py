@@ -1,8 +1,9 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 """
 pytest unit_tests/graph/test_multiref.py
 """
-#  Copyright (c) Microsoft Corporation.
-#  Licensed under the MIT License.
 
 import torch
 import logging

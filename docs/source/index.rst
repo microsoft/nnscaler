@@ -45,9 +45,9 @@ Get Started
 ===========
 
 * :doc:`quickstart`
-* :doc:`llama3_demo_example`
-* :doc:`llama3_8b_128k_example`
-* :doc:`nanogpt_example`
+* :doc:`examples/llama3_demo`
+* :doc:`examples/llama`
+* :doc:`examples/nanogpt`
 
 
 Reference
@@ -91,7 +91,7 @@ For any questions or inquiries, please contact us at nnscaler@service.microsoft.
    :caption: Get Started
 
    self
-   install_from_source
+   installation
    quickstart
 
 .. toctree::
@@ -99,9 +99,12 @@ For any questions or inquiries, please contact us at nnscaler@service.microsoft.
    :hidden:
    :caption: Examples
 
-   llama3_demo_example
-   llama3_8b_128k_example
-   nanogpt_example
+   examples/llama3_demo
+   examples/llama
+   examples/dagan
+   examples/vit
+   examples/deepseek
+   examples/nanogpt
 
 .. toctree::
    :maxdepth: 1

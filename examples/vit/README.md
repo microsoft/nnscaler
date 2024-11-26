@@ -1,8 +1,10 @@
-# Introduction
+# ViT Example
+
+## Introduction
 
 This example demonstrates how to use nnscaler to fine-tuning a transformer model. Here we use ViT as an example.
 
-# Requirements
+## Requirements
 
 To run this example, you need to install the packages listed in the `requirements.txt` file. You can install them by running the following command:
 
@@ -17,7 +19,7 @@ pip install -r requirements.txt
 The implementation is inspired by [here](https://medium.com/@supersjgk/fine-tuning-vision-transformer-with-hugging-face-and-pytorch-df19839d5396). Many thanks to the author.
 
 
-## Run
+### Run
 
 First go to `examples/vit` directory, You can use the following command to run the example:
 

@@ -1,6 +1,6 @@
-#######
+##############
 Native Trainer
-#######
+##############
 
 ``nnScaler`` provides a ``Trainer`` class for training and evaluating model parallelization.
 Let's start from an example to demonstrate how to parallelize a model using the ``parallelize`` API.

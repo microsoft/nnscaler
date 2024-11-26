@@ -218,7 +218,7 @@ Flash Attention Problems
 ---------------------------------------------
 
 When using flash attention, it must be registered with ``register_op`` API.
-Check :doc:`the llama 3 example <llama3_8b_128k_example>` for its usage.
+Check :doc:`the llama 3 example <examples/llama>` for its usage.
 
 Example stacktrace: ::
 
@@ -259,7 +259,7 @@ Please try the related import command outside nnScaler.
 If it still fails, please refer to `flash attention <https://github.com/Dao-AILab/flash-attention>`_'s docs.
 
 If your ``flash-attn`` package is installed from pip,
-you can try to use a wheel its `release page <https://github.com/Dao-AILab/flash-attention/releases>_`
+you can try to use a wheel its `release page <https://github.com/Dao-AILab/flash-attention/releases>`_
 which matches your environment more accurately.
 
 Example stacktrace: ::

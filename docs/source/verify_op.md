@@ -30,7 +30,6 @@ This configuration helps ensure that the operation's partitioning logic is valid
 by specifying the function signature, arguments, expected outputs, and partitioning options.
 
 ## Example of Conv2D
-```python:
 This is used to verify that Conv2D's partition configuration is correct. This configuration defines a basic Conv2D operation with input Tensor, convolution kernel, and bias.
 ```python
 @dataclass

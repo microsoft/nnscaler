@@ -1,7 +1,6 @@
 build
 coverage
 furo
-lightning
 mock
 myst-parser
 pre-commit
@@ -9,11 +8,12 @@ pytest
 pytest-cov
 pytest-mock
 scikit-learn
+lightning
 sphinx
 sphinxcontrib-napoleon
 tabulate
-tensorboard
 tox
 tox-conda
-wandb
 yapf
+wandb
+tensorboard

@@ -12,7 +12,7 @@ from collections import defaultdict
 import torch
 import torch.distributed as dist
 
-from nnscaler.graph.parser.fx.parser import FxModuleParser
+from nnscaler.graph.parser import FxModuleParser
 
 from nnscaler.runtime.device import DeviceGroup
 from nnscaler.runtime.adapter.reducer import Reducer
@@ -240,7 +240,8 @@ class CubeModule(torch.nn.Module):
             # we should use `parameters_for_optimizer` here since calculating gnorm
             # is ahead of the optimizer step. When ZeRO is enabled, each device only
             # maintains a subset of the parameters. As a result, `param_names` may not
-            # align with the value of `reducer.parameters_for_optimizer()`.
+            # align with the value of `reducer.parameters_for_optimizer()`, only part of
+            # parameters assigned to a bucket will be shown in `reducer.parameters_for_optimizer()`.
             params_info = ParamsInfo(reducer.ranks, reducer.parameters_for_optimizer(),
                                      param_names, reducer.zero_ngroups)
             params_info_for_gnorm.append(params_info)
@@ -1092,9 +1093,10 @@ class ParallelModule(CubeModule):
                 pstart, pend = 0, 0
                 for param in bucket.params:
                     pstart = pend
-                    pend += param.numel()
+                    pend = pstart + bucket.get_aligned_numel(param)
+                    pend_without_padding = pstart + param.numel()
                     model_idx = model_params_id.index(id(param))
-                    model_idx2opt_idx[model_idx] = (opt_idx, pstart, pend, param.shape)
+                    model_idx2opt_idx[model_idx] = (opt_idx, pstart, pend_without_padding, param.shape)
                 assert len(bucket._contiguous_params.shape) == 1
                 opt_idx2ranks[opt_idx] = (sub_ranks, bucket._contiguous_params.shape[0])
                 opt_idx += 1

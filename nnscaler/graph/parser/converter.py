@@ -12,10 +12,10 @@ from nnscaler.graph.parser.register import CustomizedOps
 from nnscaler.graph import IRGraph
 from nnscaler.flags import CompileFlag
 
-from nnscaler.graph.parser.fx.parser import FxModuleParser
-from nnscaler.graph.parser.fx.concrete_trace_utils import concrete_trace
-from nnscaler.graph.parser.fx.concrete_trace_utils.wrap_utils import Location, is_autograd_apply, LeafWrapInfo
-from nnscaler.graph.parser.fx.concrete_trace_utils.torch_fx_patcher import side_effectful_inplace_ops
+from nnscaler.graph.parser import FxModuleParser
+from nnscaler.graph.tracer import concrete_trace
+from nnscaler.graph.tracer.wrap_utils import Location, is_autograd_apply, LeafWrapInfo
+from nnscaler.graph.tracer.torch_fx_patcher import side_effectful_inplace_ops
 
 import nnscaler.runtime.function as cube_rt_function
 
@@ -82,8 +82,20 @@ def to_fx_graph(model: torch.nn.Module, dummy_input) -> torch.fx.GraphModule:
     autowrap_funcs = [fn for fn in autowrap_funcs if not is_autograd_apply(fn)]
     leaf_functions = {func: LeafWrapInfo([], True, None) for func in autowrap_funcs if func is not None}
 
+    # importlib functions
+    # currently only import_module is handled in the code
+    import importlib
+    leaf_functions.update({
+        func: LeafWrapInfo([Location(importlib, func.__name__)], False, None)
+        for func in [importlib.import_module]
+    })
+
     # get cube runtime functions
-    cube_rt_funcs = [cube_rt_function.anchor, cube_rt_function.ifexpr]
+    cube_rt_funcs = [
+        cube_rt_function.anchor,
+        cube_rt_function.ifexpr,
+        cube_rt_function.fold_constant
+    ]
     leaf_functions.update({
         func: LeafWrapInfo([Location(cube_rt_function, func.__name__)], True, None)
         for func in cube_rt_funcs

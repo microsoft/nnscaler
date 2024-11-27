@@ -108,8 +108,26 @@ def reduce_scatter(tensor: torch.Tensor, dim: int,
 
 
 def all_to_all(tensor: torch.Tensor, idim: int, odim: int,
-               ranks: Tuple[int], async_op=False) -> torch.Tensor:
-    """All-to-all"""
+               ranks: Tuple[int, ...], async_op=False) -> torch.Tensor:
+    """
+    All-to-all (but different with torch.distributed.all_to_all)
+
+    1. Each device will split the tensor into `len(ranks)` chunks on `odim`
+    2. Send each chunk to the corresponding device with `torch.distributed.all_to_all`.
+    3. Concatenate the received chunks on `idim`.
+
+    So the overall work is to change the tensor partitioning from `idim` to `odim`.
+
+    Args:
+        tensor (torch.Tensor): input tensor
+        idim (int): the dimension to concatenate the received chunks
+        odim (int): the dimension to split the tensor
+        ranks (Tuple[int]): the order of split tensor.
+        async_op (bool): whether to use async communication
+
+    Returns:
+        torch.Tensor: the output tensor
+    """
     if not async_op:
         CudaTimer().start(field_name='comm', predefined=True)
     itensors = list(tensor.chunk(len(ranks), dim=odim))
@@ -139,11 +157,11 @@ def all_to_all_single(tensor: torch.Tensor, idim: int, odim: int,
     group = DeviceGroup().get_group(ranks)
     otensor = torch.empty_like(tensor)
     work = torch.distributed.all_to_all_single(otensor, tensor, group=group, async_op=async_op)
-    
+
     def all2all_callback(t):
         t = t.transpose(0, odim) if odim != 0 else t
         return torch.concat(tuple(t.chunk(len(ranks), dim=odim)), dim=idim)
-    
+
     if work:
         AsyncCommHandler().submit(tensor, [work], all2all_callback)
     else:

@@ -153,10 +153,26 @@ def _compute_tp_info(
             return None, [], []
         # postpone the initialization of SPMDSolver to save time
         cur_cfg = copy.deepcopy(cfg)
+        # In current parallel profiler's implementation, the profiling is divided into
+        # following steps:
+        #   1. searialize the input graph
+        #   2. lauch the multi-process profiling by python's spawn method
+        #   3. each process loads the serialized graph and do profiling
+        #   4. transport the profiling result back to the main process
+        # It helps to reduce the profiling time when the graph has not been met before.
+        # But the procedure itself has a large overhead.
+        # In PipelineSolver, the SPMDSolver is constructed and used to search the optimal
+        # plan for multiple times. For given `tp_degree`, cases that need to be profiled
+        # are the same. As a result, we set `cfg.parallel_profile` to True at the first time
+        # and set it to False for the rest of the time.
+        if stage_num == 1:
+            cur_cfg.parallel_profile = True
+        else:
+            cur_cfg.parallel_profile = False
         cur_cfg.world_size = cfg.world_size // cfg.mesh_desc.ngpus * device_num
+        cur_cfg.mesh_desc = _dev_num2mesh_desc(device_num, cfg.mesh_desc.col)
         solver = SPMDSolver(graph=model_graph,
-                            mesh_desc=_dev_num2mesh_desc(
-                                device_num, cfg.mesh_desc.col),
+                            mesh_desc=cur_cfg.mesh_desc,
                             autodist_config=cur_cfg,
                             stage_num=stage_num)
 
@@ -195,22 +211,8 @@ def _compute_tp_info(
 
     tp_info = {}
     for tp_degree in legal_tp_degrees:
-        # In current parallel profiler's implementation, the profiling is divided into
-        # following steps:
-        #   1. searialize the input graph
-        #   2. lauch the multi-process profiling by python's spawn method
-        #   3. each process loads the serialized graph and do profiling
-        #   4. transport the profiling result back to the main process
-        # It helps to reduce the profiling time when the graph has not been met before.
-        # But the procedure itself has a large overhead.
-        # In PipelineSolver, the SPMDSolver is constructed and used to search the optimal
-        # plan for multiple times. For given `tp_degree`, cases that need to be profiled
-        # are the same. As a result, we set `cfg.parallel_profile` to True at the first time
-        # and set it to False for the rest of the time.
-        cfg.parallel_profile = True
         for stage_num in range(1, _calc_upper_bound(tp_degree) + 1):
             solver, intervals, solver_ret = process_case(tp_degree, stage_num)
-            cfg.parallel_profile = False
             for interval, spmd_descs in zip(intervals, solver_ret):
                 start, end = interval
                 if spmd_descs:

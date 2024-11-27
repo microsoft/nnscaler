@@ -1,0 +1,182 @@
+{
+  "(2, 8, 2048, 64)-(2, 8, 64, 2048) : torch.float32-torch.float32 : True-True": {
+    "in_mem_info": [
+      8388608
+    ],
+    "param_mem_info": [],
+    "buffer_mem_info": [],
+    "fw_span": 0.01199282705783844,
+    "bw_span": 0.03650356084108353,
+    "infer_memory": 8388608,
+    "train_mem_info": [],
+    "train_mem2in_idx": []
+  },
+  "(2, 2048, 8, 64)-(2, 8, 2048, 64) : torch.float32-torch.float32 : True-True": {
+    "in_mem_info": [
+      8388608
+    ],
+    "param_mem_info": [],
+    "buffer_mem_info": [],
+    "fw_span": 0.005709193646907806,
+    "bw_span": 0.023253075778484344,
+    "infer_memory": 8388608,
+    "train_mem_info": [],
+    "train_mem2in_idx": []
+  },
+  "(2, 8, 2048, 64)-(2, 2048, 8, 64) : torch.float32-torch.float32 : True-True": {
+    "in_mem_info": [
+      8388608
+    ],
+    "param_mem_info": [],
+    "buffer_mem_info": [],
+    "fw_span": 0.010336004197597504,
+    "bw_span": 0.03510527312755585,
+    "infer_memory": 8388608,
+    "train_mem_info": [],
+    "train_mem2in_idx": []
+  },
+  "(1, 8, 2048, 64)-(1, 8, 64, 2048) : torch.float32-torch.float32 : True-True": {
+    "in_mem_info": [
+      4194304
+    ],
+    "param_mem_info": [],
+    "buffer_mem_info": [],
+    "fw_span": 0.00971127301454544,
+    "bw_span": 0.03457833081483841,
+    "infer_memory": 4194304,
+    "train_mem_info": [],
+    "train_mem2in_idx": []
+  },
+  "(2, 4, 2048, 64)-(2, 4, 64, 2048) : torch.float32-torch.float32 : True-True": {
+    "in_mem_info": [
+      4194304
+    ],
+    "param_mem_info": [],
+    "buffer_mem_info": [],
+    "fw_span": 0.00948682427406311,
+    "bw_span": 0.03553144633769989,
+    "infer_memory": 4194304,
+    "train_mem_info": [],
+    "train_mem2in_idx": []
+  },
+  "(2, 8, 1024, 64)-(2, 8, 64, 1024) : torch.float32-torch.float32 : True-True": {
+    "in_mem_info": [
+      4194304
+    ],
+    "param_mem_info": [],
+    "buffer_mem_info": [],
+    "fw_span": 0.009621679782867432,
+    "bw_span": 0.03477856516838074,
+    "infer_memory": 4194304,
+    "train_mem_info": [],
+    "train_mem2in_idx": []
+  },
+  "(2, 8, 2048, 32)-(2, 8, 32, 2048) : torch.float32-torch.float32 : True-True": {
+    "in_mem_info": [
+      4194304
+    ],
+    "param_mem_info": [],
+    "buffer_mem_info": [],
+    "fw_span": 0.009464845061302185,
+    "bw_span": 0.0379662960767746,
+    "infer_memory": 4194304,
+    "train_mem_info": [],
+    "train_mem2in_idx": []
+  },
+  "(1, 2048, 8, 64)-(1, 8, 2048, 64) : torch.float32-torch.float32 : True-True": {
+    "in_mem_info": [
+      4194304
+    ],
+    "param_mem_info": [],
+    "buffer_mem_info": [],
+    "fw_span": 0.009648129343986511,
+    "bw_span": 0.03602709621191025,
+    "infer_memory": 4194304,
+    "train_mem_info": [],
+    "train_mem2in_idx": []
+  },
+  "(2, 1024, 8, 64)-(2, 8, 1024, 64) : torch.float32-torch.float32 : True-True": {
+    "in_mem_info": [
+      4194304
+    ],
+    "param_mem_info": [],
+    "buffer_mem_info": [],
+    "fw_span": 0.009131059050559998,
+    "bw_span": 0.03459863364696503,
+    "infer_memory": 4194304,
+    "train_mem_info": [],
+    "train_mem2in_idx": []
+  },
+  "(2, 2048, 4, 64)-(2, 4, 2048, 64) : torch.float32-torch.float32 : True-True": {
+    "in_mem_info": [
+      4194304
+    ],
+    "param_mem_info": [],
+    "buffer_mem_info": [],
+    "fw_span": 0.00681169331073761,
+    "bw_span": 0.024368613958358765,
+    "infer_memory": 4194304,
+    "train_mem_info": [],
+    "train_mem2in_idx": []
+  },
+  "(2, 2048, 8, 32)-(2, 8, 2048, 32) : torch.float32-torch.float32 : True-True": {
+    "in_mem_info": [
+      4194304
+    ],
+    "param_mem_info": [],
+    "buffer_mem_info": [],
+    "fw_span": 0.006612204015254974,
+    "bw_span": 0.024354644119739532,
+    "infer_memory": 4194304,
+    "train_mem_info": [],
+    "train_mem2in_idx": []
+  },
+  "(1, 8, 2048, 64)-(1, 2048, 8, 64) : torch.float32-torch.float32 : True-True": {
+    "in_mem_info": [
+      4194304
+    ],
+    "param_mem_info": [],
+    "buffer_mem_info": [],
+    "fw_span": 0.009928643703460693,
+    "bw_span": 0.03518201410770416,
+    "infer_memory": 4194304,
+    "train_mem_info": [],
+    "train_mem2in_idx": []
+  },
+  "(2, 4, 2048, 64)-(2, 2048, 4, 64) : torch.float32-torch.float32 : True-True": {
+    "in_mem_info": [
+      4194304
+    ],
+    "param_mem_info": [],
+    "buffer_mem_info": [],
+    "fw_span": 0.005669891834259033,
+    "bw_span": 0.024593807756900787,
+    "infer_memory": 4194304,
+    "train_mem_info": [],
+    "train_mem2in_idx": []
+  },
+  "(2, 8, 1024, 64)-(2, 1024, 8, 64) : torch.float32-torch.float32 : True-True": {
+    "in_mem_info": [
+      4194304
+    ],
+    "param_mem_info": [],
+    "buffer_mem_info": [],
+    "fw_span": 0.010106153786182404,
+    "bw_span": 0.03500021994113922,
+    "infer_memory": 4194304,
+    "train_mem_info": [],
+    "train_mem2in_idx": []
+  },
+  "(2, 8, 2048, 32)-(2, 2048, 8, 32) : torch.float32-torch.float32 : True-True": {
+    "in_mem_info": [
+      4194304
+    ],
+    "param_mem_info": [],
+    "buffer_mem_info": [],
+    "fw_span": 0.010841339826583862,
+    "bw_span": 0.034562498331069946,
+    "infer_memory": 4194304,
+    "train_mem_info": [],
+    "train_mem2in_idx": []
+  }
+}

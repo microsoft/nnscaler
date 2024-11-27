@@ -14,7 +14,7 @@ import torch
 from torch import ScriptFunction
 
 from nnscaler.graph.function.dimops import IRDimops, OpAnno, TransformRule
-from nnscaler.graph.parser.fx.concrete_trace_utils.wrap_utils import is_autograd_apply
+from nnscaler.graph.tracer.wrap_utils import is_autograd_apply
 from nnscaler.ir.operator import IRTensor, IRFwOperation
 
 _logger = logging.getLogger(__name__)

@@ -174,7 +174,7 @@ class SPMDSolver:
             _logger.info('no partition constraint is loaded')
 
         self.cost_database = graph.cost_database
-        self.cost_database.profile_comp(self.device_num)
+        self.cost_database.profile_comp(self.device_num, autodist_config.parallel_profile, autodist_config.re_profile)
         self.stage_num = stage_num
 
         self.initialize()
@@ -656,11 +656,12 @@ class SPMDSolver:
         else:
             weight_comm_time = 0
 
-        if not self.autodist_config.consider_mem:
+        cfg = self.autodist_config
+        if not cfg.consider_mem:
             node_mem, node_buffer, act_mem, opt_transient_mem, in_mem = 0, 0, 0, 0, 0
         else:
             node_mem, node_buffer, act_mem, opt_transient_mem, in_mem = self.cost_database.get_mem_and_buffer(
-                tgt_p, self.is_train, self.stage_num)
+                tgt_p, self.is_train, self.stage_num, cfg.world_size, cfg.ngpus, cfg.zero_stage, cfg.zero_ngroups, cfg.opt_resident_coef, cfg.opt_transient_coef)
 
         # communication cost induced by partitioning activation tensors of the given op partition
         comm_vecs = []
@@ -751,7 +752,7 @@ class SPMDSolver:
             ratio, i = importance_ratios[idx]
             node = self.get_operator(i).ir_cell
             desc_str += f'operator {node} has {self.get_op_partition_count(i)} partitions, importance ratio {ratio:.3f}\nat {node.comment}\n\n'
-        _logger.info(desc_str)
+        _logger.debug(desc_str)
         _logger.info('finish spmd solver initializetion')
 
     def estimate_min_mem(self, start: int, end: int) -> int:

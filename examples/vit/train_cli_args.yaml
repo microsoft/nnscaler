@@ -1,0 +1,56 @@
+compute_config:
+  plan_ngpus: 1
+  constant_folding: false
+  use_zero: true
+  use_end2end: true
+
+init_env_fn: examples.vit.vit_cli.init_env
+run_mode: run
+pas_policy: dp
+micro_batch_size: 10
+grad_accumulation_steps: 1
+max_epochs: 3
+enable_progress_bar: true
+# precision: bf16
+
+model:
+  type: examples.vit.vit_cli.VModel
+
+optimizer:
+  type: torch.optim.AdamW
+  args:
+    lr: 2e-5
+    weight_decay: 0.01
+  clip_gnorm: 1.0
+
+lr_scheduler:
+  type: examples.vit.vit_cli.scheduler_fn
+  args:
+    num_warmup_steps: 0
+  interval: step
+
+dataset:
+  type: examples.vit.vit_cli.cifar10_dataset
+  train_args:
+    split: train
+  val_args:
+    split: val
+
+dataloader:
+  type: examples.vit.vit_cli.accelerator_dataloader_fn
+  train_args:
+    collate_fn: examples.vit.vit_cli.cifar10_collate_fn
+    drop_last: false
+
+checkpoint:
+  keep_last_n_checkpoints: 10
+  every_n_epochs: 1
+  save_type: deduped
+
+log:
+  - type: nnscaler.cli.loggers.TensorBoardLogger
+    args:
+      name: logs/tb
+      root_dir: .
+# hook:
+#   on_train_step_end: examples.vit.vit_cli.on_train_step_end

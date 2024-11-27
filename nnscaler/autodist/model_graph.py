@@ -523,8 +523,13 @@ class ModelGraph:
     def __init__(self, ir_graph: IRGraph, autodist_config: AutoDistConfig):
         self.ir_graph = ir_graph
         self.autodist_config = autodist_config
-        self.cost_database = CostDatabase(self.ir_graph, self.autodist_config)
-        self.cost_database.profile_comp(partition_degree=1)
+        self.cost_database = CostDatabase(
+                                self.ir_graph,
+                                profile_dir=autodist_config.profile_dir,
+                                memory_granularity=autodist_config.memory_granularity,
+                                ignore_small_tensor_threshold=autodist_config.ignore_small_tensor_threshold,
+                             )
+        self.cost_database.profile_comp(1, autodist_config.parallel_profile, autodist_config.re_profile)
 
         self.scope_tree_root = self.reconstruct_scope_tree()
         self.scope_leaf_nodes = self.scope_tree_root.select(lambda x: x.is_leaf)

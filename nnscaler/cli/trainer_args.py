@@ -26,6 +26,9 @@ from .arg_parser import deserialize_dataclass, merge_args, parse_args, _TYPE_KEY
 from .loggers.logger_base import LoggerBase
 from .train_hook import TrainHook
 
+if TYPE_CHECKING:
+    from .trainer import Trainer
+
 
 logger = logging.getLogger(__name__)
 
@@ -226,6 +229,15 @@ class LogConfig:
 
 
 @dataclass
+class DebugConfig:
+     # before gradient clip norm, check the gradient sync for the same parameter is consistent cross devices,
+     # if ZeRO is enabled, will check the gradient cross each ZeRO group,
+     # if ZeRO is not enabled, will check the gradient cross each nnscaler scale unit.
+     # this helps to find bugs related to gradient updates during training.
+    check_gradient_sync_cross_devices: bool = True
+
+
+@dataclass
 class HookConfig:
     type: str = None
     args: Dict[str, Any] = field(default_factory=dict)
@@ -314,6 +326,8 @@ class TrainerArgs:
     log: List[LogConfig] = field(default_factory=list)
     # It can be `HookConfig` or `HookMapConfig`
     hook: Union[HookConfig, HookMapConfig, None] = None
+
+    debug: DebugConfig = field(default_factory=DebugConfig)
 
     # TODO: mixed precision support
     precision: Union[str, Dict[_TENSOR_TYPE, _PRECISION_TYPE], None] = None
@@ -505,7 +519,7 @@ class TrainerArgs:
     def input_dtype(self) -> torch.dtype:
         return _PRECISION_MAP[self.precision['input']]
 
-    def init_env(self):
+    def init_env(self, trainer: 'Trainer'):
         if self.seed is not None:
             import random
             import numpy as np
@@ -516,7 +530,7 @@ class TrainerArgs:
         if self.init_env_fn is None:
             return
         init_env_fn = load_type(self.init_env_fn)
-        init_env_fn(self)
+        init_env_fn(trainer)
 
     def create_model(self) -> torch.nn.Module:
         kwargs = self.create_kwarg(self.model.args)

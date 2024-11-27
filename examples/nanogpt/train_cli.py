@@ -34,7 +34,7 @@ sys.path.append(str(nanogpt_path))
 from model import GPTConfig, GPT
 
 
-def init_env(train_args: 'TrainerArgs'):
+def init_env(trainer: 'Trainer'):
     torch.manual_seed(0)
     np.random.seed(0)
     random.seed(0)

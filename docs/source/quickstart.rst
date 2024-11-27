@@ -6,12 +6,14 @@ Quickstart
 Installation
 ************
 
-nnScaler can be :doc:`installed from GitHub <install_from_source>`: ::
+nnScaler can be installed from GitHub:
 
+.. code-block:: bash
+
+    pip install https://github.com/microsoft/nnscaler/releases/download/v0.5/nnscaler-0.5-py3-none-any.whl
+
+    # You may also want to clone the repo to try out the examples
     git clone --recursive https://github.com/microsoft/nnscaler
-    cd nnscaler/
-    pip install -r requirements.txt
-    pip install -e .
 
 ***************************
 Parallelize a Minimal Model
@@ -182,9 +184,9 @@ Next Step
 *********
 
 The above example uses nnScaler's :doc:`Trainer APIs <trainer>`.
-To learn more about it, you may check our :doc:`Llama 3 example <llama3_demo_example>`.
+To learn more about it, you may check our :doc:`Llama 3 example <examples/llama3_demo>`.
 
 Or if you prefer to use a familiar trainer, we also provides integration with `PyTorch Lightning <https://lightning.ai/docs/pytorch/stable/>`_.
-The usage is demostrated by :doc:`nanoGPT example <nanogpt_example>`.
+The usage is demostrated by :doc:`nanoGPT example <examples/nanogpt>`.
 
-If you want to try a more advanced model, please check :doc:`Llama 3 128K sequence length example <llama3_8b_128k_example>`.
+If you want to try a more advanced model, please check :doc:`Llama 3 128K sequence length example <examples/llama>`.

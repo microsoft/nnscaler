@@ -376,25 +376,21 @@ class IRSegment(IRCell):
                 t.grad = grad
 
         # set for consumers
-        # We strictly follow the behavior in the fx graph. It is possible that there
-        # exists a node that consumes a tensor with gradient but generates tensors without
-        # gradient, e.g., the `.data` operation in torch. As a result, nnscaler will generate
-        # backward adapter (communications) between this consumer and its producer.
-        # According to the runtime behavior, we have
-        # case 1: there are gradients flowing in the consume full tensor. This case happens
-        #         when the full tensor is the segment output at the same time. Note in nnscaler
-        #         we will replicate segment's outputs and we will generate another adapter for
-        #         the activation -> segment output case if the two adapters are different. As a
-        #         result, the node (not matter IRDimOps or IRPyFunc, e.g., .data) should be replicated
-        #         as well. In this case, the backward adapter is correct.
-        # case 2: no gradients exist, then the backward adapter does not influence the result.
+        # We strictly follow the `requires_grad` in the fx graph in most cases. However, we will
+        # ignore the gradient when the corresponding subtensor is consumed by a IRPyFunc, since
+        # nnScaler will not generate a backward node for IRPyFunc currently (check IRGraph.backward).
         consumers, ctensors = [], []
         for ctensor, consumer in zip(self.ctensors(ftensor), self.consumers(ftensor)):
             itensors = consumer.find(ctensor)
             # set by default None
             for itensor in itensors:
                 itensor.grad = None
-            if fgrad is not None:
+            if isinstance(consumer, IRPyFunc):
+                continue
+            # filter out non-autograd operators
+            if fgrad is None: continue
+            if isinstance(consumer, IRPyFunc): continue
+            if any(isinstance(t, IRSubTensor) and t.requires_grad for t in consumer.outputs()):
                 consumers.append(consumer)
                 ctensors.append(ctensor)
 
@@ -1022,8 +1018,47 @@ class IRSegment(IRCell):
                     inputs.add(itensor)
             for otensor in node.oobjs():
                 # if the tensor is required by segment outputs, set as output
-                if otensor in segment_outputs:
-                    outputs.add(otensor)
+                # NOTE: there may be several identical tensors in `segment_outputs`, for example when
+                # user code contains `return t, t`. To handle this case, we will break the loop once
+                # finding a matched tensor.
+                seg_out_matched = False
+                for seg_out in segment_outputs:
+                    if otensor != seg_out:
+                        continue
+                    # Since we set a consume tensor's grad to None if it is a input of a IRPyFunc,
+                    # it is possible that two tensors share a same id but with different grad.
+                    # For example, consider the following case:
+                    #   t1 = dimops(xx)
+                    #   t2 = pyfunc(t1)
+                    #   return t1, t2
+                    # Furtherly assume:
+                    # - t1 requires grad
+                    # - `dimops` is partitioned along `xx`'s batch dim
+                    # - `pyfunc` is replicated.
+                    # In nnscaler, there is one fulltensor representing `t1` and several subtensors.
+                    # For simplicity, we name them separately:
+                    # - when t1 is at the output of `dimops`, it is called `t1_a`
+                    # - when t1 is at the input of `pyfunc`, it is called `t1_b`
+                    # - when t1 is the output of the segment, it is called `t1_c`
+                    # In this case, `t1_b`'s grad is set to None (check func `infer_grad`), but the
+                    # the `t1_a` and `t1_c`'s grads are not None. The three subtensors share the same
+                    # id inherited from the fulltensor, which means they are considered as the same
+                    # tensor when calling `__equal__` method.
+                    # Since partition plans for operators are different, there will be two adapters
+                    # in communication generation:
+                    # - between `t1_a` and the returned `t1_c`, this adapter's forward
+                    #   output subtensor's grad is not None and share same id with `t1_c`.
+                    # - between `t1_a` and the consumed `t1_b`, this adapter doesn't have
+                    #   a mirror (backward op) and its output subtensor's grad is None. Its id is
+                    #   the identical to `t1_b` as well.
+                    # `create_segment` is called after `gen_activation`, and we construct the segment's
+                    # output here. However, we don't want to treat `t1_b` as output. To distinguish between
+                    # output tensors of the two adapters, we double check the grad here.
+                    if not isinstance(otensor, IRSubTensor) or otensor.grad == seg_out.grad:
+                        outputs.add(otensor)
+                        seg_out_matched = True
+                        break
+                if seg_out_matched:
                     continue
                 consumers, ctensors = self.consumers(otensor.parent), self.ctensors(otensor.parent)
                 cids = set(c.cid for c, t in zip(consumers, ctensors) if dmatch(t, otensor))

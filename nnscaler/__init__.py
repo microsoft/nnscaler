@@ -15,8 +15,15 @@ from .parallel import (
     load_deduped_state_dict,
     broadcast_weights,
     load_sharded_state_dict,
+    sync_grad_when,
 )
 from nnscaler.graph.parser.register import register_op
+from nnscaler.runtime.function.function import (
+    anchor,
+    constant_folding,
+    no_constant_folding,
+    fold_constant,
+)
 
 
 def init():

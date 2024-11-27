@@ -28,8 +28,9 @@ from nnscaler.graph import IRGraph
 from nnscaler.graph import parser
 from nnscaler.graph.function.anchor import IRGraphAnchor
 from nnscaler.graph.function.pyfunc import IRPyFunc
+from nnscaler.graph.function.wrapnn import convert_to_wrapnn, wrapnn
 from nnscaler.graph.gener.gen import IRAdapterGener
-from nnscaler.graph.parser.fx.parser import FxModuleParser
+from nnscaler.graph.parser import FxModuleParser
 from nnscaler.graph.schedule.predefined import PredefinedSched
 from nnscaler.graph.schedule.schedplan import SchedulePlan
 
@@ -153,9 +154,6 @@ class ComputeConfig:
             logger.warning(f"use_zero is False, but zero_ngroups is {self.zero_ngroups}. Will set zero_ngroups to 1.")
             # have to use __setattr__ for frozen dataclass
             super().__setattr__('zero_ngroups', 1)
-
-        if self.use_async_reducer and not self.use_end2end:
-            raise ValueError("use_async_reducer is only supported in end2end mode.")
 
         if self.reducer_bucket_cap_mb and self.reducer_bucket_cap_mb < 0:
             raise ValueError(f"reducer_bucket_cap_mb {self.reducer_bucket_cap_mb} should not be negative.")
@@ -347,7 +345,7 @@ def _to_cpu(val: Any):
         return {_to_cpu(t) for t in val}
     if isinstance(val, torch.Tensor):
         requires_grad = val.is_floating_point() or val.is_complex()
-        return val.cpu().requires_grad_(requires_grad)
+        return val.detach().clone().cpu().requires_grad_(requires_grad)
     return val
 
 
@@ -772,11 +770,13 @@ def _gencode(
         )
         torch.save(meta_info, origin_module_metadata_ckp)
 
-        graph, forward_args = _gen_graph(
-            module, dummy_forward_args, outdir,
-            constant_folding=compute_config.constant_folding, end2end_mode=compute_config.use_end2end,
-            inference_only=compute_config.inference_only,
-        )
+        with wrapnn(module, restore=not is_module_class) as wrapped_module:
+            graph, forward_args = _gen_graph(
+                wrapped_module, dummy_forward_args, outdir,
+                constant_folding=compute_config.constant_folding, end2end_mode=compute_config.use_end2end,
+                inference_only=compute_config.inference_only,
+            )
+
         graph.dump(graph_ckp)
         torch.save(forward_args, forward_args_ckp)
 
@@ -1884,6 +1884,8 @@ def _construct_optim_state_zero(
             step, opt_states, opt_state_keys = None, {}, None
             for param in bucket.params:
                 sliced_new_val = _get_optimizer_state_of_param(param, param_ids, local_names)
+                # there are padding in the chunk, so `param.numel()` doesn't work here
+                param_numel = bucket.get_aligned_numel(param)
                 # init the chunk's optimizer state
                 if opt_state_keys is None:
                     opt_state_keys = [key for key in sliced_new_val]
@@ -1900,41 +1902,46 @@ def _construct_optim_state_zero(
 
                 # parameter range: <>
                 # bucket range: []
+                # in the following branches, we check the range including paddings.
+                # but in branch body, we only copy the valid range (without paddings) but update the chunk_offset with paddings.
                 if param_offset < bucket_chunk_start \
-                    and bucket_chunk_start < param_offset + param.numel() < bucket_chunk_end:
+                    and bucket_chunk_start < param_offset + param_numel < bucket_chunk_end:
                     # case: < [ > ]
-                    copy_size = param_offset + param.numel() - bucket_chunk_start
-                    for key in opt_state_keys:
-                        opt_states[key][chunk_offset:chunk_offset+copy_size] = sliced_new_val[key][-copy_size:]
+                    copy_size = param_offset + param_numel - bucket_chunk_start
+                    copy_size_without_padding = param_offset + param.numel() - bucket_chunk_start
+                    if copy_size_without_padding > 0:
+                        for key in opt_state_keys:
+                            opt_states[key][chunk_offset:chunk_offset+copy_size_without_padding] = sliced_new_val[key][-copy_size_without_padding:]
                     chunk_offset += copy_size
                 elif bucket_chunk_start <= param_offset < bucket_chunk_end \
-                    and bucket_chunk_start <= param_offset + param.numel() < bucket_chunk_end:
+                    and bucket_chunk_start <= param_offset + param_numel < bucket_chunk_end:
                     # case: [ <  > ]
                     for key in opt_state_keys:
                         opt_states[key][chunk_offset:chunk_offset+param.numel()] = sliced_new_val[key][:]
-                    chunk_offset += param.numel()
+                    chunk_offset += param_numel
                 elif bucket_chunk_start <= param_offset < bucket_chunk_end \
-                    and param_offset + param.numel() >= bucket_chunk_end:
+                    and param_offset + param_numel >= bucket_chunk_end:
                     # case: [ < ] >
                     copy_size = bucket_chunk_end - param_offset
+                    copy_size_without_padding = min(copy_size, param.numel())
                     for key in opt_state_keys:
-                        opt_states[key][chunk_offset:chunk_offset+copy_size] = sliced_new_val[key][:copy_size]
+                        opt_states[key][chunk_offset:chunk_offset+copy_size_without_padding] = sliced_new_val[key][:copy_size_without_padding]
                     chunk_offset += copy_size
                 elif param_offset < bucket_chunk_start \
-                    and param_offset + param.numel() >= bucket_chunk_end:
+                    and param_offset + param_numel >= bucket_chunk_end:
                     # case: < [ ] >
                     copy_size = bucket_chunk_end - bucket_chunk_start
-                    for key in opt_state_keys:
-                        opt_states[key][chunk_offset:chunk_offset + copy_size] \
-                            = sliced_new_val[key][bucket_chunk_start-param_offset:bucket_chunk_start-param_offset + copy_size]
+                    copy_size_without_padding = min(copy_size, param_offset + param.numel() - bucket_chunk_start)
+                    if copy_size_without_padding > 0:
+                        for key in opt_state_keys:
+                            opt_states[key][chunk_offset:chunk_offset + copy_size_without_padding] \
+                                = sliced_new_val[key][bucket_chunk_start-param_offset:bucket_chunk_start-param_offset + copy_size_without_padding]
                     chunk_offset += copy_size
                 else:
                     # case: [] <>, <> []
-                    logger.debug(f'Skipped: parameter range({param_offset},{param_offset + param.numel()}) vs. bucket range({bucket_chunk_start},{bucket_chunk_end})')
-                param_offset += param.numel()
-            # as there is padding in chunk, slicing to obtain the correct shape opt states
-            for key in opt_state_keys:
-                opt_states[key] = opt_states[key][:opt_param[opt_param_idx].shape[0]]
+                    logger.debug(f'Skipped: parameter range({param_offset},{param_offset + param_numel}) vs. bucket range({bucket_chunk_start},{bucket_chunk_end})')
+                param_offset += param_numel
+
             if step is not None:
                 opt_states['step'] = step
             state_dict[opt_param_idx] = opt_states
@@ -2362,3 +2369,33 @@ def load_sharded_state_dict(
         if optimizer_state_dict is None:
             raise ValueError("optimizer_state_dict should be provided when optimizer is not None.")
         optimizer.load_state_dict(optimizer_state_dict)
+
+
+def sync_grad_when(cond: bool):
+    """
+    Context manager to enable/disable gradient synchronizations across workers.
+
+    Within this context, gradients will be accumulated
+    only when `cond` is True.
+
+    This is needed when
+    1. The mode is not end2end model.
+        For end2end model, gradients are synchronized across workers automatically.
+    2. async is enabled (`compute_config.use_async_reducer` is `True`).
+
+    If both conditions are not satisfied, this function has no effect.
+
+    Example:
+        >>> model = parallelize(model, ...)
+        >>> accum_steps = ...
+        >>> for step in range(accum_steps)
+        >>>     with sync_grad_when(step == accum_steps - 1):
+        >>>         loss = ...
+        >>>         loss.backward()
+        >>> optimizer.step()
+        >>> optimizer.zero_grad()
+
+    Args:
+        cond (bool): whether to synchronize gradients.
+    """
+    return _runtime_flags(skip_reducer=not cond)

@@ -1,0 +1,26 @@
+- allowed_partition_dims:
+  - 0,0
+  name: torch.nn.functional.linear
+  parent_module: MultiScaleRetention
+  replica_allowed: false
+- allowed_partition_dims:
+  - 0,0
+  name: cube.runtime.function.embedding
+  parent_module: LMDecoder
+  replica_allowed: false
+- allowed_partition_dims:
+  - 0,0
+  name: apex.normalization.fused_layer_norm.FusedLayerNormAffineFunction.apply
+  parent_module: LMDecoder
+  replica_allowed: false
+- allowed_partition_dims:
+  - 0,0
+  - 0,1
+  name: torch.matmul
+  parent_module: MultiScaleRetention
+  replica_allowed: false
+- allowed_partition_dims:
+  - 0,0
+  name: torch.nn.functional.linear
+  parent_module: FeedForwardNetwork
+  replica_allowed: false

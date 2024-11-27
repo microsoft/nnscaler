@@ -1,6 +1,8 @@
 #  Copyright (c) Microsoft Corporation.
 #  Licensed under the MIT License.
 
+from __future__ import annotations
+
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Union
 from pathlib import Path
@@ -93,6 +95,8 @@ class Trainer:
         self.max_train_steps = None
         self.loggers = []
         self.hook = None
+        # RNG states pending resume; reset to None after resuming
+        self.rng_states_from_resume: dict[str, torch.Tensor] | None = None
 
     def run(self):
         self._setup()
@@ -133,7 +137,7 @@ class Trainer:
             return next(iter(dataloader))
 
     def _setup(self):
-        self.train_args.init_env()
+        self.train_args.init_env(self)
         compile_only = self.train_args.compile_mode
 
         if is_running_distributed():
@@ -288,6 +292,7 @@ class Trainer:
             'lr_scheduler': state_dicts[0].get('lr_scheduler', None),
             'train_status': state_dicts[0]['train_status'],
             'train_args': train_args,
+            'rng_states': None,
         }
         torch.save(merged_state_dict, output_file)
 
@@ -341,6 +346,7 @@ class Trainer:
             if self.lr_scheduler:
                 self.lr_scheduler.load_state_dict(state_dict['lr_scheduler'])
         self.train_status = TrainStatus(**state_dict['train_status'])
+        self.rng_states_from_resume = state_dict.get('rng_states')  # resumed in _global_batch_iterator()
 
     def _log_mem_stats(self, tag=None):
         # log minimum free memory over the iteration
@@ -409,6 +415,7 @@ class Trainer:
             'lr_scheduler': self.lr_scheduler.state_dict() if self.lr_scheduler else None,
             'train_status': asdict(self.train_status),
             'train_args': self.train_args.to_dict(),
+            'rng_states': self._get_rng_states(),
         }
         self.hook.on_save_checkpoint(self, state_dict)
         ckpt_file = save_dir / CHECKPOINT_FILE_FORMAT.format(
@@ -480,30 +487,48 @@ class Trainer:
         if len(checkpoints) <= self.train_args.checkpoint.keep_last_n_checkpoints:
             return
 
-        # (step, num) pairs
+        # (step, ckpt_name) pairs
         checkpoint_info = [(int(p.split('-')[1]), p) for p in checkpoints]
         checkpoint_info.sort()
-        expire_list = checkpoint_info[:-self.train_args.checkpoint.keep_last_n_checkpoints]
+        expire_list = [c[1] for c in checkpoint_info[:-self.train_args.checkpoint.keep_last_n_checkpoints]]
 
         best_ckpt = save_dir / CHECKPOINT_BEST_DIR_NAME
-        if best_ckpt.exists():
-            for p in best_ckpt.glob('*.ckpt'):
+        last_ckpt = save_dir / CHECKPOINT_LAST_DIR_NAME
+        for ckpt_dir in [best_ckpt, last_ckpt]:
+            if not ckpt_dir.exists():
+                continue
+            for p in ckpt_dir.glob('*.ckpt'):
                 if p.is_symlink():
                     ckpt_name = p.resolve().parent.name
                     if ckpt_name in expire_list:
                         expire_list.remove(ckpt_name)
-                        logger.info('Keep old checkpoint `%s` because it is the best.', ckpt_name)
+                        logger.info('Keep old checkpoint `%s` because it is symbol linked in best or last.', ckpt_name)
                 break # just check the first file is enough
 
-        for _, ckpt_name in expire_list:
+        for ckpt_name in expire_list:
             logger.info('Removing old checkpoint: %s', ckpt_name)
             shutil.rmtree(save_dir / ckpt_name)
 
-    def _global_batch_iterator(self, num_skip_first = 0, stage='train'):
+    def _global_batch_iterator(self, num_skip_first=0, stage='train'):
+        if num_skip_first == 0:
+            # if the checkpoint stops at the end of an epoch,
+            # the rng states must be resumed before creating iterator
+            # because `DataLoader.__iter__()` uses the rng (dunno why),
+            # and the previous run had not call it yet
+            self._try_resume_rng_states()
+
+        it = iter(self.dataloader[stage])
+        for _ in range(num_skip_first * self.train_args.update_freq):
+            _sample = next(it)
+
+        if num_skip_first != 0:
+            # if the checkpoint stops in the middle of an epoch,
+            # the rng states must be resumed before loading the first batch, which depends on the rng;
+            # and must be resumed after skipping unused batches, which will affect the rng
+            self._try_resume_rng_states()
+
         samples = []
-        for idx, sample in enumerate(self.dataloader[stage]):
-            if idx < num_skip_first * self.train_args.update_freq:
-                continue
+        for sample in it:
             sample = self._fix_input(sample)
             samples.append(sample)
             if len(samples) == self.train_args.update_freq:
@@ -538,6 +563,94 @@ class Trainer:
             batches += [self.dummy_input] * gap
         return batches, is_dummy_batch
 
+    @torch.no_grad()
+    def _check_grad_cross_devices_correctness(self):
+        # if ZeRO is enabled, will check the gradient cross each ZeRO group.
+        # if ZeRO is not enabled, will check the gradient cross each nnscaler scale unit.
+        def get_optimizer_sync_group():
+            # if ZeRO is enabled, `compute_config.optimizer_dedup_group_size` is the ZeRO group size,
+            # return the corresponding rank list and device group cross ZeRO groups, parallel to the current rank,
+            # if ZeRO is not enabled, `compute_config.optimizer_dedup_group_size` is the plan_ngpus,
+            # return the corresponding rank list and device group cross scale units, parallel to the current rank.
+            rank = torch.distributed.get_rank()
+            group_size = self.train_args.compute_config.optimizer_dedup_group_size
+            runtime_ngpus = self.train_args.compute_config.runtime_ngpus
+
+            # group_size equal to runtime_ngpus means one of:
+            #   1. ZeRO is enabled and ZeRO group number is 1
+            #   2. ZeRO is not enabled and nnscaler scale unit number is 1
+            # in these cases, the gradient of one parameter/sub-parameter have only one copy,
+            # so there is not need to check the gradient consistent cross rank.
+            if group_size == runtime_ngpus:
+                return [rank], None
+
+            from nnscaler.runtime.device import DeviceGroup
+            # make sure all needed device groups have been created to make safe
+            for i in range(group_size):
+                DeviceGroup().get_group(
+                    list(range(i, runtime_ngpus, group_size))
+                )
+            rank_list = list(range(rank % group_size, runtime_ngpus, group_size))
+            return rank_list, DeviceGroup().get_group(rank_list)
+
+        rank_list, sync_group = get_optimizer_sync_group()
+
+        if sync_group is None:
+            return
+
+        params_info_for_gnorm = self.model.parameters_for_calc_gnorm()
+        tidx2param = {}
+        for r_idx, params_info in enumerate(params_info_for_gnorm):
+            for p_idx, param in enumerate(params_info.params):
+                # each param is the `Bucket._param_for_optimizer` of one of reducer's bucket,
+                # r_idx is the index of the reducer, p_idx is the index of the bucket.
+                tidx2param[(r_idx, p_idx)] = param
+        tidx2grad = {k: v.grad for k, v in sorted(tidx2param.items(), key=lambda item: item[0])}
+
+        def get_grad_metric(grad: torch.Tensor):
+            mean, max, min, norm = grad.float().mean().item(), grad.max().item(), grad.min().item(), grad.float().norm().item()
+            return mean, max, min, norm
+
+        # check gradient metric: (mean, max, min, norm)
+        tidx2metric = {k: get_grad_metric(v) for k, v in tidx2grad.items()}
+        tidx2ranks_metric = [None for _ in range(len(rank_list))]
+        torch.distributed.all_gather_object(tidx2ranks_metric, tidx2metric, group=sync_group)
+
+        def is_consistent(m1, m2, delta=1e-6):
+            # refer to Fairseq's approach, we don't check the completely equal here
+            # to ignore the precision loss due to communication.
+            abs_diff = abs(m1 - m2)
+            return abs_diff / (abs(m1) + delta) < delta
+
+        # check if all the gradient metric gathered from other rank is consistent with corrent rank
+        grad_consistent = True
+        for _tidx2metric in tidx2ranks_metric:
+            for tidx, metric in tidx2metric.items():
+                check_result = [is_consistent(m1, m2) for m1, m2 in zip(_tidx2metric[tidx], metric)]
+                if not all(check_result):
+                    grad_consistent = False
+                    break
+
+        if not grad_consistent:
+            pretty_detail = []
+            header = "rank mean{:6} max{:7} min{:7} norm{:7}".format("", "", "", "")
+            line = "-" * 80
+            for tidx, _ in tidx2metric.items():
+                pretty_detail.extend([line, f"reducer {tidx[0]} bucket {tidx[1]}", line, header])
+                for r, _tidx2metric in zip(rank_list, tidx2ranks_metric):
+                    pretty_detail.append("{:4d} {:10.6f} {:10.6f} {:10.6f} {:10.6f}".format(r, *_tidx2metric[tidx]))
+                pretty_detail.append(line)
+            pretty_detail = "\n".join(pretty_detail)
+
+            error_detail = "grad metric detail across the workers:\n{}\n".format(pretty_detail)
+            raise RuntimeError(
+                "Fatal error: gradients are inconsistent between workers. "
+                + "\n"
+                + "=" * 80
+                + "\n{}\n".format(error_detail)
+                + "=" * 80
+            )
+
     def _train(self):
         logger.info('Training...')
         # reset peak memory stats before training
@@ -553,7 +666,10 @@ class Trainer:
         self.hook.on_train_start(self)
 
         for epoch in range(start_epoch, self.train_args.max_epochs or sys.maxsize):
-            self.dataloader['train'].sampler.set_epoch(epoch)
+            if hasattr(self.dataloader['train'], 'set_epoch'):
+                self.dataloader['train'].set_epoch(epoch)
+            elif hasattr(self.dataloader['train'].sampler, 'set_epoch'):
+                self.dataloader['train'].sampler.set_epoch(epoch)
 
             torch.distributed.barrier()
 
@@ -647,14 +763,14 @@ class Trainer:
             logger.info(self._format_metrics(f'Validation', None, val_metrics))
         return step_stat.val_loss
 
-    def _train_epoch(self, epoch):
+    def _train_epoch(self, epoch: int) -> None:
         VAL_STATUS_NO = 0     # not validated or saved
         VAL_STATUS_VAL = 1    # validated but not saved
         VAL_STATUS_SAVE = 2   # validated and saved
         has_validated = VAL_STATUS_NO   # 3 states
 
         resume_from_idx = self.train_status.finished_train_steps % self.total_train_steps_per_epoch
-        data_iter = enumerate(self._global_batch_iterator(num_skip_first=resume_from_idx))
+        data_iter = enumerate(self._global_batch_iterator(resume_from_idx))
 
         max_epoch = self.max_train_steps // self.total_train_steps_per_epoch
         if self.max_train_steps % self.total_train_steps_per_epoch != 0:
@@ -664,26 +780,17 @@ class Trainer:
         epoch_desc = f'Epoch {format(epoch, epoch_format)}'
 
         if self.rank == 0:
-            progress = tqdm(
-                None,
+            data_iter = tqdm(
+                data_iter,
                 total=self.total_train_steps_per_epoch,
                 initial=resume_from_idx,
                 desc=epoch_desc,
                 disable=not self.train_args.enable_progress_bar,
             )
-        else:
-            progress = None
 
         step_stat: Optional[_StepStat] = None
         for i, batches in data_iter:
             idx = i + resume_from_idx
-
-            if self.rank == 0:
-                # looks manually update progress bar is easier
-                # than using tqdm directly
-                # the difference is we update progress bar at the beginning of the loop
-                # instead of the end of the loop
-                progress.update(1)
             step_start_at = time.perf_counter()
             step_stat = _StepStat()
             step_metrics = {}
@@ -733,6 +840,10 @@ class Trainer:
                 multiplier /= aggregated_outputs.num_tokens
             self.optimizer.scale_grads(multiplier)
 
+            # check gradient sync & scale correctness
+            if self.train_args.debug.check_gradient_sync_cross_devices:
+                self._check_grad_cross_devices_correctness()
+
             # clip gradients
             self.hook.before_gnorm_clip(self)
             if self.train_args.optimizer.clip_gnorm:
@@ -756,7 +867,7 @@ class Trainer:
             step_metrics['train_wall'] = time.perf_counter() - step_start_at
             self.log_metrics(step_metrics, tag='train')
             if self.rank == 0:
-                progress.set_postfix(step_metrics)
+                data_iter.set_postfix(step_metrics)
                 if self.train_args.enable_log_progress \
                     and self.train_status.finished_train_steps % self.train_args.log_progress_every_n_train_steps == 0:
                     logger.info(self._format_metrics(epoch_desc, idx + 1, step_metrics))
@@ -778,8 +889,8 @@ class Trainer:
                     has_validated = VAL_STATUS_SAVE
                 if self.rank == 0:
                     # disable refresh the progress bar to avoid redundant progress bar
-                    progress.leave = False
-                    progress.close()
+                    data_iter.leave = False
+                    data_iter.close()
                 break
 
             if not has_validated and self.train_args.val_every_n_train_steps and \
@@ -803,3 +914,18 @@ class Trainer:
                 and (epoch + 1) % self.train_args.val_every_n_epochs == 0:
                 self._validate(step_stat)
                 has_validated = VAL_STATUS_VAL
+
+    def _get_rng_states(self) -> dict[str, torch.Tensor]:
+        return {
+            'torch': torch.get_rng_state(),
+            'torch_cuda': torch.cuda.get_rng_state(),
+        }
+
+    def _try_resume_rng_states(self) -> None:
+        # assuming hooks do not use rng
+        if self.rng_states_from_resume is not None:
+            if self.rng_states_from_resume.get('torch') is not None:
+                torch.set_rng_state(self.rng_states_from_resume['torch'])
+            if self.rng_states_from_resume.get('torch_cuda') is not None:
+                torch.cuda.set_rng_state(self.rng_states_from_resume['torch_cuda'])
+            self.rng_states_from_resume = None

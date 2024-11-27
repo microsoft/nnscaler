@@ -1,0 +1,20 @@
+- allowed_partition_dims:
+  - 0,0
+  name: torchscale.component.xmoe.routing.top2gating
+  parent_module: Top2Gate
+  replica_allowed: false
+- allowed_partition_dims:
+  - 0,0
+  name: torchscale.component.xmoe.moe_layer.dispatch_expert_inputs
+  parent_module: MOELayer
+  replica_allowed: false
+- allowed_partition_dims:
+  - 0,0
+  name: torchscale.component.xmoe.moe_layer.merge_expert_outputs
+  parent_module: MOELayer
+  replica_allowed: false
+- allowed_partition_dims:
+  - 0,0
+  name: torchscale.component.xmoe.routing.compute_logits
+  parent_module: Top2Gate
+  replica_allowed: true

@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 import matplotlib
 
 matplotlib.use('Agg')
@@ -390,5 +393,3 @@ if __name__ == "__main__":
     init_seeds()
     main(rank, world_size)
     dist.destroy_process_group()
-
-    

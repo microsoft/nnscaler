@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 import torch
 import CVPR2022_DaGAN.depth as depth
 from CVPR2022_DaGAN.modules.model import ImagePyramide

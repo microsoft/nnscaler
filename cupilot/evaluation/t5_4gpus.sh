@@ -61,8 +61,3 @@ torchrun --nproc_per_node=$NGPUS \
         --max-pp 2 \
         --recompute --db-cache t5_${GPU}_db.json --save-spec t5.alpa.4gpus.json \
     2>&1 | tee ${LOGS}/${TOTAL_GPUS}gpus.$POLICY.vocab${VOCAB_K}k.layer${LAYERS}.hidden${HIDDEN}.heads${HEADS}.log
-
-
-python ../MagicCube/utility/keep.py --gpus 16
-
-

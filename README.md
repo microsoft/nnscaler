@@ -11,6 +11,12 @@ nnScaler is a parallelization engine that compiles a Deep neural network (DNN) m
 
 <img src="docs/source/images/nnScaler_flow.png" alt="drawing" width="600"/>
 
+# Latest News
+nnScaler (also known as CUBE as code name) has been adopted by multiple product and research projects, this section includes some of the latest news from the team and partner projects.
+* **2024-11-26** nnScaler 0.5 released: https://github.com/microsoft/nnscaler/releases/tag/0.5
+* **2024-05-09** YOCO utilizes nnScaler for long-sequence training: [(YOCO)You only cache once: Decoder-decoder architectures for language models](https://arxiv.org/abs/2405.05254)
+* **2024-04-22** Post training for the long context version of [Phi-3 series](https://arxiv.org/abs/2404.14219)
+* **2024-02-21** LongRoPE utilizes nnScaler to reduce both the training and inference costs: [LongRoPE: Extending LLM context window beyond 2 million tokens](https://arxiv.org/abs/2402.13753)
 
 ### System Highlights:
 
@@ -183,14 +189,6 @@ Or if you have multiple nodes, for example 2 nodes with 4 GPUs each:
 NOTE: The local batch size is fixed by default, so using more workers will result in a larger global batch size.
 
 💡 For advanced usages, please stay tuned for our future release.
-
-
-# Success Stories
-
-nnScaler has been adopted by multiple projects, including both product and research explorations:
-* [(YOCO)You only cache once: Decoder-decoder architectures for language models](https://arxiv.org/abs/2405.05254)
-* [LongRoPE: Extending LLM context window beyond 2 million tokens](https://arxiv.org/abs/2402.13753)
-* Post training for the long context version of [Phi-3 series](https://arxiv.org/abs/2404.14219)
 
 # Reference
 

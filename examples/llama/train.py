@@ -80,10 +80,12 @@ class WrapperModel(torch.nn.Module):
                 use_cache=False,
                 return_dict=False,
             )
+            # Andy: 和Megatron对齐
+            loss_fct = torch.nn.CrossEntropyLoss(ignore_index=IGNORE_IDX)
             logits = outputs[0].view(-1, outputs[0].size(-1))
             labels = samples['target'].view(-1)
-            normalized_logits = torch.nn.functional.log_softmax(logits, dim=-1, dtype=torch.float32)
-            loss = torch.nn.functional.nll_loss(normalized_logits, labels, reduction='sum', ignore_index=IGNORE_IDX)
+            labels = labels.to(logits.device)
+            loss = loss_fct(logits, labels)
         return loss, loss.data, samples['ntokens'], samples['nsentences']
 
 

@@ -975,14 +975,11 @@ class ParallelModule(CubeModule):
         if self.use_scheduler:
             if len(samples) != self.nmicros_per_scheduler_step:
                 raise ValueError(f"Expected {self.nmicros_per_scheduler_step} samples, but got {sample_count}")
-            # only one step, so begin/end are both True
-            with accum_mode(begin=True, end=True):
-                return self._train_step(dataloader)
+            return self._train_step(dataloader)
         else:
             outputs = []
             for idx in range(sample_count):
-                with accum_mode(begin=(idx==0), end=(idx==sample_count-1)):
-                    output = self._train_step(dataloader)
+                output = self._train_step(dataloader)
                 outputs.append(output)
             return outputs
 

@@ -787,7 +787,9 @@ class Trainer:
                 desc=epoch_desc,
                 disable=not self.train_args.enable_progress_bar,
             )
-
+        from nnscaler.utils import accum_Manager
+        accum_manager=accum_Manager()
+        accum_manager.set_nsteps(self.train_args.update_freq)
         step_stat: Optional[_StepStat] = None
         for i, batches in data_iter:
             idx = i + resume_from_idx
@@ -798,6 +800,7 @@ class Trainer:
             num_batches = len(batches)
             batches, is_dummy_batch = self._fix_batches(batches)
 
+            accum_manager.reset()
             self.model.train()
 
             self.hook.before_zero_grad(self)

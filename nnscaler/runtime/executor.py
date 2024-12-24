@@ -188,6 +188,10 @@ class Executor:
                     dedup_output_tensors,
                     dedup_output_tensor_grads
                 )
+        
+        from nnscaler.utils import accum_Manager
+        accum_manager=accum_Manager()
+        accum_manager.step()
 
         torch.autograd.backward(
             dedup_output_tensors,

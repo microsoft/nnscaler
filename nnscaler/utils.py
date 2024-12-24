@@ -419,3 +419,26 @@ class accum_mode:
             RuntimeFlag.skip_reducer = (not (step == nsteps - 1))
             yield step
         RuntimeFlag.skip_zero_grad, RuntimeFlag.skip_reducer = old
+
+class accum_Manager:
+    _instance = None
+
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super(accum_Manager, cls).__new__(cls, *args, **kwargs)
+            cls._instance.nsteps=1
+            cls._instance.now_step=0
+            cls._instance.old=(RuntimeFlag.skip_zero_grad, RuntimeFlag.skip_reducer)
+        return cls._instance
+    
+    def set_nsteps(self,nsteps):
+        self.nsteps=nsteps
+    
+    def step(self):
+        RuntimeFlag.skip_zero_grad = (not (self.now_step == 0))
+        RuntimeFlag.skip_reducer = (not (self.now_step == self.nsteps - 1))
+        self.now_step+=1
+    
+    def reset(self):
+        self.now_step=0
+        RuntimeFlag.skip_zero_grad, RuntimeFlag.skip_reducer = self.old

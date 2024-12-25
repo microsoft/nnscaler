@@ -1,0 +1,2 @@
+[console_scripts]
+nnscaler-train = nnscaler.cli.train:main

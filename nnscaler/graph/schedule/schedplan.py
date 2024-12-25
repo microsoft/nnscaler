@@ -342,8 +342,8 @@ class SchedulePlan(PlanBase):
 
     def __init__(self, graph: IRGraph, num_microbatches: int):
         super().__init__(graph)
-        if CompileFlag.async_reducer:
-            raise NotImplementedError("Async reducer is not supported for schedule plan yet.")
+        # if CompileFlag.async_reducer:
+        #     raise NotImplementedError("Async reducer is not supported for schedule plan yet.")
         # execution sequence
         self._num_microbatches = num_microbatches
         # bind to the graph

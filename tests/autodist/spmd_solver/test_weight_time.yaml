@@ -1,6 +1,6 @@
 - allowed_partition_dims:
   - 1,0
-  - 1,1
+  - 0,0
   name: torch.nn.functional.linear
   parent_module: Attention
   replica_allowed: false

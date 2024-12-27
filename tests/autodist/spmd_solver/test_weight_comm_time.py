@@ -34,7 +34,7 @@ def test_follow_AttentionModel():
                                constant_folding=True)
         print(ir_graph.nodes())
 
-    pc_path = Path(os.path.dirname(__file__)) / 'test_weight_time.yaml'
+    pc_path = Path(os.path.dirname(__file__)) / 'test_weight_comm_time.yaml'
     profile_dir = Path(os.path.dirname(__file__)) / './test_follow_attention_profile'
     cfg = AutoDistConfig(partition_constraints_path = pc_path, mesh_col = 4, memory_granularity = 1024, profile_dir = profile_dir)
     model_graph = ModelGraph(ir_graph, cfg)
@@ -49,12 +49,21 @@ def test_follow_AttentionModel():
 
     cost_info = spmd_solver.partition_info
 
-    #double check
     is_correct = True
     for i in range(spmd_solver.graph.op_num):
-        for j in range(spmd_solver.get_op_partition_count(i)):        
-            cost_desc = spmd_solver.calc_partition_cost(i, j)
-            if not cost_desc.weight_update_time==cost_info[i][j].weight_update_time:
+        cur_op = spmd_solver.get_operator(i)
+        
+        if 'linear' in cur_op.op_name:
+            if any(cost_info[i][j].weight_update_time > 0 
+                for j in range(spmd_solver.get_op_partition_count(i))):
+                continue
+            else:
                 is_correct = False
+                break
+        else:
+            if not all(cost_info[i][j].weight_update_time == 0 
+                    for j in range(spmd_solver.get_op_partition_count(i))):
+                is_correct = False
+                break
 
     assert is_correct == True

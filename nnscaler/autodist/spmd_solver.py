@@ -648,7 +648,7 @@ class SPMDSolver:
             assert all(weights_require_grad) or not any(
                 weights_require_grad
             ), f'expect all weights require grad or not, got {weights_require_grad}'
-            if isinstance(tgt_p, IRDimops) and any(weights_require_grad):
+            if isinstance(tgt_p, OpPartition) and any(weights_require_grad):
                 weight_comm_time = self.cost_database.calc_weight_update_time(
                     cur_partition=tgt_p)
             else:

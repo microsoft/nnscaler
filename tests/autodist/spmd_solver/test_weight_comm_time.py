@@ -13,7 +13,7 @@ from nnscaler.autodist.spmd_solver import SPMDSolver
 from tests.autodist.spmd_solver.test_follow import AttentionModel
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA unavailable')
-def test_follow_AttentionModel():
+def test_weight_comm_time():
     from nnscaler.ir.unique import IDGenerator
     IDGenerator().clear()
 
@@ -49,21 +49,12 @@ def test_follow_AttentionModel():
 
     cost_info = spmd_solver.partition_info
 
-    is_correct = True
     for i in range(spmd_solver.graph.op_num):
-        cur_op = spmd_solver.get_operator(i)
-        
-        if 'linear' in cur_op.op_name:
-            if any(cost_info[i][j].weight_update_time > 0 
-                for j in range(spmd_solver.get_op_partition_count(i))):
-                continue
-            else:
-                is_correct = False
-                break
-        else:
-            if not all(cost_info[i][j].weight_update_time == 0 
-                    for j in range(spmd_solver.get_op_partition_count(i))):
-                is_correct = False
-                break
 
-    assert is_correct == True
+        cur_op = spmd_solver.get_operator(i)
+        weight_comm_times = [desc.weight_update_time for desc in cost_info[i]]
+        if 'linear' in cur_op.op_name:
+            assert any(comm > 0 for comm in weight_comm_times)
+        else:
+            assert all(comm == 0 for comm in weight_comm_times)
+

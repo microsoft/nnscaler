@@ -103,11 +103,11 @@ def test_reducer_partially_shared_part():
     graph = build_graph()
     [matmul1, matmul2, add, sum] = graph.select(ntype=IRFwOperation)
 
-    m1, m2 = graph.partition(matmul1, matmul1.algorithms('dim'), idx=0, dim=1, num=2)
+    m1, m2 = graph.partition(matmul1, matmul1.algorithm('dim'), idx=0, dim=1, num=2)
     graph.assign(m1, 0)
     graph.assign(m2, 1)
 
-    add1, add2 = graph.partition(add, add.algorithms('dim'), idx=0, dim=1, num=2)
+    add1, add2 = graph.partition(add, add.algorithm('dim'), idx=0, dim=1, num=2)
     graph.assign(add1, 0)
     graph.assign(add2, 1)
 
@@ -133,7 +133,7 @@ def pas_intra_reducer(graph: IRGraph, config: ComputeConfig):
 
     for i, node in enumerate(fw_nodes):
         if i == 1:
-            sn0, sn1 = graph.partition(node, node.algorithms('dim'), idx=1, dim=0, num=2)
+            sn0, sn1 = graph.partition(node, node.algorithm('dim'), idx=1, dim=0, num=2)
         else:
             sn0, sn1 = graph.replicate(node, 2)
         graph.assign(sn0, 0)

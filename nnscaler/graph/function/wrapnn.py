@@ -26,10 +26,9 @@ from torch.nn.modules.batchnorm import _BatchNorm
 from torch.nn.modules.instancenorm import _InstanceNorm
 from torch.nn.modules._functions import SyncBatchNorm as sync_batch_norm
 
-from nnscaler.graph.function.function import _unwrap_value
 from nnscaler.graph.parser.register import register_op
 from nnscaler.ir.operator import IRFwOperation
-from nnscaler.ir.cten import IRObject, IRTensor
+from nnscaler.ir.cten import IRObject, IRTensor, IR
 from nnscaler.runtime.device import DeviceGroup
 
 
@@ -144,11 +143,11 @@ def batchnorm2d_annotation_fn(*inputs, **kwargs):
        should also be absent.
        Reference: https://pytorch.org/docs/stable/generated/torch.nn.BatchNorm2d.html
     """
-    weight = IRObject.try_unwrap(weight)
-    bias = IRObject.try_unwrap(bias)
-    running_mean = IRObject.try_unwrap(running_mean)
-    running_var = IRObject.try_unwrap(running_var)
-    num_batches_tracked = IRObject.try_unwrap(num_batches_tracked)
+    weight = IR.try_unwrap(weight)
+    bias = IR.try_unwrap(bias)
+    running_mean = IR.try_unwrap(running_mean)
+    running_var = IR.try_unwrap(running_var)
+    num_batches_tracked = IR.try_unwrap(num_batches_tracked)
 
     if weight is None:
         assert bias is None
@@ -375,10 +374,10 @@ def instancenorm2d_annotation_fn(*inputs, **kwargs):
     ), "Expected 5 inputs: input, weight, bias, running_mean, running_var"
     input, weight, bias, running_mean, running_var = inputs
 
-    weight = IRObject.try_unwrap(weight)
-    bias = IRObject.try_unwrap(bias)
-    running_mean = IRObject.try_unwrap(running_mean)
-    running_var = IRObject.try_unwrap(running_var)
+    weight = IR.try_unwrap(weight)
+    bias = IR.try_unwrap(bias)
+    running_mean = IR.try_unwrap(running_mean)
+    running_var = IR.try_unwrap(running_var)
 
     if weight is None:
         assert bias is None

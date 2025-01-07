@@ -113,7 +113,7 @@ def test_extend():
     [1,2].extend(a)
     # in <= python 3.10, opname is CALL_METHOD
     # in >= python 3.11, opname is CALL
-    if sys.version_info.minor <= 10:
+    if sys.version_info < (3, 11):
         assert a.caller_inst.opname == 'CALL_METHOD'
         assert a.len_caller_inst.opname == 'CALL_METHOD'
     else:
@@ -185,23 +185,33 @@ def test_bool():
     bool(x[c])  # CALL_FUNCTION
     # in <= python 3.10, opname is CALL_FUNCTION
     # in >= python 3.11, opname is CALL
-    if sys.version_info.minor <= 10:
+    if sys.version_info < (3, 11):
         assert c.caller_inst.opname == 'CALL_FUNCTION'
     else:
         assert c.caller_inst.opname == 'CALL'
 
     c and 1 # JUMP_IF_FALSE_OR_POP
-    assert c.caller_inst.opname == 'JUMP_IF_FALSE_OR_POP'
+    # in <= python 3.11, opname is JUMP_IF_FALSE_OR_POP
+    # in >= python 3.12, opname is POP_JUMP_IF_FALSE
+    if sys.version_info < (3, 12):
+        assert c.caller_inst.opname == 'JUMP_IF_FALSE_OR_POP'
+    else:
+        assert c.caller_inst.opname == 'POP_JUMP_IF_FALSE'
     c.caller_inst = None
 
     c or 1  # JUMP_IF_TRUE_OR_POP
-    assert c.caller_inst.opname == 'JUMP_IF_TRUE_OR_POP'
+    # in <= python 3.11, opname is JUMP_IF_TRUE_OR_POP
+    # in >= python 3.12, opname is POP_JUMP_IF_TRUE
+    if sys.version_info < (3, 12):
+        assert c.caller_inst.opname == 'JUMP_IF_TRUE_OR_POP'
+    else:
+        assert c.caller_inst.opname == 'POP_JUMP_IF_TRUE'
     c.caller_inst = None
 
     bool(c)  # CALL_FUNCTION
     # in <= python 3.10, opname is CALL_FUNCTION
     # in >= python 3.11, opname is CALL
-    if sys.version_info.minor <= 10:
+    if sys.version_info < (3, 11):
         assert c.caller_inst.opname == 'CALL_FUNCTION'
     else:
         assert c.caller_inst.opname == 'CALL'
@@ -227,7 +237,7 @@ def test_bool():
         pass
     # in <= python 3.10, opname is CALL_FUNCTION
     # in >= python 3.11, opname is CALL
-    if sys.version_info.minor <= 10:
+    if sys.version_info < (3, 11):
         assert c.caller_inst.opname == 'CALL_FUNCTION'
     else:
         assert c.caller_inst.opname == 'CALL'

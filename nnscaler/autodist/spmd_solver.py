@@ -366,7 +366,7 @@ class SPMDSolver:
                                 return False
 
             if p_ids[0] != -1:
-                if not operator.ir_cell.algorithms('dim').satisfy(
+                if not operator.ir_cell.algorithm('dim').satisfy(
                         p_idx, p_dim, p_nums[0]):
                     return False
             return True

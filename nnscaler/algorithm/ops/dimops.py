@@ -170,7 +170,7 @@ class DimSplitEinops(GenericDistAlgo):
             outputs = [t[nid] for t in ous]
             kwargs = rule.modifier()(node.kwargs, idx, dim, num, nid)
             sub_node: IRDimops = node.new(inputs, outputs, **kwargs)
-            sub_node.infer_shape()
+            sub_node.verify_shape()
             sub_nodes.append(sub_node)
 
         return sub_nodes
@@ -286,7 +286,7 @@ def gen_partitions(node: IRFwOperation, ngpus: int, base: int = 2, depth: int = 
     list will contain 4 instances:
         1. matmul with shape (1024, 4096), (4096, 2048) -> (1024, 2048), this means no partition, replicate on 2 gpus
         2. matmul with shape ( 512, 4096), (4096, 2048) -> ( 512, 2048), partition first input first dimension
-        3. matmul with shape (1024, 2048), (2048, 2048) -> (1024, 2048), partition first input second dimension 
+        3. matmul with shape (1024, 2048), (2048, 2048) -> (1024, 2048), partition first input second dimension
         4. matmul with shape (1024, 4096), (4096, 1024) -> (1024, 1024), partition second input second dimension
 
     Args:
@@ -311,7 +311,7 @@ def gen_partitions(node: IRFwOperation, ngpus: int, base: int = 2, depth: int = 
             ret = ret + '-' + str(it.shape)
         return ret
 
-    dq = deque()
+    dq: deque[tuple[IRFwOperation, int, int]] = deque()
     visited = set()
     dq.append((node, ngpus, 0))
     visited.add(gen_hash(node))
@@ -336,7 +336,7 @@ def gen_partitions(node: IRFwOperation, ngpus: int, base: int = 2, depth: int = 
                 if cur_ngpus % split_deg != 0:
                     break
 
-                new_nodes = cur_node.algorithms('dim').instantiate(idx=idx_1st, dim=dim_1st, num=split_deg)
+                new_nodes = cur_node.algorithm('dim').instantiate(idx=idx_1st, dim=dim_1st, num=split_deg)
                 # instantiate may return None if the partition is not possible
                 if new_nodes is None:
                     break

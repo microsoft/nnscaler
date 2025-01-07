@@ -63,7 +63,7 @@ def policy_pp(graph, cfg):
     for i, sub_node in enumerate(sub_nodes):
         graph.assign(sub_node, i)
 
-    sub_nodes = graph.partition(fc1, fc1.algorithms('dim'), idx=0, dim=0, num=2)
+    sub_nodes = graph.partition(fc1, fc1.algorithm('dim'), idx=0, dim=0, num=2)
     graph.assign(sub_nodes[0], 0)
     graph.assign(sub_nodes[1], 1)
 
@@ -72,11 +72,11 @@ def policy_pp(graph, cfg):
     graph.assign(sub_nodes[0], 2)
     graph.assign(sub_nodes[1], 3)
 
-    sub_nodes = graph.partition(fc2, fc2.algorithms('dim'), idx=0, dim=0, num=2)
+    sub_nodes = graph.partition(fc2, fc2.algorithm('dim'), idx=0, dim=0, num=2)
     graph.assign(sub_nodes[0], 2)
     graph.assign(sub_nodes[1], 3)
 
-    sub_nodes = graph.partition(loss, loss.algorithms('dim'), idx=0, dim=0, num=2)
+    sub_nodes = graph.partition(loss, loss.algorithm('dim'), idx=0, dim=0, num=2)
     graph.assign(sub_nodes[0], 2)
     graph.assign(sub_nodes[1], 3)
 

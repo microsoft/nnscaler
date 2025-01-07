@@ -186,7 +186,7 @@ def register_op(annotation: Union[str, Callable], name: Optional[str] = None,
         import_path = get_import_path(fn)
         if import_path == '__main__':
             raise NotImplementedError(
-                f"Cannot register function {fsig} in __main__ module. "
+                f"Cannot register function {fn} in __main__ module. "
                 f"Try to define it in another module and import into main")
 
         if is_autograd_apply(fn):

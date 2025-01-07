@@ -73,14 +73,46 @@ def convert_add_to_valmap(graph: IRGraph, add_node: IRFwOperation):
 
 def flatten_grad(graph: IRSegment, ftensor: IRFullTensor):
     """
-    Reset gradient for consumers that are different (no replica)
-    Gradient valuemap will be flatten inter-devices, e.g.,(0,3), (1,3), (2,3)
-    Gradient valuemap will be exponent intra-devices, e.g., (0,2), (2,4), (3,4)
+    Normalize gradient's valuemap for consumers that are different (no replica).
+    Gradient valuemap will be flatten inside a device, e.g.,(0,3), (1,3), (2,3).
+    Gradient valuemap will be exponent cross devices, e.g., (0,2), (2,4), (3,4).
 
-    @param graph IRGraph: the graph
-    @param ftensor IRFullTensor: the fulltensor
+    Example:
+        Assume a tensor is consumed by 2 linear operators, the source code is:
+        ```python
+        x1 = self.fc0(x0)
+        x2 = self.fc1(x1)
+        x3 = self.fc2(x1)
+        ```
+        There are two devices, `fc0` is partitioned along x's dim 0 (the batch dim),
+        fc1 and fc2 are partitioned along the weight's dim 0. In the forward pass,
+        a `AllGather` is inserted since each device only has a part of x1, while
+        fc1 and fc2 need the full x1. However, in the backward pass, it is hard to
+        generate the communication primitive directly since the `valmap` of consumer
+        sub-tensors are not well ordered. After graph transformation, the `valmap` of
+        x1's grad sub tensors are
+        - fc1 on device 0: (1, 4)
+        - fc1 on device 1: (0, 4)
+        - fc2 on device 0: (3, 4)
+        - fc2 on device 1: (2, 4)
+        The reason for the valmap values is that: 1) After constructing the graph,
+        the corresponding valmap for each consumer is calculated based on the number
+        of consumers. 2) After calling  graph.partition, the valmap for the partitioned
+        sub-consumers is updated.
+        To align with `local_consumer_multiref` and the adapter generation, this function
+        will update the grad tensor of x1 to
+        - fc1 on device 0: (0, 4)
+        - fc2 on device 0: (1, 4)
+        - fc1 on device 1: (2, 4)
+        - fc2 on device 1: (3, 4)
+        e.g., the grad's valuemap is split along the device then along local consumers.
 
-    @return None: this is an inplacement update.
+    Args:
+        graph (IRGraph): the graph
+        ftensor (IRFullTensor): the fulltensor
+
+    Returns:
+        None: input graph is modified inplace
     """
     if not isinstance(ftensor.grad, IRFullTensor): return
     

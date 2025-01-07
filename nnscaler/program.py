@@ -4,7 +4,7 @@
 from typing import List, Tuple, Optional, Any, Dict, Union
 import inspect
 
-from nnscaler.ir.cten import IRCell, IRObject
+from nnscaler.ir.cten import IRCell, IRObject, IR
 from nnscaler.ir.tensor import IRFullTensor, IRSubTensor
 from nnscaler.ir.operator import IRBpOperation, IRDataOperation
 
@@ -119,7 +119,7 @@ class SemanticDataLoader:
         if not isinstance(sample, tuple):
             sample = (sample,)
         # turn sample into IRObjects
-        outputs = tuple(IRObject.from_complex('data', s, tosub=True, requires_grad=False, is_constant=False) for s in sample)
+        outputs = tuple(IR.new('data', s, tosub=True, requires_grad=False, is_constant=False) for s in sample)
         outputs = tuple(IRObject('data', value=out) if not isinstance(out, IRObject) else out for out in outputs)
         # create dataloader operation
         # the `self.irobj` is the IRObject standing for the non-tensor value of real dataloader.

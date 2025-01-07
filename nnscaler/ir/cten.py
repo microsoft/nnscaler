@@ -19,7 +19,7 @@ If an IRTensor is the output of Cell, then Cell.device == IRTensor.device
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import List, Tuple, Union, Optional, Any, Dict, Callable
+from typing import ClassVar, List, Tuple, Union, Optional, Any, Dict, Callable
 from collections import OrderedDict
 import copy
 import torch
@@ -406,16 +406,17 @@ class IRCell:
 
     @staticmethod
     def get_objects_from_complex(val: Any, _objects: List[IRObject] = None) -> List[IRObject]:
-        """Get all IRObjects from a complex data structure
+        """
+        Get all IRObjects (including IRTensor) from a complex data structure
 
-        Supported complex of types: List, Tuple, Dict, IRTensor, IRObject
+        Supported complex of types: List, Tuple, Dict, Slice
 
         Args:
-            val (Any): the complex data structure to be modified
+            val (Any): the complex data structure to be traversed
             _objects (List[IRObject] | None):
                 if provided, the objects will be appened into this
-
-        @return _objects List[IRObject]: all IRObject
+        Returns:
+            List[IRObject]: all IRObject
         """
         _objects = [] if _objects is None else _objects
         if isinstance(val, (tuple, list)):
@@ -432,10 +433,10 @@ class IRCell:
         return _objects
 
     @staticmethod
-    def modify_objects_of_complex(val: Any, modifier: Callable) -> Any:
+    def modify_objects_of_complex(val: Any, modifier: Callable[['IRObject'], 'IRObject']) -> Any:
         """Return a complex data structure with modified IRObjects
 
-        Supported complex of types: List, Tuple, Dict, IRTensor, IRObject
+        Supported complex of types: List, Tuple, Dict, Slice, IRTensor, IRObject
 
         Args:
             val (Any): the complex data structure to be modified
@@ -462,6 +463,8 @@ class IRObject:
     """
     IRObject serves as general data of IRGraph edge
     """
+    # will be set after class definition
+    missing: ClassVar['IRObject'] = None
 
     def __init__(self, name: Optional[str] = None, tid: Optional[int] = None, value: Optional[None] = None, is_constant: bool = True):
         """
@@ -546,6 +549,8 @@ class IRObject:
 
     def __copy__(self):
         """Copy this object but remove the cell information"""
+        if self is IRObject.missing:  # missing object is singleton
+            return IRObject.missing
         return IRObject(self.name, self._id, self._value, self._is_constant)
 
     def as_attr(self):
@@ -572,12 +577,19 @@ class IRObject:
         else:
             return False
 
+    def __repr__(self):
+        return f'Object({self.name}{self.tid}, val={self.value}, is_constant={self.is_constant})'
+
+
+IRObject.missing = IRObject('missing', -1, None)
+
+
+class IR:
     @classmethod
-    def from_complex(cls,
+    def new(cls,
         name: str,
         data: Any,
         *,
-        collection_types: Tuple = (tuple, list, dict),
         tensor_types: Tuple = (torch.Tensor,),
         is_constant: bool = False,
         requires_grad: Optional[bool] = None,
@@ -585,9 +597,14 @@ class IRObject:
     ) -> Any:
         """
         Convert complex data type of
-            collection_types (tuple, list, dict)
+            collection_types (tuple, list, dict, slice, DICT_VALUES_TYPE, DICT_ITEMS_TYPE)
             tensor_types (has shape/dtype/requires_grad)
         into intermediate representation object.
+
+        Note:
+        1. dict_values will be converted into `Tuple`
+           dict_items will be converted into `Tuple[Tuple[Key, Value]]`
+        2. This function cannot be used after logical graph is created (i.e., after parser).
 
         Rule:
             1. All tensor-like objects will be converted into IRFullTensor
@@ -604,24 +621,33 @@ class IRObject:
         Args:
             name (str): the object name
             data (Any): the complex data structure to be converted
-            collection_types (Tuple): the complex data types to be converted
             tensor_types (Tuple): the tensor data types to be converted
-            tosub(bool): whether convert full tensor to sub-tensor
+            tosub(bool): whether convert all full tensors to sub-tensor
+            is_constant (bool): whether the object is constant
             requires_grad (Optional[bool]): the requires_grad flag for the tensor-like object
                 None: will respect the original requires_grad flag
                 True: will set requires_grad to True
                 False: will set requires_grad to False
         """
-        from nnscaler.ir.tensor import IRFullTensor
+        from nnscaler.ir.tensor import IRFullTensor, IRSubTensor
 
-        collection_types = tuple(collection_types)
         tensor_types = tuple(tensor_types)
-        supported_collection_types = (tuple, list, dict, _DICT_VALUES_TYPE, _DICT_ITEMS_TYPE)
-        if any(t not in supported_collection_types for t in collection_types):
-            raise ValueError(f"Only support converting complex data type of {supported_collection_types}")
 
         def _inner(obj) -> Tuple[Any, bool]:
-            # second return is to know if there is any tensor-like object
+            """second return is to know if there is any tensor-like object"""
+
+            if isinstance(obj, IRObject) :
+                assert not isinstance(obj, IRSubTensor), "IRSubTensor is not supported"
+                # Never reuse existing ir object
+                # to make sure we have SSA semantics.
+                if isinstance(obj, IRFullTensor):
+                    new_ir_tensor = obj.like()
+                    if tosub:
+                        new_ir_tensor = new_ir_tensor.tosub()
+                    new_ir_tensor._value = obj.value
+                    return new_ir_tensor, True
+                else:
+                    return IRObject(name, value=obj.value, is_constant=is_constant), False
 
             if isinstance(obj, tensor_types):
                 if requires_grad is None:
@@ -642,46 +668,185 @@ class IRObject:
                 tensor._value = obj  # is required in SemanticModel.forward
                 return tensor, True
 
-            if isinstance(obj, collection_types):
-                if isinstance(obj, tuple):
-                    result = [_inner(item) for item in obj]
-                    if not any(r[1] for r in result):
-                        return IRObject(name, value=obj, is_constant=is_constant), False
-                    else:
-                        return tuple(r[0] for r in result), True
-                if isinstance(obj, list):
-                    result = [_inner(item) for item in obj]
-                    if not any(r[1] for r in result):
-                        return IRObject(name, value=obj, is_constant=is_constant), False
-                    else:
-                        return [r[0] for r in result], True
-                if isinstance(obj, dict):
-                    if not all(isinstance(key, str) for key in obj.keys()):
-                        raise TypeError(f"only support dict type with str key, but got {obj.keys()}.")
-                    result = {k: _inner(v) for k, v in obj.items()}
-                    if not any(r[1] for r in result.values()):
-                        return IRObject(name, value=obj, is_constant=is_constant), False
-                    else:
-                        return {k: r[0] for k, r in result.items()}, True
-                if isinstance(obj, _DICT_VALUES_TYPE):
-                    result = [_inner(item) for item in obj]
-                    if not any(r[1] for r in result):
-                        return IRObject(name, value=obj, is_constant=is_constant), False
-                    else:
-                        return {k: r[0] for k, r in enumerate(result)}.values(), True
-                if isinstance(obj, _DICT_ITEMS_TYPE):
-                    result = {k: _inner(v) for k, v in obj}
-                    if not any(r[1] for r in result.values()):
-                        return IRObject(name, value=obj, is_constant=is_constant), False
-                    else:
-                        return {k: r[0] for k, r in result.items()}.items(), True
-            # slice will go here, as its start/stop/step are never tensor-like objects
+            if isinstance(obj, slice):
+                result = [_inner(item) for item in [obj.start, obj.stop, obj.step]]
+                if not any(r[1] for r in result):
+                    # try not to re-construct the slice if possible.
+                    unwrapped_value = cls.try_unwrap(obj) if cls.contains_object(obj) else obj
+                    return IRObject(name, value=unwrapped_value, is_constant=is_constant), False
+                else:
+                    return slice(*[r[0] for r in result]), True
+
+            if isinstance(obj, tuple):
+                result = [_inner(item) for item in obj]
+                if not any(r[1] for r in result):
+                    # try not to re-construct the tuple if possible.
+                    unwrapped_value = cls.try_unwrap(obj) if cls.contains_object(obj) else obj
+                    return IRObject(name, value=unwrapped_value, is_constant=is_constant), False
+                else:
+                    return tuple(r[0] for r in result), True
+
+            if isinstance(obj, list):
+                result = [_inner(item) for item in obj]
+                if not any(r[1] for r in result):
+                    # try not to re-construct the list if possible.
+                    unwrapped_value = cls.try_unwrap(obj) if cls.contains_object(obj) else obj
+                    return IRObject(name, value=unwrapped_value, is_constant=is_constant), False
+                else:
+                    return [r[0] for r in result], True
+
+            if isinstance(obj, dict):
+                if not all(isinstance(key, str) for key in obj.keys()):
+                    raise TypeError(f"only support dict type with str key, but got {obj.keys()}.")
+                result = {k: _inner(v) for k, v in obj.items()}
+                if not any(r[1] for r in result.values()):
+                    # try not to re-construct the dict if possible.
+                    unwrapped_value = cls.try_unwrap(obj) if cls.contains_object(obj) else obj
+                    return IRObject(name, value=unwrapped_value, is_constant=is_constant), False
+                else:
+                    return {k: r[0] for k, r in result.items()}, True
+
+            if isinstance(obj, _DICT_VALUES_TYPE):
+                result = [_inner(item) for item in obj]
+                if not any(r[1] for r in result):
+                    return IRObject(name, value=cls.try_unwrap(tuple(obj)), is_constant=is_constant), False
+                else:
+                    return tuple(r[0] for r in result), True
+
+            if isinstance(obj, _DICT_ITEMS_TYPE):
+                result = {k: _inner(v) for k, v in obj}
+                if not any(r[1] for r in result.values()):
+                    return IRObject(name, value=cls.try_unwrap(tuple(obj)), is_constant=is_constant), False
+                else:
+                    return tuple((k,r[0]) for k, r in result.items()), True
+
             return IRObject(name, value=obj, is_constant=is_constant), False
 
         return _inner(data)[0]
 
     @classmethod
-    def tosub_complex(cls, obj: Any) -> Any:
+    def get_objects(cls, val: Any) -> List[IRObject]:
+        """
+        Get all IRObjects from a complex data structure
+
+        Supported complex of types: List, Tuple, Dict, Slice
+
+        Args:
+            val (Any): the complex data structure to be modified
+            _objects (List[IRObject] | None):
+                if provided, the objects will be appened into this
+
+        Return:
+            List[IRObject]: all IRObject
+        """
+        return IRCell.get_objects_from_complex(val)
+
+    @classmethod
+    def get_object_paths(cls, val: Any) -> Dict[IRObject, List[str]]:
+        irobj_path = {}
+        def r(t, current_path):
+            if isinstance(t, IRObject):
+                irobj_path[t] = current_path
+            elif isinstance(t, (list, tuple)):
+                for i, v in enumerate(t):
+                    r(v, current_path + [i])
+            elif isinstance(t, dict):
+                for k, v in t.items():
+                    r(v, current_path + [k])
+            elif isinstance(t, slice):
+                raise ValueError("slice is not supported in get_object_paths")
+            else:
+                # do nothing
+                pass
+        r(val, [])
+        return irobj_path
+
+    @classmethod
+    def contains_object(cls, val: Any, condition: Optional[Callable[[IRObject], bool]]=None) -> bool:
+        """
+        Check if there is any IRObject in the complex data structure that satisfies the condition
+
+        Supported complex of types: List, Tuple, Dict, Slice
+
+        Args:
+            val (Any): the complex data structure to be checked
+            condition (Optional[Callable[[IRObject], bool]]): the condition to check. If None, check if there is any IRObject
+
+        Return:
+            bool: True if there is any IRObject that matches the condition
+        """
+        if isinstance(val, dict):
+            return any(cls.contains_object(v, condition) for v in val.values())
+        elif isinstance(val, (list, tuple)):
+            return any(cls.contains_object(v, condition) for v in val)
+        elif isinstance(val, slice):
+            return any(cls.contains_object(v, condition) for v in (val.start, val.stop, val.step))
+        elif isinstance(val, IRObject):
+            return condition is None or condition(val)
+        else:
+            return False
+
+    @classmethod
+    def contains_non_constant_object(cls, val: Any) -> bool:
+        """
+        Check if there is any non-constant IRObject in the complex data structure
+
+        Supported complex of types: List, Tuple, Dict, Slice
+
+        Args:
+            val (Any): the complex data structure to be checked
+
+        Return:
+            bool: True if there is any non-constant IRObject
+        """
+        return cls.contains_object(val, lambda x: not x.is_constant)
+
+    @classmethod
+    def modify_objects(cls, val: Any, modifier: Callable[['IRObject'], 'IRObject']) -> Any:
+        """
+        Return a complex data structure with modified IRObjects
+
+        Supported complex of types: List, Tuple, Dict, Slice
+
+        Args:
+            val (Any): the complex data structure to be modified
+            modifier (Callable): a modifier that takes an IRObject and return a new one.
+
+        Return:
+            new_val (Any): complex data structure with modified IRObjects
+        """
+        return IRCell.modify_objects_of_complex(val, modifier)
+
+    @classmethod
+    def modify_objects_inplace(cls, val: Any, modifier: Callable[['IRObject'], None]) -> None:
+        """Modify a complex data structure inplace
+
+        Supported complex of types: List, Tuple, Dict, Slice, IRTensor, IRObject
+
+        Args:
+            val (Any): the complex data structure to be modified
+            modifier (Callable): a modifier that takes an IRObject and return nothing.
+
+        Return:
+            None
+        """
+        rcall = cls.modify_objects_inplace
+        if isinstance(val, (list, tuple)):
+            for item in val:
+                rcall(item, modifier)
+        if isinstance(val, dict):
+            for k, v in val.items():
+                rcall(k, modifier)
+                rcall(v, modifier)
+        if isinstance(val, slice):
+            for v in (val.start, val.stop, val.step):
+                rcall(v, modifier)
+        if isinstance(val, IRObject):
+            modifier(val)
+        return val
+
+    @classmethod
+    def tosub(cls, obj: Any) -> Any:
         """
         Convert complex data type of tensor-like object into sub-tensor
 
@@ -693,19 +858,22 @@ class IRObject:
         return IRCell.modify_objects_of_complex(obj, modifier)
 
     @classmethod
-    def try_unwrap(cls, x: Union[Any, 'IRObject']) -> Any:
+    def try_unwrap(cls, x: Union[Any, 'IRObject'], unwrap_ir_tensor=False) -> Any:
         """
         Unwrap the IRObject to its original value if it is an IRObject
         otherwise, go recursively.
 
         Args:
             x (Any): the object to unwrap
+            unwrap_ir_tensor (bool): whether unwrap IRTensor
 
         Returns:
             Any: the original value
         """
-        if isinstance(x, IRObject) and not isinstance(x, IRTensor):
-            return x.value
+        if isinstance(x, IRObject):
+            if not isinstance(x, IRTensor) or unwrap_ir_tensor:
+                return x.value
+            return x
         elif isinstance(x, (list, tuple)):
             return type(x)(cls.try_unwrap(v) for v in x)
         elif isinstance(x, dict):
@@ -715,8 +883,12 @@ class IRObject:
         else:
             return x
 
-    def __repr__(self):
-        return f'Object({self.name}{self.tid}, val={self.value}, is_constant={self.is_constant})'
+    @classmethod
+    def is_object(cls, val: Any, include_ir_tensor=False) -> bool:
+        """
+        Check if the value is an IRObject
+        """
+        return isinstance(val, IRObject) and (include_ir_tensor or not isinstance(val, IRTensor))
 
 
 class IRTensor(IRObject):
@@ -730,7 +902,6 @@ class IRTensor(IRObject):
     So all further operations could ignore the scalar tensor case.
     You can get the original shape with `origin_shape` property.
     """
-
     def __init__(self, shape=None, name='tensor', dtype=None, tid=None, *,
         is_attr=False, is_grad=False, requires_grad=False, persistent=False
     ):

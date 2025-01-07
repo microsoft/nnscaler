@@ -127,7 +127,7 @@ def test_autograd_register():
 
         node = ir_graph.select(name='mock_view_with_obj')[0]
         assert node.kwargs['h'] == 4
-        sub_nodes = ir_graph.partition(node, node.algorithms('dim'), idx=0, dim=0, num=2)
+        sub_nodes = ir_graph.partition(node, node.algorithm('dim'), idx=0, dim=0, num=2)
         for sub_node in sub_nodes:
             assert sub_node.kwargs['h'] == 2
 
@@ -211,11 +211,11 @@ def test_transform_rule():
         ir_graph = convert_model(model, {'x': torch.rand(10, 10), 'y': torch.rand(10, 10)}, tempdir, False)
         add_node0 = ir_graph.nodes()[2]
         add_node1 = ir_graph.nodes()[5]
-        sub0, sub1 = ir_graph.partition(add_node0, add_node0.algorithms('dim'), idx=0, dim=0, num=2)
+        sub0, sub1 = ir_graph.partition(add_node0, add_node0.algorithm('dim'), idx=0, dim=0, num=2)
         assert sub0.kwargs['z'] == 10
         assert sub1.kwargs['z'] == 20
 
-        sub2, sub3 = ir_graph.partition(add_node1, add_node1.algorithms('dim'), idx=0, dim=1, num=2)
+        sub2, sub3 = ir_graph.partition(add_node1, add_node1.algorithm('dim'), idx=0, dim=1, num=2)
         assert sub2.kwargs['z'] == 10
         assert sub3.kwargs['z'] == 10
 

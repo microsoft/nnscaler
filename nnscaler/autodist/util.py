@@ -43,7 +43,7 @@ def get_node_arch():
 # tensor parallelism
 def tp(graph: IRGraph, node: IRFwOperation, devs: List[int], idx: int,
        dim: int):
-    algo = node.algorithms('dim')
+    algo = node.algorithm('dim')
     sub_nodes = graph.partition(node, algo, idx=idx, dim=dim, num=len(devs))
     assert sub_nodes is not None
     for devid, sub_node in zip(devs, sub_nodes):
@@ -58,13 +58,13 @@ def replica(graph: IRGraph, node: IRFwOperation, devs: List[int]):
     return sub_nodes
 
 
-def partition_node(node: IRFwOperation, graph: IRGraph, devs: [int],
+def partition_node(node: IRFwOperation, graph: IRGraph, devs: List[int],
                    desc: NodePartitionDesc) -> None:
     min_dev_index = min(devs)
     tp_size = len(devs)
     info = desc.desc
 
-    dq = deque()
+    dq: deque[tuple[IRFwOperation, tuple[int, int]]] = deque()
     dq.append((node, (0, tp_size)))
     for (idx, dim), num in info:
 
@@ -80,7 +80,7 @@ def partition_node(node: IRFwOperation, graph: IRGraph, devs: [int],
                 sub_nodes = graph.replicate(u, times=num)
             else:
                 assert idx >= 0 and dim >= 0
-                algo = u.algorithms('dim')
+                algo = u.algorithm('dim')
                 sub_nodes = graph.partition(u, algo, idx=idx, dim=dim, num=num)
             for i in range(num):
                 cur_nodes.append((sub_nodes[i], sub_intervals[i]))

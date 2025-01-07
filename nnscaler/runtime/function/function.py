@@ -342,6 +342,18 @@ def setitem(__a, *__bc):
     return __a
 
 
+def dict_keys(d: dict):
+    return tuple(d.keys())
+
+
+def dict_values(d: dict):
+    return tuple(d.values())
+
+
+def dict_items(d: dict):
+    return tuple(d.items())
+
+
 def print_time(content: str):
     if not CompileFlag.line_timer:
         return

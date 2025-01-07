@@ -76,7 +76,8 @@ def to_fx_graph(model: torch.nn.Module, dummy_input) -> torch.fx.GraphModule:
     Returns:
         torch.fx.GraphModule representation of model
     """
-    # get registered leaf function
+    # get user registered functions, and treat them as leaf functions
+    # torch function/operators/builtins/... are automatically handled as leaf functions by concrete trace
     autowrap_funcs = [CustomizedOps.kOpRuntime[sign] for sign in CustomizedOps.kOpMap]
     # filter out torch.autograd.Function.apply as concrete trace already treats them as leaf function
     autowrap_funcs = [fn for fn in autowrap_funcs if not is_autograd_apply(fn)]
@@ -100,7 +101,10 @@ def to_fx_graph(model: torch.nn.Module, dummy_input) -> torch.fx.GraphModule:
         func: LeafWrapInfo([Location(cube_rt_function, func.__name__)], True, None)
         for func in cube_rt_funcs
     })
-    dce_ignored_funcs = set(cube_rt_funcs)
+
+    # keep all leaf functions in the graph (even if leaf functions have no return value)
+    # Please note the result graph is not always DAG, and can have outliers.
+    dce_ignored_funcs = set(leaf_functions)
 
     with no_save_tensor_hook(), warnings.catch_warnings():
         # ignore the warning from fx about get_attr

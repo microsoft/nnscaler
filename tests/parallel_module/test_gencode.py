@@ -5,14 +5,18 @@ import inspect
 import tempfile
 import re
 from contextlib import nullcontext
+from typing import Union
 
 import torch
 import torch.nn.functional as F
 import pytest
-from torch.torch_version import TorchVersion
+from unittest.mock import patch
 
 from nnscaler.flags import CompileFlag
 import nnscaler.graph.function.dimops
+from nnscaler.graph.function.pyfunc import IRPyFunc
+from nnscaler.graph.parser.mapping import SignFx2Op
+from nnscaler.ir.cten import IR, IRObject
 from nnscaler.parallel import parallelize, ComputeConfig, CubeModule, _gen_graph
 
 from .common import init_distributed
@@ -1676,3 +1680,149 @@ def test_fold_constant(tmp_path, fold_input):
         # mul_2_51 = torch.mul(mul_1_57, add_38)
         assert _gencode_contains(tmp_path, CCFModule2, 0,
                                  r'mul_.* = torch\.mul\(mul_.*, add_.*\)')
+
+
+@nnscaler.register_op('? ->')
+def _op1(k):
+    pass
+
+
+@nnscaler.register_op('? -> ?')
+def _op2(k):
+    pass
+
+
+@nnscaler.register_op(' -> ?')
+def _op3():
+    return 1
+
+
+@nnscaler.register_op('? -> ?')
+def _op4(k):
+    return 1 if k else 0
+
+
+class IRNoneModule(torch.nn.Module):
+    def forward(self, x):
+        _op1(2)
+        r = _op2(3)
+        r = _op3() + _op4(r)
+        return x + r
+
+
+@replace_all_device_with('cpu')
+def test_no_return(tmp_path):
+    m = IRNoneModule()
+    m.train()
+    parallelize(
+        m,
+        {'x': torch.randn(128, 64)},
+        'dp',
+        ComputeConfig(1, 1),
+        gen_savedir=tmp_path,
+        reuse='override',
+        load_module=False,
+    )
+    # it should looks like:
+    # def segment19(self, x_23):
+    #     # File "/home/weijiangxu/nanogpt/MagicCube/tests/parallel_module/test_gencode.py", line 1707, in forward,  _op1(2)
+    #     tests.parallel_module.test_gencode._op1(2)
+    #     # File "/home/weijiangxu/nanogpt/MagicCube/tests/parallel_module/test_gencode.py", line 1708, in forward,  r = _op2(3)
+    #     _op2_4 = tests.parallel_module.test_gencode._op2(3)
+    #     # File "/home/weijiangxu/nanogpt/MagicCube/tests/parallel_module/test_gencode.py", line 1709, in forward,  r = _op3() + _op4(r)
+    #     _op3_5 = tests.parallel_module.test_gencode._op3()
+    #     # File "/home/weijiangxu/nanogpt/MagicCube/tests/parallel_module/test_gencode.py", line 1709, in forward,  r = _op3() + _op4(r)
+    #     _op4_6 = tests.parallel_module.test_gencode._op4(_op2_4)
+    #     # File "/home/weijiangxu/nanogpt/MagicCube/tests/parallel_module/test_gencode.py", line 1709, in forward,  r = _op3() + _op4(r)
+    #     add_15 = _operator.add(_op3_5, _op4_6)
+    #     # File "/home/weijiangxu/nanogpt/MagicCube/tests/parallel_module/test_gencode.py", line 1710, in forward,  return x + r
+    #     add_1_20 = torch.add(x_23, add_15, alpha=1)
+    #     del x_23
+    #     return add_1_20
+
+    #  _op1 will not be removed by DCE in tracer
+    assert _gencode_contains(tmp_path, IRNoneModule, 0,
+                                 r'tests\.parallel_module\.test_gencode\._op1')
+
+
+class IRUseNoneModule(torch.nn.Module):
+    def forward(self, x):
+        r = _op3() + _op4(_op1(2))
+        return x + r
+
+
+@replace_all_device_with('cpu')
+def test_use_none_return(tmp_path):
+    m = IRUseNoneModule()
+    m.train()
+    # it should raise an error, because _op1 has no return value, but it is used in _op4
+    with pytest.raises(KeyError):
+        parallelize(
+            m,
+            {'x': torch.randn(128, 64)},
+            'dp',
+            ComputeConfig(1, 1),
+            gen_savedir=tmp_path,
+            reuse='override',
+            load_module=False,
+        )
+
+
+
+@nnscaler.register_op('? -> ?, ?')
+def _op5(k):
+    return 1 + k, 2
+
+
+def _op6(k):
+    return 1 + k, 2
+
+
+# the ops registered with register_op can't cover all code path in parser
+def Op6(o: Union[int, IRObject], signature=None):
+    o = IR.try_unwrap(o)
+    return IRPyFunc(signature, inputs=[o], outputs=[
+        IRObject(name='_op6', value=o + 1, is_constant=True),
+        IRObject(name='_op6', value=2, is_constant=True),
+    ])
+
+
+class IRMultiOutputModule(torch.nn.Module):
+    def forward(self, x):
+        r0, _ = _op5(2)
+        r1, _ = _op6(3)
+        return x + r0 + r1
+
+
+
+@replace_all_device_with('cpu')
+def test_multi_output_op(tmp_path):
+    SignFx2Op.kOpMap['tests.parallel_module.test_gencode._op6'] = Op6
+
+    from nnscaler.graph.tracer import concrete_trace
+    from nnscaler.graph.tracer.wrap_utils import LeafWrapInfo
+    def patched_concrete_trace(*args, **kwargs):
+        kwargs['dce_ignored_function'].add(_op6)
+        kwargs['autowrap_leaf_function'][_op6] = LeafWrapInfo([], True, None)
+
+        return concrete_trace(*args, **kwargs)
+
+    with patch(
+        "nnscaler.graph.parser.converter.concrete_trace",
+        side_effect=patched_concrete_trace
+    ):
+        m = IRMultiOutputModule()
+        m.train()
+        parallelize(
+            m,
+            {'x': torch.randn(128, 64)},
+            'dp',
+            ComputeConfig(1, 1),
+            gen_savedir=tmp_path,
+            reuse='override',
+            load_module=False,
+        )
+
+    SignFx2Op.kOpMap.pop('tests.parallel_module.test_gencode._op6')
+    # should success
+    assert True

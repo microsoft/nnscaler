@@ -62,7 +62,7 @@ def policy(graph: IRGraph, resource: ComputeConfig) -> IRGraph:
         if not partitioned and node.signature == 'zigzag_attn.wrap_zigzag_attn_func':
             print('Partitioned node: ', node)
             sub_nodes = graph.partition(
-                node, node.algorithms('dim'), idx=0, dim=1, num=ngpus)
+                node, node.algorithm('dim'), idx=0, dim=1, num=ngpus)
             partitioned = True
         else:
             sub_nodes = graph.replicate(node, times=ngpus)

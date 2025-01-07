@@ -32,6 +32,7 @@ from nnscaler.graph.function.anchor import IRGraphAnchor
 from nnscaler.graph.function.dimops import IRDimops
 from nnscaler.graph.segment import IRSegment
 from nnscaler.ir.operator import IRDataOperation, IRFwOperation
+from nnscaler.ir import IRCell, IRSubTensor, IRFullTensor
 
 
 if TYPE_CHECKING:
@@ -44,7 +45,7 @@ _logger = logging.getLogger(__name__)
 def _tp(graph: IRGraph, node: IRDimops, devs: List[int], idx: int, dim: int):
     if len(devs) > 1:
         sub_nodes = graph.partition(
-            node, node.algorithms('dim'), idx=idx, dim=dim, num=len(devs))
+            node, node.algorithm('dim'), idx=idx, dim=dim, num=len(devs))
     else:
         sub_nodes = [node]
     for devid, sub_node in zip(devs, sub_nodes):
@@ -57,6 +58,21 @@ def _replica(graph: IRGraph, node, devs: List[int]):
     for devid, sub_node in zip(devs, sub_nodes):
         graph.assign(sub_node, devid)
     return sub_nodes
+
+
+def is_tensor_in_output(t: IRFullTensor, graph: IRSegment) -> bool:
+    for output in IRCell.get_objects_from_complex(graph.outputs()):
+        if isinstance(output, IRSubTensor) and output.parent == t:
+            return True
+    return False
+
+
+def auto_multiref(graph: IRGraph):
+    for ftensor in graph.full_tensors():
+        if ftensor.is_grad(): continue
+        in_output = int(is_tensor_in_output(ftensor, graph))
+        if len(graph.consumers(ftensor)) + in_output > 1:
+            graph.multiref(ftensor, comment='auto_multiref')
 
 
 def pas_dp(graph: IRGraph, cfg: 'ComputeConfig'):
@@ -85,10 +101,7 @@ def pas_tp(graph: IRGraph, cfg: 'ComputeConfig'):
     random.seed(seed)
     devs = list(range(ngpus))
 
-    for ftensor in graph.full_tensors():
-        if ftensor.is_grad(): continue
-        if len(graph.consumers(ftensor)) > 1:
-            graph.multiref(ftensor)
+    auto_multiref(graph)
 
     for node in graph.select(ntype=(IRFwOperation, IRDataOperation)):
         if node.name == 'multiref' or isinstance(node, IRGraphAnchor):
@@ -103,7 +116,7 @@ def pas_tp(graph: IRGraph, cfg: 'ComputeConfig'):
                 random.shuffle(configs)
                 for (idx, dim) in configs:
                     if node.input(idx).shape[dim] % len(devs) != 0: continue
-                    if node.algorithms('dim').satisfy(idx=idx, dim=dim, num=len(devs)):
+                    if node.algorithm('dim').satisfy(idx=idx, dim=dim, num=len(devs)):
                         _tp(graph, node, devs, idx, dim)
                         break
                 else:
@@ -130,10 +143,7 @@ def pas_data(graph: IRGraph, env_resource: 'ComputeConfig'):
     tensor partition on batch dimension inside a scale unit, and dp across scale units
     """
     ngpus = env_resource.plan_ngpus
-    # auto multi-ref
-    for ftensor in graph.full_tensors():
-        if len(graph.consumers(ftensor)) > 1:
-            graph.multiref(ftensor, [[n] for n in graph.consumers(ftensor)])
+    auto_multiref(graph)
 
     batch_dim = 0
     for dl in graph.select(ntype=IRDataOperation):
@@ -142,7 +152,7 @@ def pas_data(graph: IRGraph, env_resource: 'ComputeConfig'):
     for node in graph.nodes():
         if isinstance(node, IRFwOperation):
             try:
-                algo = node.algorithms('dim')
+                algo = node.algorithm('dim')
                 idx = 0
                 sub_nodes = graph.partition(
                     node, algo, idx=idx, dim=batch_dim, num=ngpus)
@@ -172,6 +182,7 @@ def pas_hybrid(graph: IRGraph, cfg: 'ComputeConfig'):
         raise ValueError(f'invalid tp_size {tp_size} for ngpus {ngpus}')
     pp_size = ngpus // tp_size
 
+    auto_multiref(graph)
     fnodes = graph.select(ntype=IRFwOperation)
     stages = mitr.divide(pp_size, fnodes)
     stages = [list(s) for s in stages]

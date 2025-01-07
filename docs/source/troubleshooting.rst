@@ -114,6 +114,8 @@ Run the following command: ::
 
     python -c 'import os,sys,nnscaler,cppimport.import_hook ; sys.path.append(os.path.dirname(nnscaler.__path__[0])) ; import nnscaler.autodist.dp_solver'
 
+If it complains ``GLIBCXX_x.y.z`` not found, check the next issue.
+
 Example stacktrace: ::
 
     Traceback (most recent call last):
@@ -140,6 +142,25 @@ Example stacktrace: ::
       File ".../nnscaler/autodist/spmd_solver.py", line 1183, in do_dp
         import nnscaler.autodist.dp_solver as dp_solver
     ModuleNotFoundError: No module named 'nnscaler.autodist.dp_solver'
+
+"ImportError: ...... libstdc++.so.6: version \`GLIBCXX_x.y.z' not found"
+-------------------------------------------------------------------------
+
+This is caused by gcc and glibc version mismatch.
+Typically it means it's using the system gcc and conda's glibc.
+
+You can remove conda's glibc to force it use system glibc: ::
+
+    rm <PATH_TO_CONDA_ENV>/lib/libstdc++.so.6
+
+The path is shown in the error message.
+
+Example stacktrace: ::
+
+    $ python -c 'import nnscaler,cppimport.import_hook ; import nnscaler.autodist.dp_solver'
+    Traceback (most recent call last):
+      File "<string>", line 1, in <module>
+    ImportError: /home/user/miniconda3/envs/user/bin/../lib/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by .../nnscaler/autodist/dp_solver.cpython-310-x86_64-linux-gnu.so)
 
 Incorrect Usages
 ================

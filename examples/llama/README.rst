@@ -162,7 +162,7 @@ If the profiling is skipped, the system will use MI250's data by default. You ca
 
 .. code-block:: bash
 
-    cd nnscaler && python utility/prim_profiler.py
+    torchrun --nnodes=<X> --nproc_per_node=<Y> -m nnscaler.profiler.benchmark_comm
 
 Checkpoint
 ==========
@@ -288,9 +288,9 @@ For example, you can use the following command to prepare data and train a small
 
     # prepare data
     python bookcorpus.py --data_path_or_name bookcorpus/bookcorpus --tokenizer_path_or_name meta-llama/Meta-Llama-3-8B-Instruct --save_path ./bookcorpus_llama3_4K --sequence_length 4096
-    
+
     # build the mini model
     python create_mini_model.py --model_id meta-llama/Meta-Llama-3-8B-Instruct --output_id ./llama3_mini
-    
+
     # compile and run using data parallelism + zero1
     torchrun --nproc_per_node=2 train.py --plan_ngpus 1 --runtime_ngpus 2 --name llama3_debug --model_id ./llama3_mini --dataset_path ./bookcorpus_llama3_4K

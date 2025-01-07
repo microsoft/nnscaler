@@ -38,9 +38,9 @@ class Module(torch.nn.Module):
         return torch.sum(x)
 
 
-def tensor_parallelism(graph, node, idx, dim, num):
+def tensor_parallelism(graph, node: IRFwOperation, idx, dim, num):
     sub_nodes = graph.partition(
-        node, node.algorithms('dim'), idx=idx, dim=dim, num=num)
+        node, node.algorithm('dim'), idx=idx, dim=dim, num=num)
     for idx, sub_node in enumerate(sub_nodes):
         graph.assign(sub_node, idx)
     return sub_nodes

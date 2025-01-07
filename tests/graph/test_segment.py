@@ -17,7 +17,7 @@ from nnscaler.graph import IRGraph
 from nnscaler.ir.adapter import IRAdapter
 from nnscaler.parallel import ComputeConfig, parallelize, build_optimizer
 from nnscaler.ir.operator import IRFwOperation, IRDataOperation
-from tests.parallel_module.test_gencode import _gencode_contains
+from tests.parallel_module.test_gencode import _gencode_contains, print_gencode
 from ..utils import replace_all_device_with, clear_dir_on_rank0, init_random
 from ..launch_torchrun import torchrun
 
@@ -88,25 +88,27 @@ class ModelA(nn.Module):
         q = q.transpose(0, 1)
         l = q.sum()
         return l, l.data
- 
- 
+
+
 def policy_transpose(graph: IRGraph, resource: ComputeConfig) -> IRGraph:
     ngpus = resource.plan_ngpus
     for _, node in enumerate(graph.select(ntype=IRFwOperation)):
         print(node.signature)
-        if node.signature in ["torch.transpose"]:
+        if node.signature == 'torch.sum':
+            graph.multiref(node.outputs()[0].parent)
+        if node.signature in ["torch.transpose", "torch.sum"]:
             sub_nodes = graph.partition(
-                node, node.algorithms('dim'), idx=0, dim=0, num=ngpus)
+                node, node.algorithm('dim'), idx=0, dim=0, num=ngpus)
         else:
             sub_nodes = graph.replicate(node, times=ngpus)
- 
+
         for idx, sub_node in enumerate(sub_nodes):
             graph.assign(sub_node, idx)
     for node in graph.select(ntype=IRDataOperation):
         sub_nodes = graph.replicate(node, times=ngpus)
         for idx, sub_node in enumerate(sub_nodes):
             graph.assign(sub_node, idx)
- 
+
     return graph
 
 
@@ -126,6 +128,7 @@ def worker_a():
             gen_savedir=tempdir,
             reuse='override',
         )
+        # print_gencode(tempdir, ModelA, pm.rank)
         pm.to('cuda')
         ret = pm.train_step((data,))
 
@@ -158,7 +161,7 @@ class ModelB(nn.Module):
 def policy_nograd(graph: IRGraph, cfg: ComputeConfig) -> IRGraph:
     ngpus = cfg.plan_ngpus
     # print(graph.nodes())
-    if cfg.use_end2end: 
+    if cfg.use_end2end:
         fc1_node = graph.nodes()[1]
         func_node = graph.nodes()[2]
     else:
@@ -177,16 +180,16 @@ def policy_nograd(graph: IRGraph, cfg: ComputeConfig) -> IRGraph:
         # print(node.signature)
         if node.signature == 'torch.nn.functional.linear':
             sub_nodes = graph.partition(
-                node, node.algorithms('dim'), idx=0, dim=0, num=ngpus)
+                node, node.algorithm('dim'), idx=0, dim=0, num=ngpus)
         elif node.signature == 'torch.sum':
             sub_nodes = graph.partition(
-                node, node.algorithms('dim'), idx=0, dim=1, num=ngpus)
+                node, node.algorithm('dim'), idx=0, dim=1, num=ngpus)
         elif 'func' in node.signature:
             sub_nodes = graph.partition(
-                node, node.algorithms('dim'), idx=0, dim=0, num=ngpus)
+                node, node.algorithm('dim'), idx=0, dim=0, num=ngpus)
         else:
             sub_nodes = graph.replicate(node, times=ngpus)
- 
+
         for idx, sub_node in enumerate(sub_nodes):
             graph.assign(sub_node, idx)
 

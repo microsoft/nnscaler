@@ -102,7 +102,7 @@ def tensor_parallelism(graph: IRGraph, node: IRDimops,
         graph.assign(node, devs[0])
         return [node]
     # transformation
-    algo = node.algorithms('dim')
+    algo = node.algorithm('dim')
     sub_nodes = graph.partition(node, algo, idx=idx, dim=dim, num=len(devs))
     assert sub_nodes is not None
 

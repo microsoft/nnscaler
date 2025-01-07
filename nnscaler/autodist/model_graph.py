@@ -526,6 +526,7 @@ class ModelGraph:
         self.cost_database = CostDatabase(
                                 self.ir_graph,
                                 profile_dir=autodist_config.profile_dir,
+                                plan_ngpus=autodist_config.ngpus,
                                 memory_granularity=autodist_config.memory_granularity,
                                 ignore_small_tensor_threshold=autodist_config.ignore_small_tensor_threshold,
                              )

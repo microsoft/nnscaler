@@ -75,7 +75,7 @@ def reducer(use_zero: bool, async_reducer: bool):
 
         def tensor_parallelism(node, idx, dim, num):
             sub_nodes = graph.partition(
-                node, node.algorithms('dim'), idx=idx, dim=dim, num=num)
+                node, node.algorithm('dim'), idx=idx, dim=dim, num=num)
             for idx, sub_node in enumerate(sub_nodes):
                 graph.assign(sub_node, idx)
             return sub_nodes

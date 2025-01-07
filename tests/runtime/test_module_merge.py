@@ -49,7 +49,7 @@ def tp_policy(graph, resource):
     for idx, node in enumerate(graph.select(ntype=IRFwOperation)):
         if node.name == 'add':
             sub_nodes = graph.partition(
-                node, node.algorithms('dim'), idx=1, dim=idx % 2, num=resource.ngpus)
+                node, node.algorithm('dim'), idx=1, dim=idx % 2, num=resource.ngpus)
         else:
             sub_nodes = graph.replicate(node, times=resource.ngpus)
         for devid, node in enumerate(sub_nodes):

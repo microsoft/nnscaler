@@ -152,7 +152,7 @@ class SignFx2Op:
         'builtins.list': function.MakeList,
         'builtins.slice': function.MakeSlice,
         'builtins.len': function.Len,
-        'builtins.dict.keys': function.Dictkeys,
+        'builtins.dict.keys': function.DictKeys,
         'builtins.dict.values': function.DictValues,
         'builtins.dict.items': function.DictItems,
 

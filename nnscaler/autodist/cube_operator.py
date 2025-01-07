@@ -136,7 +136,7 @@ class CubeOperator:
             if not isinstance(self.ir_cell, IRDimops):
                 raise ValueError(f'{self.ir_cell} is not IRDimops')
             idx, dim = pos
-            adim, reduce_type = self.ir_cell.algorithms(
+            adim, reduce_type = self.ir_cell.algorithm(
                 'dim').get_identifier_reduce(idx, dim, 2)
             assert adim is not None, f'cannot find dim at {pos} in {self.ir_cell}'
             return adim

@@ -35,7 +35,7 @@ def policy(graph: IRGraph, resource: ComputeConfig, dim: int) -> IRGraph:
         ):
             print("Partitioned node: ", node)
             sub_nodes = graph.partition(
-                node, node.algorithms("dim"), idx=0, dim=dim, num=ngpus
+                node, node.algorithm("dim"), idx=0, dim=dim, num=ngpus
             )
             partitioned = True
         elif (
@@ -45,7 +45,7 @@ def policy(graph: IRGraph, resource: ComputeConfig, dim: int) -> IRGraph:
         ):
             print("Partitioned node: ", node)
             sub_nodes = graph.partition(
-                node, node.algorithms("dim"), idx=0, dim=0, num=ngpus
+                node, node.algorithm("dim"), idx=0, dim=0, num=ngpus
             )
             partitioned = True
         else:

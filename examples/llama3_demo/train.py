@@ -89,9 +89,12 @@ class WrapperModel(torch.nn.Module):
             config = AutoConfig.from_pretrained(model_id)
             if num_hidden_layers:
                 config.num_hidden_layers = num_hidden_layers
+            # using kv cache may fail nnscaler's tracing in certain transformers versions,
+            # and training does not need kv cache
+            config.use_cache = False
             self.model = AutoModelForCausalLM.from_config(config)
         else:
-            self.model = AutoModelForCausalLM.from_pretrained(model_id)
+            self.model = AutoModelForCausalLM.from_pretrained(model_id, use_cache=False)
 
     def forward(self, data):
         result = self.model(
@@ -242,13 +245,9 @@ def main():
         resume_from=args.resume_from,
     )
 
-    timestamp = datetime.now().strftime('%y%m%d%H%M%S')
     log_config = LogConfig(
         type=TensorBoardLogger,
-        args={
-            'name': f'llama3-example-{timestamp}',
-            'root_dir': 'runs',
-        },
+        args={'name': 'llama3_demo', 'root_dir': 'runs'},
     )
 
     trainer_args = TrainerArgs(

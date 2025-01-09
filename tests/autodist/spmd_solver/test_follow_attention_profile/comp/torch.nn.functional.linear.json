@@ -178,5 +178,185 @@
     "train_mem2in_idx": [
       0
     ]
+  },
+  "(1024, 128, 512)-(512, 512)-(1024, 128, 512) : torch.float32-torch.float32-torch.float32 : False-True-True": {
+    "in_mem_info": [
+      268435456
+    ],
+    "param_mem_info": [
+      1048576
+    ],
+    "buffer_mem_info": [],
+    "fw_span": 3.676068701315671,
+    "bw_span": 3.4677902469411492,
+    "infer_memory": 537919488,
+    "train_mem_info": [
+      268435456
+    ],
+    "train_mem2in_idx": [
+      0
+    ]
+  },
+  "(1024, 128, 512)-(512, 512)-(1024, 128, 512) : torch.float32-torch.float32-torch.float32 : True-True-True": {
+    "in_mem_info": [
+      268435456
+    ],
+    "param_mem_info": [
+      1048576
+    ],
+    "buffer_mem_info": [],
+    "fw_span": 3.5645860014483333,
+    "bw_span": 7.554841847741045,
+    "infer_memory": 537919488,
+    "train_mem_info": [
+      268435456
+    ],
+    "train_mem2in_idx": [
+      0
+    ]
+  },
+  "(256, 128, 512)-(512, 512)-(256, 128, 512) : torch.float32-torch.float32-torch.float32 : True-True-True": {
+    "in_mem_info": [
+      67108864
+    ],
+    "param_mem_info": [
+      1048576
+    ],
+    "buffer_mem_info": [],
+    "fw_span": 0.878563299193047,
+    "bw_span": 2.114360549603589,
+    "infer_memory": 135266304,
+    "train_mem_info": [
+      67108864
+    ],
+    "train_mem2in_idx": [
+      0
+    ]
+  },
+  "(1024, 32, 512)-(512, 512)-(1024, 32, 512) : torch.float32-torch.float32-torch.float32 : True-True-True": {
+    "in_mem_info": [
+      67108864
+    ],
+    "param_mem_info": [
+      1048576
+    ],
+    "buffer_mem_info": [],
+    "fw_span": 0.8812009502435103,
+    "bw_span": 2.1753207489382476,
+    "infer_memory": 135266304,
+    "train_mem_info": [
+      67108864
+    ],
+    "train_mem2in_idx": [
+      0
+    ]
+  },
+  "(1024, 128, 128)-(512, 128)-(1024, 128, 512) : torch.float32-torch.float32-torch.float32 : True-True-True": {
+    "in_mem_info": [
+      67108864
+    ],
+    "param_mem_info": [
+      262144
+    ],
+    "buffer_mem_info": [],
+    "fw_span": 0.9327267005573958,
+    "bw_span": 2.1754517510998994,
+    "infer_memory": 335806464,
+    "train_mem_info": [
+      67108864
+    ],
+    "train_mem2in_idx": [
+      0
+    ]
+  },
+  "(1024, 128, 512)-(128, 512)-(1024, 128, 128) : torch.float32-torch.float32-torch.float32 : True-True-True": {
+    "in_mem_info": [
+      268435456
+    ],
+    "param_mem_info": [
+      262144
+    ],
+    "buffer_mem_info": [],
+    "fw_span": 0.8943363005528226,
+    "bw_span": 3.1606494478182867,
+    "infer_memory": 335806464,
+    "train_mem_info": [
+      268435456
+    ],
+    "train_mem2in_idx": [
+      0
+    ]
+  },
+  "(256, 128, 512)-(512, 512)-(256, 128, 512) : torch.float32-torch.float32-torch.float32 : False-True-True": {
+    "in_mem_info": [
+      67108864
+    ],
+    "param_mem_info": [
+      1048576
+    ],
+    "buffer_mem_info": [],
+    "fw_span": 0.8906060509616509,
+    "bw_span": 0.9754885511938483,
+    "infer_memory": 135266304,
+    "train_mem_info": [
+      67108864
+    ],
+    "train_mem2in_idx": [
+      0
+    ]
+  },
+  "(1024, 32, 512)-(512, 512)-(1024, 32, 512) : torch.float32-torch.float32-torch.float32 : False-True-True": {
+    "in_mem_info": [
+      67108864
+    ],
+    "param_mem_info": [
+      1048576
+    ],
+    "buffer_mem_info": [],
+    "fw_span": 0.8930985495680943,
+    "bw_span": 0.970124252489768,
+    "infer_memory": 135266304,
+    "train_mem_info": [
+      67108864
+    ],
+    "train_mem2in_idx": [
+      0
+    ]
+  },
+  "(1024, 128, 128)-(512, 128)-(1024, 128, 512) : torch.float32-torch.float32-torch.float32 : False-True-True": {
+    "in_mem_info": [
+      67108864
+    ],
+    "param_mem_info": [
+      262144
+    ],
+    "buffer_mem_info": [],
+    "fw_span": 0.964942600694485,
+    "bw_span": 0.9711627993965521,
+    "infer_memory": 335806464,
+    "train_mem_info": [
+      67108864
+    ],
+    "train_mem2in_idx": [
+      0
+    ]
+  },
+  "(1024, 128, 512)-(128, 512)-(1024, 128, 128) : torch.float32-torch.float32-torch.float32 : False-True-True": {
+    "in_mem_info": [
+      268435456
+    ],
+    "param_mem_info": [
+      262144
+    ],
+    "buffer_mem_info": [],
+    "fw_span": 0.9325099003035575,
+    "bw_span": 1.0177240503253415,
+    "infer_memory": 335806464,
+    "train_mem_info": [
+      268435456
+    ],
+    "train_mem2in_idx": [
+      0
+    ]
   }
 }

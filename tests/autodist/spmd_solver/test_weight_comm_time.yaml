@@ -1,0 +1,17 @@
+- allowed_partition_dims:
+  - 0,0
+  name: torch.nn.functional.linear
+  parent_module: Attention
+  replica_allowed: false
+- allowed_partition_dims:
+  - 0,0
+  - 0,1
+  name: torch.matmul
+  parent_module: Attention
+  replica_allowed: false
+- allowed_partition_dims:
+  - 0,0
+  - 0,1
+  name: torch.nn.functional.softmax
+  parent_module: Attention
+  replica_allowed: false

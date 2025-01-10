@@ -31,3 +31,4 @@ def test_script_func():
             gen_savedir=tempdir,
             load_module=False
         )
+        assert True

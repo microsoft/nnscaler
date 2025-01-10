@@ -13,7 +13,8 @@ nnScaler is a parallelization engine that compiles a Deep neural network (DNN) m
 
 # Latest News
 nnScaler (also known as CUBE as code name) has been adopted by multiple product and research projects, this section includes some of the latest news from the team and partner projects.
-* **2024-11-26** nnScaler 0.5 released: https://github.com/microsoft/nnscaler/releases/tag/0.5
+* **2025-01-08** nnScaler 0.6 released: https://github.com/microsoft/nnscaler/releases/tag/0.6
+* **2024-10-07** Diff-Transformer utilizes nnScaler for differential attention mechanism: [DIFFERENTIAL TRANSFORMER](https://arxiv.org/abs/2410.05258)
 * **2024-05-09** YOCO utilizes nnScaler for long-sequence training: [(YOCO)You only cache once: Decoder-decoder architectures for language models](https://arxiv.org/abs/2405.05254)
 * **2024-04-22** Post training for the long context version of [Phi-3 series](https://arxiv.org/abs/2404.14219)
 * **2024-02-21** LongRoPE utilizes nnScaler to reduce both the training and inference costs: [LongRoPE: Extending LLM context window beyond 2 million tokens](https://arxiv.org/abs/2402.13753)
@@ -41,7 +42,7 @@ For **_DNN system experts_**, they can leverage nnScaler to explore new DNN para
 
 Install the following packages before the installation of nnScaler:
 
-    Python >= 3.8, < 3.11 (3.10 is recommanded)
+    Python >= 3.9, < 3.11 (3.10 is recommanded)
 
     PyTorch >= 2.0, < 2.4 (2.2.0 is recommanded)
 
@@ -75,7 +76,7 @@ Obtain access of Llama-3 model from [HuggingFace](https://huggingface.co/meta-ll
 
 ### Code Changes for Parallelization
 
-You can find all the example code at `examples/llama3_8B_128K`. As shown below, a user needs to:
+You can find all the example code at `examples/llama`. As shown below, a user needs to:
 * Wrap the Model: Include loss computation and other necessary components.
 * Configure Components: Set up the model, optimizer, and dataloader.
 * Initialize and Start: In the main function, create an nnScaler trainer with the above configurations and start the training process.
@@ -135,7 +136,7 @@ def main(args):
 Then we can start the example, and all the parallelization tasks will be finished by nnScaler automatically. 
 
 ```shell
-cd examples/llama3_8B_128K
+cd examples/llama
 
 # prepare training data:
 python bookcorpus.py --data_path_or_name bookcorpus/bookcorpus --tokenizer_path_or_name meta-llama/Meta-Llama-3-8B-Instruct --save_path ./bookcorpus_llama3_4K --sequence_length 4096

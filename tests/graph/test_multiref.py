@@ -78,14 +78,14 @@ def multiref():
         first_add = graph.select('add')[0]
 
         sub_muls = graph.partition(
-            first_mul, first_mul.algorithms('dim'),
+            first_mul, first_mul.algorithm('dim'),
             idx=0, dim=0, num=resource.ngpus
         )
         for idx, sub_node in enumerate(sub_muls):
             graph.assign(sub_node, idx)
 
         sub_adds = graph.partition(
-            first_add, first_add.algorithms('dim'),
+            first_add, first_add.algorithm('dim'),
             idx=0, dim=0, num=resource.ngpus
         )
         for idx, sub_node in enumerate(sub_adds):

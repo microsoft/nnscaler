@@ -1,6 +1,5 @@
 cppimport
 dill
-importlib-resources
 matplotlib
 more-itertools
 numpy>=1.23.0

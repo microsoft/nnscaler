@@ -35,11 +35,11 @@ def test_gener_producer_fusion_replicate():
 
     graph.assign(l1, 0)
 
-    s1, s2 = graph.partition(l2, l2.algorithms('dim'), idx=0, dim=0, num=2)
+    s1, s2 = graph.partition(l2, l2.algorithm('dim'), idx=0, dim=0, num=2)
     r1, r2 = graph.replicate(s1, 2)
     graph.assign(r1, 0)
     graph.assign(r2, 0)
-    s3, s4 = graph.partition(s2, s2.algorithms('dim'), idx=0, dim=1, num=2)
+    s3, s4 = graph.partition(s2, s2.algorithm('dim'), idx=0, dim=1, num=2)
     graph.assign(s3, 1)
     graph.assign(s4, 1)
 

@@ -3,8 +3,11 @@
 
 ### Only test the anno creation in these tests
 
+from functools import reduce
+from operator import add
+from nnscaler.graph.function.dimops import IRDimops, OpAnno
 import nnscaler.graph.function.function as F
-from nnscaler.ir.cten import IRObject, IRTensor
+from nnscaler.ir.cten import IR, IRObject, IRTensor
 
 import pytest
 import torch
@@ -951,3 +954,179 @@ def test_Pad():
     assert len(op._annos_candidates) == 1 and op._annos_candidates[0] == '3 4 2 -> 9 7 3'
     op = F.Pad(IRTensor([3, 3, 4, 2]), pad=(o(1), o(1)))
     assert len(op._annos_candidates) == 1 and op._annos_candidates[0] == 'a b c 2 -> a b c 4'
+
+
+def test_Split():
+    op = F.Split(IRTensor([3, 3, 4, 2]), split_size_or_sections=1)
+    assert len(op._annos_candidates) == 1 and op._annos_candidates[0] == '3 b c d -> 1 b c d, 1 b c d, 1 b c d'
+    op = F.Split(IRTensor([5, 3, 4, 2]), split_size_or_sections=IRObject(value=2, is_constant=False))
+    assert len(op._annos_candidates) == 1 and op._annos_candidates[0] == '5 b c d -> 2 b c d, 2 b c d, 1 b c d'
+    op = F.Split(IRTensor([7, 3, 4, 2]), split_size_or_sections=IRObject(value=[2, 2, 3], is_constant=False))
+    assert len(op._annos_candidates) == 1 and op._annos_candidates[0] == '7 b c d -> 2 b c d, 2 b c d, 3 b c d'
+
+
+def factors(n):
+    return set(reduce(
+        list.__add__,
+        ([i, n//i] for i in range(1, int(n**0.5) + 1) if n % i == 0)))
+
+
+def verify_partition(op: IRDimops):
+    anno = op.anno
+    inputs = torch.randn(op.inputs()[0].shape)
+    outputs = inputs.reshape(**IR.try_unwrap(op.kwargs)).clone() \
+        if 'reshape' in op.signature \
+        else inputs.view(**IR.try_unwrap(op.kwargs)).clone()
+
+    def _get_anno_ids_map(shape_annos: tuple):
+        anno_ids = {}
+        for idx, shape in enumerate(shape_annos):
+            for eidx, edim in enumerate(shape.dims):
+                for identifier in edim.identifiers:
+                    if identifier[0].isalpha():
+                        anno_ids[(idx, eidx)] = identifier
+                        break
+        return anno_ids
+
+    # (input_idx, input_dim) -> identifier
+    input_anno_ids = _get_anno_ids_map(anno.inputs())
+    output_anno_ids = _get_anno_ids_map(anno.outputs())
+    # assume each identifier is unique, which is true for reshape/view
+    # identifier -> (input_idx, input_dim)
+    reverse_input_anno_ids = {v: k for k, v in input_anno_ids.items()}
+    reverse_output_anno_ids = {v: k for k, v in output_anno_ids.items()}
+
+    transforms = anno.transform_space()
+    transform_rules = {}
+    for transform_rule in op.transform_rules:
+        transform_rules[
+            (transform_rule.inputs()[0].dims[0], transform_rule.outputs()[0].dims[0])
+        ] = transform_rule.modifier()
+
+    for transform in transforms:
+        input_idx, input_dim = transform
+        identifier = input_anno_ids[transform]
+        output_idx, output_dim = reverse_output_anno_ids[identifier]
+
+        # only one input/one output for reshape/view
+        assert input_idx == 0
+        assert output_idx == 0
+
+        dim_size = anno.getlen(identifier)
+        for factor in factors(dim_size):
+            # simulate the partition process
+            # 1. chunk input tensor
+            input_chunks = torch.chunk(inputs, factor, dim=input_dim)
+            # 2. update kwargs
+            kwargs = transform_rules[(input_dim, output_dim)](op.kwargs, 0, input_dim, factor, 0)
+            kwargs = IR.try_unwrap(kwargs)
+            # 3. reshape/view
+            reshaped_input_chunks = [chunk.reshape(**kwargs) for chunk in input_chunks] \
+                if 'reshape' in op.signature \
+                else [chunk.view(**kwargs) for chunk in input_chunks]
+            # 4. compare with actual output
+            output_chunks = torch.chunk(outputs, factor, dim=output_dim)
+            for i in range(factor):
+                assert torch.equal(reshaped_input_chunks[i], output_chunks[i])
+
+
+def test_reshape_view():
+    RVF = {F.Reshape: 'shape', F.View: 'size'}
+    for f, kwname in RVF.items():
+        query = IRTensor([2048, 1, 2, 512])
+        op = f(query, IRObject(value=2048), IRObject(value=1), -1, 32)
+        assert len(op._annos_candidates) == 1 and op._annos_candidates[0] == 'a 1 b 512 -> a 1 (b 16) 32'
+        assert IR.try_unwrap(op.kwargs[kwname]) == (2048, 1, -1, 32)
+        assert [type(x) for x in op.kwargs[kwname]] == [IRObject, IRObject, int, int]
+        verify_partition(op)
+
+        query = IRTensor([10, 12, 16, 18])
+        op = f(query, 10, 2, 3, 32, 18)
+        assert len(op._annos_candidates) == 1 and op._annos_candidates[0] == 'a (b 6) 16 c -> a b 3 32 c'
+        verify_partition(op)
+
+        query = IRTensor([2, 16, 32, 32])
+        op = f(query, 1, 32, 32, 32)
+        assert len(op._annos_candidates) == 1 and op._annos_candidates[0] == 'a 16 b c -> 1 (a 16) b c'
+        verify_partition(op)
+
+        query = IRTensor([10, 12, 16, 18])
+        op = f(query, 10, 24, 8, 18)
+        assert len(op._annos_candidates) == 1 and op._annos_candidates[0] == 'a b 16 c -> a (b 2) 8 c'
+        verify_partition(op)
+
+        query = IRTensor([10, 12, 16, 18])
+        op = f(query, 10, 16, 12, 18)
+        assert len(op._annos_candidates) == 1 and op._annos_candidates[0] == 'a 12 16 b -> a 16 12 b'
+        verify_partition(op)
+
+        query = IRTensor([2, 1, 1, 16, 32, 1, 1, 32])
+        op = f(query, 1, 32, 32, 1, 32)
+        assert len(op._annos_candidates) == 1 and op._annos_candidates[0] == 'a 1 1 16 b 1 1 c -> 1 (a 16) b 1 c'
+        verify_partition(op)
+
+        query = IRTensor([10, 1, 1, 5, 1, 7, 1, 1])
+        op = f(query, 10, 5, 7, 1)
+        assert len(op._annos_candidates) == 1 and op._annos_candidates[0] == 'a 1 1 b 1 c 1 1 -> a b c 1'
+        verify_partition(op)
+
+        query = IRTensor([10, 1, 1, 5, 1, 7, 1, 1])
+        op = f(query, 10, 5, 7)
+        assert len(op._annos_candidates) == 1 and op._annos_candidates[0] == 'a 1 1 b 1 c 1 1 -> a b c'
+        verify_partition(op)
+
+
+def test_make_collection():
+    # test non-irobject
+    l = [1, 2, 3]
+    t = (1, 2, 3)
+    s = slice(*l)
+    r = F.MakeList(l)
+    assert r == l
+    r = F.MakeTuple(t)
+    assert r == t
+    r = F.MakeSlice(*l)
+    assert r == s
+
+    # test irobject items
+    l = [IRObject(value=1), IRFullTensor([2]), 3]
+    t = (IRObject(value=1), IRFullTensor([2]), 3)
+    s = slice(*l)
+    r = F.MakeList(l)
+    assert r == l
+    r = F.MakeTuple(t)
+    assert r == t
+    r = F.MakeSlice(*l)
+    assert r == s
+
+    # test whole irobject
+    l = IRObject(value=[1, 2, 3])
+    t = IRObject(value=(1, 2, 3))
+    r = F.MakeList(l, signature='builtins.list')
+    assert r.output(0).value == l.value
+    r = F.MakeTuple(t, signature='builtins.tuple')
+    assert r.output(0).value == t.value
+    # MakeSlice is not valid.
+    # F.MakeSlice(s)
+
+
+def test_dict_keys_values_items():
+    # normal dict
+    d = {'a': 1, 'b': 2, 'c': 3}
+    r = F.DictKeys(d)
+    assert r.output(0).value == tuple(d.keys())
+    r = F.DictValues(d)
+    assert r.output(0).value == tuple(d.values())
+    r = F.DictItems(d)
+    assert r.output(0).value == tuple(d.items())
+
+    d = {'a': IRFullTensor([1]), 'b': IRFullTensor([2]), 'c': IRFullTensor([3])}
+    r = F.DictKeys(d)
+    assert r.output(0).value == tuple(d.keys())
+    r = F.DictValues(d)
+    # IRFullTensor will be reconstructed, so their ids are different
+    assert all(x.shape == y.shape and x != y for x, y in zip(r.output(0), d.values()))
+    r = F.DictItems(d)
+    # key will never be wrapped with IRObject
+    # IRFullTensor will be reconstructed, so their ids are different
+    assert all(x[0] == y[0] and x[1].shape == y[1].shape and x[1] != y[1] for x, y in zip(r.output(0), d.items()))

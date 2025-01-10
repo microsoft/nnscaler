@@ -65,7 +65,7 @@ A shape annotation consists of dimension annotation separated by (multiple) spac
 
 """
 
-from typing import Callable, Dict, Iterable, List, Union, Set, Tuple, Optional
+from typing import Callable, Dict, Iterable, List, Union, Set, Tuple, Optional, overload
 import enum
 import re
 import string
@@ -74,7 +74,6 @@ from itertools import dropwhile
 
 from nnscaler.ir.cten import IRTensor, IRObject
 from nnscaler.ir.operator import IRFwOperation
-from nnscaler.algorithm.factory import DistAlgorithmFactory
 
 
 _kSpecialIdentifiers = ('*', '?')
@@ -735,11 +734,6 @@ class IRDimops(IRFwOperation):
         n_outputs = len(self._oannos)
         super().__init__(name, signature, inputs, n_outputs, **kwargs)
 
-        # change tensor to IRObject for '?' annotation
-        for idx, shape_anno in enumerate(self._oannos):
-            if shape_anno.ignore:
-                self.set_output(idx, IRObject())
-
     @property
     def anno(self) -> OpAnno:
         return self._anno
@@ -770,13 +764,14 @@ class IRDimops(IRFwOperation):
         assert index < len(self.outputs()), "index out of boudary"
         return self._oannos[index]
 
-    def infer_shape(self) -> bool:
+    def infer_shape(self) -> dict[int, tuple[int, ...]]:
         """
         Shape inference using the matched annotation and tensor.
 
         @return sucess: True if successfully inferred shape
         """
-        for oidx, otensor in enumerate(self.outputs()):
+        shapes = {}
+        for oidx in range(len(self.outputs())):
             shape_anno = self.oanno(oidx)
             if shape_anno.ignore:
                 # otensor can be any type, including IRObject, collection types (list, dict, etc.)
@@ -787,11 +782,8 @@ class IRDimops(IRFwOperation):
                 for identifier in shape_anno[odim].identifiers:
                     accum *= self.anno.getlen(identifier)
                 shape.append(accum)
-            otensor.shape = shape
-        # print(f'=> sign: {self.signature} anno: {self.anno}\n'
-        #       f'=> inputs: {self.inputs()}\n'
-        #       f'=> outputs: {self.outputs()}')
-        return True
+            shapes[oidx] = tuple(shape)
+        return shapes
 
     def new(self, inputs: List[IRTensor], outputs: List[IRTensor], **kwargs):
         """!
@@ -920,24 +912,6 @@ class IRDimops(IRFwOperation):
                 if not ret:
                     return False
         return True
-
-    def algorithms(self, tag: Optional[str] = None):
-        factory = DistAlgorithmFactory()
-        if tag is None:
-            algos = list()
-            if factory.exist(type(self)):
-                algos += [template(self) for template in factory.algorithms(type(self))]
-            if factory.exist(IRDimops):
-                algos += [template(self) for template in factory.algorithms(IRDimops)]
-            return algos
-        else:
-            if factory.exist(type(self), tag):
-                template = factory.algorithms(type(self), tag)
-                return template(self)
-            if factory.exist(IRDimops, tag):
-                template = factory.algorithms(IRDimops, tag)
-                return template(self)
-            return None
 
     def transform_space(self) -> List[Tuple[int, int]]:
         """

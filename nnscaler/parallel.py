@@ -34,7 +34,7 @@ from nnscaler.graph.parser import FxModuleParser
 from nnscaler.graph.schedule.predefined import PredefinedSched
 from nnscaler.graph.schedule.schedplan import SchedulePlan
 
-from nnscaler.ir.cten import IRObject, IRTensor
+from nnscaler.ir.cten import IRObject, IRTensor, IR
 from nnscaler.ir.operator import IRBpOperation, IRDataOperation
 from nnscaler.ir.tensor import IRFullTensor
 from nnscaler.ir.unique import IDGenerator
@@ -665,7 +665,7 @@ def _gen_graph(
         # generate backward communications in adapter. However, as long as
         # the data doesn't require gradient in real runtime, the backward
         # communication will not be triggered.
-        ir_dummy_inputs[i] = IRObject.from_complex(
+        ir_dummy_inputs[i] = IR.new(
             fx_input_nodes[i].target, ir_dummy_inputs[i],
             requires_grad=True,
             tosub=True,

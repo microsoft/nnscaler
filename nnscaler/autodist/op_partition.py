@@ -118,7 +118,7 @@ class OpPartition:
         if isinstance(self.operator.ir_cell, IRDimops):
             if partition_dims[0] != -1:
                 idx, dim = operator.dim_id2pos(partition_dims[0])
-                if not operator.ir_cell.algorithms('dim').satisfy(
+                if not operator.ir_cell.algorithm('dim').satisfy(
                         idx, dim, partition_nums[0]):
                     raise ValueError(
                         f'invalid partition plan {partition_dims}, {partition_nums} for {operator.op_name}'
@@ -129,7 +129,7 @@ class OpPartition:
                 # 2. we can calculate th intra-communication cost without knowing the device assignment now,
                 #    since operator is constrained to be partitioned along one dimension.
                 # It is used to query the computation cost in the cost database.
-                self.ir_cell = operator.ir_cell.algorithms('dim').instantiate(
+                self.ir_cell = operator.ir_cell.algorithm('dim').instantiate(
                     idx, dim, partition_nums[0])[0]
             else:
                 self.ir_cell = operator.ir_cell

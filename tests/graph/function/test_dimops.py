@@ -13,7 +13,7 @@ import pytest
 import nnscaler.graph.function as F
 from nnscaler.graph.function.dimops import IRDimops, OpAnno
 from nnscaler.ir.tensor import IRFullTensor
-from nnscaler.ir.cten import IRObject
+from nnscaler.ir.cten import IRObject, IRTensor
 
 
 def create_op(creator: Callable,
@@ -22,10 +22,21 @@ def create_op(creator: Callable,
     return creator(*(inputs+args), **kwargs)
 
 
+def set_outputs(op: IRDimops):
+    inputs = op.inputs()
+    require_grads = any(
+            t.requires_grad for t in inputs if isinstance(t, IRTensor))
+    inferred_shape = op.infer_shape()
+    for idx, shape in inferred_shape.items():
+        op.set_output(idx, IRFullTensor(shape=shape, requires_grad=require_grads).tosub())
+    return op
+
+
 def partitionable(node: IRDimops, **config):
+    set_outputs(node)
     print(f'\n\n# {node.anno}')
     print(f'testing node: {node}')
-    sub_nodes = node.algorithms('dim').instantiate(**config)
+    sub_nodes = node.algorithm('dim').instantiate(**config)
     print(f'partitioned sub nodes:')
     for sub_node in sub_nodes:
         print(f'# {sub_node.anno}')

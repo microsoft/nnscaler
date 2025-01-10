@@ -107,11 +107,13 @@ class IRAdapterGener:
         Generate tensor adapter for both activations and weights
         Note weight reducers are always append to the last.
 
-        @param graph IRGraph: the graph without adapter
-        @param cost_fn Optional[Callable]: takes an IRAdapterPrim and outputs a cost in float.
-            default to be None, which will use communication volume.
+        Args:
+            graph (IRGraph): the graph without adapter
+            cost_fn Optional[Callable]: takes an IRAdapterPrim and outputs a cost in float.
+            default to be None, which means communication volume is used as cost.
 
-        @return graph IRGraph: the graph with adapter inserted
+        Returns:
+            graph (IRGraph): the graph with adapter inserted
         """
         # reorder producer and consumer ordering
         graph._reorder_producer_consumer()
@@ -119,7 +121,7 @@ class IRAdapterGener:
         # remove anchor node
         graph = IRAdapterGener.remove_anchor(graph)
         _logger.info("finish removing anchor nodes")
-        # automatic replace pyfunc
+        # automatic replicate pyfunc
         graph = IRAdapterGener.auto_pyfunc(graph)
         _logger.info("finish replacing auto pyfunc")
         # automatic transform multiref
@@ -153,7 +155,7 @@ class IRAdapterGener:
         Warning:
             Each IRPyFunc will be replicated to all devices of its segment.
 
-            To restrict the replicaed devices in pipeline-like scenarios, use `graph.staging`
+            To restrict the replicated devices in pipeline-like scenarios, use `graph.staging`
             to group the operators into segments.
 
         Args:
@@ -332,16 +334,36 @@ class IRAdapterGener:
         input_producer, output_consumer = create_dummy(graph, inputs=True, outputs=True)
         bgraph: Optional[IRSegment] = graph.mirror
 
-        # local producer fusion and local consumer multiref
+        # Here are two optimization passes that are applied before generating communication adapters:
+        # - local producer fusion: If an operator is partitioned and there are multiple
+        #   different sub-tensors on the same device, insert appropriate concat or accumulate
+        #   operators to merge the results on the current device before generating communication.
+        #   This way, part of the communication between multiple devices can be converted into
+        #   local data processing.
+        #
+        # - local consumer multiref: When a full tensor has multiple consumers and, after partitioning,
+        #   there exists a device that contains multiple partitioned consumers (note that this pass assumes 
+        #   these consumers share a same sub-tensor in the forward graph), a multiref node will be
+        #   inserted before these consumers on that device. This way, during the backward pass through
+        #   the multiref node, the gradients from the consumers are automatically accumulated together,
+        #   avoiding the need for accumulation operations in the backward adapter. Note that to make
+        #   this optimization work properly, `flatten_grad` should be called to adjust the valuemap of
+        #   the gradient sub-tensors.
+        #
+        # Apart from the purpose of improving the efficiency of communication adapters, these two passes
+        # also reduce the number of sub-tensors that need to be considered when generating adapters, which
+        # can help to reduce the complexity of the adapter generation algorithm. More specifically, if the
+        # plan of the input graph is SPMD, the local consumer multiref pass will ensure the number of
+        # fptensors and bptensors is the same, which raise the possibility of generating high performance
+        # collectives, like allgather, allreduce, etc.
         ftensors = []
         _cnt = 0
         for ftensor in graph.full_tensors():
-            # backward will gen in forward
+            # backward adapter will be generated along with the forward adapter
             if ftensor.is_param() or ftensor.is_grad():
                 continue
             # flatten gradient
             utils.flatten_grad(graph, ftensor)
-            # optimization: local fusion / multiref on producer / consumer
             ftensor = IRAdapterGener.local_producer_fusion(graph, ftensor)
             IRAdapterGener.local_consumer_multiref(graph, ftensor)
             ftensors.append(ftensor)
@@ -485,7 +507,7 @@ class IRAdapterGener:
 
     @staticmethod
     def local_producer_fusion(graph: IRSegment, ftensor: IRFullTensor) -> IRFullTensor:
-        """!
+        """
         Fuse the producer tensors using concat and add.
         This will add a new full tensor by chaging from:
             producer --(ftensor)--> consumer
@@ -496,10 +518,13 @@ class IRAdapterGener:
         recompute group, then the additional generated cat/add are also
         apllied with same recompute region. Otherwise no recompute.
 
-        @param tensors List[IRSubTensor]: tensors to be fused in local device
+        Args:
+            graph (IRSegment): the graph that contains the full tensor
+            ftensor (IRFullTensor): the full tensor to be manipulated
 
-        @return new_ftensor IRFullTensor: the new full tensor.
-                                          If cannot fuse, the original ftensor.
+        Returns:
+            new_ftensor IRFullTensor: the new full tensor. If cannot fuse,
+            return the original ftensor.
         """
         if not ftensor.requires_grad: return ftensor
 
@@ -648,17 +673,17 @@ class IRAdapterGener:
         then create a multiref forward node for it to make
         each sub-tensor to be consumed only once in each device.
 
-        This is to adapt with pytorch autograd function.
-
         producer -> consumers[0,1]
 
         producer -> multiref -> consumer[0]
                         |-----> consumer[1]
 
-        @param graph IRGraph
-        @param ftensor IRFullTensor: the forward full tensor
+        Args:
+            graph (IRSegment): the graph that contains the full tensor
+            ftensor (IRFullTensor): the full tensor to be manipulated
 
-        @return None
+        Returns:
+            None: the graph is modified inplace.
         """
         if not ftensor.requires_grad: return
 
@@ -704,6 +729,7 @@ class IRAdapterGener:
                 )
 
             multiref = MultiRef(devtensors[devid][0], len(grads))
+            multiref.comment = 'created at IRAdapterGener:local_consumer_multiref'
             # set input gradient
             multiref.input(0).grad = accum_grad
             # set output and its gradient
@@ -734,9 +760,11 @@ class IRAdapterGener:
         Automatically transform inserted multiref.
         Multiref is transformed to align with the output tensors on each device.
 
-        @param graph IRGraph
+        Args:
+            graph (IRGraph): the graph to be transformed
 
-        @return None
+        Returns:
+            graph (IRGraph): the graph with transformed multiref
         """
         for multiref in graph.select(name='multiref', flatten=False):
             # setup recompute
@@ -757,6 +785,7 @@ class IRAdapterGener:
                 ptensors = sorted(ptensors, key=lambda t: t.device[0])
                 for tensor in ptensors:
                     mr = MultiRef(tensor, len(multiref.outputs()))
+                    mr.comment = f'create at IRAdapterGener:autoref, comment before transformation: {multiref.comment}'
                     mr.input(0).grad = tensor.grad
                     for idx, out in enumerate(multiref.outputs()):
                         output = out.parent.select(tensor.indmap, tensor.valmap)

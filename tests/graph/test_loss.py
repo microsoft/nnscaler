@@ -14,7 +14,7 @@ from nnscaler.graph.gener.gen import IRAdapterGener
 from nnscaler.execplan import ExecutionPlan
 from nnscaler.execplan.planpass.fusion import DiffFusion
 from nnscaler.execplan.planpass.grouping import Grouping
-from nnscaler.ir.adapter.prim import AllReduceIdentityPrim, AllToAllAllToAllPrim, AllGatherSplitPrim
+from nnscaler.ir.adapter.prim import AllReduceIdentityPrim, AllToAllAllToAllPrim, AllGatherSplitPrim, AllReducePrim
 from nnscaler.codegen.emit import FuncEmission
 from ..utils import replace_all_device_with
 
@@ -61,6 +61,7 @@ def pas_partition_loss_hard(graph):
     linear = graph.nodes()[1]
     loss = graph.nodes()[2]
     get_attr = graph.nodes()[3]
+    graph.multiref(loss.outputs()[0].parent)
     _replica(graph, dataloader, [0, 1])
     _tp(graph, linear, [0, 1], 0, 0)
     _tp(graph, loss, [0, 1], 0, 0)
@@ -130,9 +131,12 @@ def test_loss_partition_hard():
     def checker(init_graph, partitioned_graph, adapter_graph, execplan):
         fw_graph = execplan.seq(0)[1]
         bw_graph = execplan.seq(0)[2]
-        adapter = fw_graph.nodes()[-2]
-        assert len(adapter.prims) == 1
-        assert isinstance(adapter.prims[0], AllReduceIdentityPrim)
+        adapter1 = fw_graph.nodes()[-4]
+        adapter2 = fw_graph.nodes()[-2]
+        assert len(adapter1.prims) == 1
+        assert isinstance(adapter1.prims[0], AllReduceIdentityPrim)
+        assert len(adapter2.prims) == 1
+        assert isinstance(adapter2.prims[0], AllReducePrim)
         assert fw_graph.outputs() == init_graph.outputs()
         emit = FuncEmission()
         input_tensors, output_tensors, output_grads, input_grads = \

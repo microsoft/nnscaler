@@ -9,7 +9,7 @@ from datasets import load_from_disk
 import huggingface_hub
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, DataCollatorForLanguageModeling
-from modeling_modifier import nnscaler_llama_init
+from lm_models.utils import nnscaler_lm_init
 from chunk_linear_cross_entropy import chunk_linear_cross_entropy
 
 from nnscaler.utils import set_default_logger_level
@@ -59,9 +59,9 @@ def get_tokenizer(tokenizer_name_or_path,
 
 
 class WrapperModel(torch.nn.Module):
-    def __init__(self, model_id, enable_chunk_loss):
+    def __init__(self, model_id, enable_chunk_loss, attn_implementation='flash_attention_2'):
         super().__init__()
-        self.model = AutoModelForCausalLM.from_pretrained(model_id, attn_implementation='flash_attention_2')
+        self.model = AutoModelForCausalLM.from_pretrained(model_id, attn_implementation=attn_implementation)
         self.enable_chunk_loss = enable_chunk_loss
 
     def forward(self, samples):
@@ -116,7 +116,7 @@ def main(args):
 
     set_default_logger_level('INFO')
 
-    nnscaler_llama_init()
+    nnscaler_lm_init(args)
 
     ## Setup Dataset ##
 
@@ -183,6 +183,7 @@ def main(args):
         args={
             'model_id': args.model_id,
             'enable_chunk_loss': args.enable_chunk_loss,
+            'attn_implementation': args.attn_implementation,
         },
     )
 
@@ -343,6 +344,17 @@ if __name__ == '__main__':
         default=None,
         type=int,
         help='max training steps',
+    )
+    parser.add_argument(
+        '--attn_implementation',
+        default='flash_attention_2',
+        type=str,
+        help='attn implementation, can be flash_attention_2, spda, eager',
+    )
+    parser.add_argument(
+        '--enable_diff_attn',
+        action='store_true',
+        help='enable diff attention implementation, eager is normal diff attention, flash_attention_2 is diff flash attention, and spda diff attention is not currently supported',
     )
     args = parser.parse_args()
     if args.explore_pipeline and not args.pipeline_pivots:

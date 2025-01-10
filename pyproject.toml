@@ -8,7 +8,7 @@ dynamic = ["version", "dependencies"]
 name = "nnscaler"
 description = "Parallelize DNN Training via A Systematic Way"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 authors = [
     {name = "nnScaler Team", email = "nnscaler@service.microsoft.com"}
 ]
@@ -31,3 +31,10 @@ dynamic.dependencies.file = "requirements.txt"
 # since we are using cppimport, sdist is not needed
 packages.find.include = ["nnscaler*"]
 package-data = { nnscaler = ["resources/**", "autodist/*.h", "autodist/*.cpp"] }
+
+[tool.coverage.run]
+omit = [
+    "nnscaler/algorithm/ops/conv.py",
+    "nnscaler/graph/function/conv.py",
+    "nnscaler/graph/tracer/_pytree.py"
+]

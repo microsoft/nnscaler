@@ -11,7 +11,7 @@ from nnscaler.utils import fields
 from nnscaler.graph.tracer.metadata import OpContext
 from nnscaler.ir.operator import IRFwOperation
 from nnscaler.ir.tensor import IRFullTensor
-from nnscaler.ir.cten import IRObject, IRCell, IRTensor
+from nnscaler.ir.cten import IRObject, IRCell, IRTensor, IR
 from nnscaler.graph.parser.frame import Frame
 from nnscaler.graph.parser.mapping import SignFx2Op
 from nnscaler.graph.function.pyfunc import IRPyFunc
@@ -62,11 +62,23 @@ class FxModuleParser:
             all_ir_nodes (List[IRFwOperation]): the IRFwOperation nodes
             outputs (List[IRObject]): the output IRObjects
         """
+        # frame will save the outputs of all ops (including `placeholder` and `output`)
+        # because some ir ops creators just return ops with empty ouputs
+        # (Those ops creators include user registered function, all functions returning tensors and more)
+        # We will connect the real op outputs (saved in frame) to all ir op outputs and inputs later.
+
         frame = Frame()
         frame.push_var()
 
         # shape propagation
         assert isinstance(dummy_inputs, dict), "Expected dummy inputs to parse module"
+        output_nodes = [node for node in module.graph.nodes if node.op == 'output']
+        # currently fx graph always has only one output
+        # even if a tuple/list is returned, it is still just one output
+        assert len(output_nodes) == 1, f"Expect only one output, but got {len(output_nodes)}"
+        output_node = output_nodes[0]
+        # currently output of fx graph satisfies the following:
+        assert len(output_node.args) == 1 and len(output_node.kwargs) == 0
 
         # create IRObjects and IRTensors
         for node in module.graph.nodes:
@@ -74,6 +86,23 @@ class FxModuleParser:
                 FxModuleParser.init_objects(node, module, frame, is_constant=False)
             else:
                 FxModuleParser.init_objects(node, module, frame, is_constant=True)
+
+            # note the output node will be reset later by `parse_prim_output_node`
+            # with the help of `parse_complex`
+
+            # if fx graph output (output_node.args[0]) is a nested structure
+            # the nested structure will be kept in `parse_complex`
+
+            # but if the node is the only output of the graph
+            # and it is a tuple, we need to keep it a tuple
+            # to make sure the IRGraph has the correct output number
+            # see `IRGrpah.from_logic_graph`
+
+            val = frame.get_var(node.name)
+            if node == output_node.args[0] \
+                and IR.is_object(val) and isinstance(val.value, tuple):
+                tuple_val = tuple(IRObject(name=node.name, value=v, is_constant=val.is_constant) for v in val.value)
+                frame.set_var(node.name, tuple_val)
 
         # get graph inputs
         placeholders = [n for n in module.graph.nodes if n.op == 'placeholder']
@@ -131,8 +160,7 @@ class FxModuleParser:
 
         assert hasattr(node, 'meta') and 'tensor_meta' in node.meta, f"Node {node} should have tensor_meta"
         meta = node.meta['tensor_meta']
-        val = IRObject.from_complex(node.name, meta,
-            collection_types=(list, tuple, dict, DICT_VALUES_TYPE, DICT_ITEMS_TYPE),
+        val = IR.new(node.name, meta,
             tensor_types=(TensorMetadata,),
             is_constant=is_constant
         )
@@ -160,11 +188,17 @@ class FxModuleParser:
             return list(FxModuleParser.parse_complex(t, frame) for t in val)
         if isinstance(val, dict):
             return {key: FxModuleParser.parse_complex(val, frame) for key, val in val.items()}
+        # TODO: Currently slice/DICT_VALUES_TYPE/DICT_ITEMS_TYPE cases are never found.
+        # We need to find some examples to test them.
+        if isinstance(val, slice):
+            return slice(FxModuleParser.parse_complex(val.start, frame),
+                         FxModuleParser.parse_complex(val.stop, frame),
+                         FxModuleParser.parse_complex(val.step, frame))
         # because fx node cannot be a dict key, so skip DICT_KEYS_TYPE here
         if isinstance(val, DICT_VALUES_TYPE):
-            return {i: FxModuleParser.parse_complex(x, frame) for i, x in enumerate(val)}.values()
+            return tuple(FxModuleParser.parse_complex(x, frame) for x in val)
         if isinstance(val, DICT_ITEMS_TYPE):
-            return {i: FxModuleParser.parse_complex(x, frame) for i, x in val}.items()
+            return tuple((i, FxModuleParser.parse_complex(x, frame)) for i, x in val)
         if isinstance(val, torch.fx.Node):
             return frame.get_var(val.name)
         return val
@@ -189,6 +223,20 @@ class FxModuleParser:
 
     @staticmethod
     def parse_prim_function_method(node: torch.fx.Node, module: torch.fx.GraphModule, constant_folding: bool, frame: Frame) -> List[IRFwOperation]:
+        """
+        Convert `call_function`/`call_method` op to IRFwOperation.
+
+        Args:
+            node (torch.fx.Node): the node to be parsed
+            module (torch.fx.GraphModule): the module containing the node
+            constant_folding (bool): global setting of whether to fold the constant
+
+        Returns:
+            List[IRFwOperation]: the IRFwOperation nodes.
+                The returned list can be empty if the node is folded,
+                or contains exactly one node if the node is not folded.
+
+        """
         # get signature
         fsig = FxModuleParser._get_qualified_name(node.target, node)
         # get inputs
@@ -229,56 +277,109 @@ class FxModuleParser:
                     output = IRObject(name=node.name, value=output, is_constant=is_constant)
                 ir_node = IRPyFunc(fsig, input_vals, [output], **kwargs)
 
+        if not isinstance(ir_node, IRCell):
+            # SignFx2Op may return object that is not IRCell but a value (concrete  or IRObject),
+            # for example Add or GetItem.
+            # As node is deleted, we must set concrete value or IRTensor/IRObject into framework.
+
+            # TODO: check the value saved in frame should equal to the value returned by the op
+            frame.set_var(node.name, ir_node)
+            return []
+
         FxModuleParser._set_node_meta(node, ir_node)
 
-        ir_nodes = []
-        if isinstance(ir_node, IRCell):
-            ir_nodes.append(ir_node)
-            if len(ir_node.outputs()) > 1:
-                vals = frame.get_var(node.name)
-                assert len(vals) == len(ir_node.outputs()), f'{vals}, {ir_node.outputs()}'
-                for i in range(len(vals)):
-                    ir_node.set_output(i, vals[i])
-            elif not isinstance(ir_node.output(0), IRTensor) and ir_node.output(0).value is not None:
-                # never fold our own functions defined in `nnscaler.runtime.function` module.
-                # currently only `ifexpr` will go here, and it will never be folded.
-                if not constant_folding or \
-                    ir_node.signature.startswith(nnscaler.runtime.function.__name__ + '.') or \
-                    any_ir_object_satisfy(ir_node.output(0), lambda a: not a.is_constant) or \
-                    any_ir_object_satisfy(ir_node.output(0), lambda a: isinstance(a, IRTensor)) or \
-                    any_ir_object_satisfy(ir_node.output(0), lambda a: isinstance(a, (DICT_KEYS_TYPE, DICT_VALUES_TYPE, DICT_ITEMS_TYPE))):
-                    # type of return values of dict.keys, dict.values and dict.items can not be repr, so we must take it as a node
-                    frame.set_var(node.name, ir_node.output(0))
-                    ir_node.output(0).name = node.name
-                else:
-                    # if use static shape graph, all IRObject will be converted to real traced value.
-                    # the ir_node will be folded and not appeared in the final graph
-                    frame.set_var(node.name, ir_node.output(0).value)
-                    ir_nodes.pop(-1)
-            else:
-                output_val = frame.get_var(node.name)
-                if isinstance(ir_node, IRDimops):
-                    # TODO: refine here
-                    # infer_type actually just check whether the annoation is consistent
-                    # with actual output
-                    # internally it will set the shape of output,
-                    # but the output is quickly rewritten by the actual output
-                    # in following code `ir_node.set_output(0, output_val)`
-                    # So the scalar-tensor flag is not removed with `infer_shape`
-                    ir_node.infer_shape()
-                    if isinstance(output_val, IRTensor) and isinstance(ir_node.output(0), IRTensor):
-                        assert output_val.shape == ir_node.output(0).shape, (
-                            f'find shape inference not match: {output_val.shape} vs {ir_node.output(0).shape}'
-                            f'\nnode: {node}'
-                        )
-                ir_node.set_output(0, output_val)
-        else:
-            # SignFx2Op may return object that is not IRCell but a concrete value, for example Add.
-            # As node is deleted, we must set concrete value or IRTensor/IRObject into framework.
-            frame.set_var(node.name, ir_node)
+        # step 1: align the node output with the value in frame
 
-        _logger.debug(f'parsing result: {ir_node}')
-        return ir_nodes
+        # handle the case when the function has no output
+        # Currently this can only happened for user registered functions
+        # We need to assume the function has side effect, and keep it in the graph
+        if not ir_node.outputs():
+            # To avoid the case that the function is annotated no output
+            # but its output is used in other nodes.
+            # By removing from frame,
+            # we can catch the case earlier
+            frame.del_val(node.name)
+            # if the function has no output, just return
+            return [ir_node]
+
+        vals = frame.get_var(node.name)
+        if len(ir_node.outputs()) == 1:
+            vals = [vals]
+        elif IR.is_object(vals):
+            # fix the case that multiple outputs are returned as a single IRObject
+            # Because IR.new doesn't know the number of outputs
+            # it will wrap the output as a single IRObject if no tensor is in the outputs
+            # so we need to unwrap it here, and align the outputs with annotations.
+            is_constant = vals.is_constant
+            vals = vals.value
+            if not isinstance(vals, (list, tuple)):
+                raise RuntimeError(f'Expect list or tuple for multiple outputs, but got {type(vals)}')
+            vals = type(vals)(IRObject(name=node.name, value=v, is_constant=is_constant) for v in vals)
+            frame.set_var(node.name, vals)
+
+        # verify the inferred shape are consistent with actual output
+        if isinstance(ir_node, IRFwOperation):
+            ir_node.verify_shape(vals)
+
+        assert len(vals) == len(ir_node.outputs()), f'{vals}, {ir_node.outputs()}'
+        contains_undefined_output = any(v is IRObject.missing for v in ir_node.outputs())
+        for i in range(len(vals)):
+            if isinstance(ir_node.output(i), IRTensor) or ir_node.output(i) is IRObject.missing:
+                # 1. output tensors are not set in function.py
+                # 2. IRObject output from some functions (registered functions/getattr) are not set
+                # For above two cases, we need to set them with values from frame.
+                ir_node.set_output(i, vals[i])
+
+        # update frame with ir output
+        # Please note when there is only one output, we will unwrap it from `ir_node.outputs()` here
+        frame.set_var(
+            node.name,
+            type(vals)(ir_node.outputs()) if len(ir_node.outputs()) > 1 else ir_node.output(0)
+        )
+
+        # update the name of output tensors
+        # Note assignment is not allowed in lambda
+        # so we use a helper function to update the name
+        def _update_name(x: IRObject):
+            x.name = node.name
+        IR.modify_objects_inplace(ir_node.outputs(), _update_name)
+
+        # step 2: constant folding
+
+        # rules:
+        # 1. never fold our own functions defined in `nnscaler.runtime.function` module.
+        #    currently only `ifexpr` will go here, and it will never be folded.
+        # 2. never fold tensors.
+        # 3. never fold non-constant IRObject
+        # 4. never fold functions that contains undefined output
+        #    TODO: This is for backward compatibility, Not sure why.
+        #    In current implementation,
+        #    only user registered functions and `getattr` will have undefined output.
+        #    So I think the original intention is to avoid folding user registered functions.
+        # 5. Only fold primitive types (int, float, bool, None, str, Ellipsis) and its complex types
+        def _is_primitive_type(val):
+            # we don't fold a list/tuple/dict with length larger than this
+            # Just a quick filter, and may not work when val has multiple nested levels
+            FOLD_MAX_LEN = 10
+            if isinstance(val, (list, tuple)):
+                return len(val) < FOLD_MAX_LEN and all(_is_primitive_type(v) for v in val)
+            elif isinstance(val, dict):
+                return len(val) < FOLD_MAX_LEN and all(_is_primitive_type(k) and _is_primitive_type(v) for k, v in val.items())
+            # use a white list instead of a black list
+            return isinstance(val, (int, float, bool, type(None), str, type(Ellipsis)))
+
+        # Note when it is not IRObject as a whole, we will not fold it
+        if constant_folding and len(ir_node.outputs()) == 1 \
+            and isinstance(ir_node.output(0), IRObject) \
+            and not isinstance(ir_node.output(0), IRTensor) \
+            and not contains_undefined_output \
+            and not ir_node.signature.startswith(nnscaler.runtime.function.__name__ + '.')\
+            and ir_node.output(0).is_constant \
+            and _is_primitive_type(ir_node.output(0).value):
+            frame.set_var(node.name, ir_node.output(0).value)
+            return []
+        else:
+            return [ir_node]
 
     @staticmethod
     def parse_prim_get_attr_node(node: torch.fx.Node, module: torch.fx.GraphModule, frame: Frame) -> List[IRFwOperation]:
@@ -348,7 +449,6 @@ class FxModuleParser:
         comment = str(node.meta.get('frame_record', ''))
         if comment:
             ir_node.comment = comment
-
 
     @staticmethod
     def _get_qualified_name(node_target: Union[str, Callable[..., Any]], node: torch.fx.Node = None) -> str:

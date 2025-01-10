@@ -96,7 +96,7 @@ During policy decsion, user can see the operator and its name is 'matmul_custom'
 def PAS(graph: IRGraph, resource):
     for node in graph.nodes():
         if node.name == 'matmul_custom':
-            algo = node.algorithms('dim')
+            algo = node.algorithm('dim')
             # partition kd+
             config = dict(idx=0, dim=1, num=resource.ngpus)
             subnodes = graph.partition(node, algo, **config)

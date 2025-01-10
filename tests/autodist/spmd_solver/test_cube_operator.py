@@ -47,7 +47,7 @@ def test_cube_operator():
                                dummy_input,
                                attr_savedir=tempdir,
                                constant_folding=True)
-        cfg = AutoDistConfig(mesh_col=2)
+        cfg = AutoDistConfig(mesh_col=2, parallel_profile=False)
         model_graph = ModelGraph(ir_graph, cfg)
         mock_attention_op = model_graph.operator_list[0]
         assert mock_attention_op.pos2dim_id((0, 0)) == 'h'

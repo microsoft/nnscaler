@@ -1,12 +1,13 @@
 #  Copyright (c) Microsoft Corporation.
 #  Licensed under the MIT License.
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import importlib
 from typing import Any, Dict, List, Literal, Optional, TYPE_CHECKING, Union
 from typing_extensions import get_args
 from pathlib import Path
 import logging
+import inspect
 import copy
 import os
 import builtins
@@ -18,7 +19,8 @@ import torch.utils.data.dataloader
 import yaml
 import torch
 
-from nnscaler.utils import transform_recursively
+import nnscaler
+from nnscaler.utils import fields, transform_recursively
 from nnscaler.parallel import ComputeConfig, build_optimizer, ReuseType, BroadcastGenFilesStrategy, _PREDEFINED_POLICIES
 from nnscaler.runtime.module import ParallelModule
 
@@ -31,6 +33,110 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+_TENSOR_TYPE = Literal['param', 'buffer', 'input']
+_PRECISION_TYPE = Literal['fp32', 'fp16', 'bf16', 'none']
+_PRECISION_MAP = {
+    'fp32': torch.float32,
+    'fp16': torch.float16,
+    'bf16': torch.bfloat16,
+    'none': None  # as it is. no conversion will happen.
+}
+
+
+def _get_tensor_dtype(precision: Dict[_TENSOR_TYPE, _PRECISION_TYPE], tensor_type: _TENSOR_TYPE) -> torch.dtype:
+    return _PRECISION_MAP[precision[tensor_type]]
+
+
+def _to_precision(module: torch.nn.Module, precision: Dict[_TENSOR_TYPE, _PRECISION_TYPE]):
+    param_dtype = _get_tensor_dtype(precision, 'param')
+    buffer_dtype = _get_tensor_dtype(precision, 'buffer')
+
+    if param_dtype == buffer_dtype:
+        if param_dtype is not None:
+            module = module.to(param_dtype)
+    else:
+        # separate param and buffer dtype
+        # TODO: a little hacky. A better way?
+        # 3 kinds of tensors are converted in Module._apply:
+        # model parameters, its grad, and buffer
+        # param_dtype controls the first two, (but grad is `None` here)
+        # and buffer_dtype controls the last one
+        buf_ids = { id(buf) for buf in module.buffers(recurse=True) }
+        if param_dtype is not None:
+            module._apply(
+                lambda t: t.to(param_dtype)
+                    if t.is_floating_point() and id(t) not in buf_ids
+                    else t)
+        if buffer_dtype is not None:
+            module._apply(
+                lambda t: t.to(buffer_dtype)
+                    if t.is_floating_point() and id(t) in buf_ids
+                    else t)
+
+    return module
+
+
+def _resolve_precision(precision: Union[str, Dict[_TENSOR_TYPE, _PRECISION_TYPE]]):
+    supported_precision_type = get_args(_PRECISION_TYPE)
+    supported_tensor_type = get_args(_TENSOR_TYPE)
+    if not precision:
+        precision = 'none'
+    if isinstance(precision, str):
+        precision = {k: precision for k in supported_tensor_type}
+    for tensor_type in supported_tensor_type:
+        if tensor_type not in precision:
+            precision[tensor_type] = 'none'
+        if precision[tensor_type] not in supported_precision_type:
+            raise ValueError(f"Invalid precision {precision[tensor_type]} for {tensor_type}")
+    if any(k not in supported_tensor_type for k in precision):
+        raise ValueError(f"Invalid tensor type found in {precision.keys()}")
+
+    return precision
+
+
+def fix_input(input, input_dtype=None):
+    if isinstance(input, dict):
+        return {k: fix_input(v, input_dtype) for k, v in input.items()}
+    elif isinstance(input, list):
+        return [fix_input(v, input_dtype) for v in input]
+    elif isinstance(input, tuple):
+        return tuple(fix_input(v, input_dtype) for v in input)
+    elif isinstance(input, torch.Tensor):
+        if input.is_floating_point() and input_dtype is not None:
+            return input.to(input_dtype).cuda()
+        else:
+            return input.cuda()
+    return input
+
+
+class PrecisionMixin:
+    @property
+    def param_dtype(self):
+        return _get_tensor_dtype(self.precision, 'param')
+
+    @property
+    def buffer_dtype(self):
+        return _get_tensor_dtype(self.precision, 'buffer')
+
+    @property
+    def input_dtype(self):
+        return _get_tensor_dtype(self.precision, 'input')
+
+    def fix_input(self, input):
+        return fix_input(input, input_dtype=self.input_dtype)
+
+    def to_precision(self, module):
+        return _to_precision(module, self.precision)
+
+
+class PolicyMixin:
+    @property
+    def resolved_pas_policy(self):
+        if self.pas_policy in _PREDEFINED_POLICIES:
+            return self.pas_policy
+        return load_type(self.pas_policy)
 
 
 def load_type(type_name: str):
@@ -79,11 +185,94 @@ class AggregatedOutputs:
     aggregated_outputs: Any = None
 
 
+@dataclass(frozen=True)
+class OptionalComputeConfig:
+    constant_folding: Optional[bool] = None
+    trace_strategy: Optional[str] = None
+    use_zero: Optional[bool] = None
+    zero_ngroups: Optional[int] = None
+    zero_use_reduce_scatter: Optional[bool] = None
+    use_async_reducer: Optional[bool] = None
+    reducer_bucket_cap_mb: Optional[float] = None
+
+    pas_config: Optional[Dict[str, Any]] = None
+    user_config: Optional[Dict[str, Any]] = None
+
+    def resolve(self, compute_config: ComputeConfig) -> ComputeConfig:
+        replace_values = {
+            k: v for k, v in asdict(self).items()
+            if v is not None
+        }
+        resolved_values = asdict(compute_config)
+        resolved_values.update(replace_values)
+        resolved_values[fields(ComputeConfig).use_end2end] = False
+        return ComputeConfig(**resolved_values)
+
+
+@dataclass
+class ModuleParallelizeConfig:
+    # The type to be parallelized
+    # Please note if you specify this
+    # pipeline parallelism will be disabled, and you must ensure ComputeConfig.use_end2end is False
+    type: str = None
+    args: Dict[str, Any] = field(default_factory=dict)
+    # the full qualified name of the function to generate dummy forward args
+    # Its type should be `Callable[[TrainerArgs],Dict[str, Any]]`
+    forward_args_gen_fn: str = None
+    # the model state dict file for tracing.
+    # It is only used in tracing to serve as the initial state dict of the model.
+    tracing_from_weights: str = None
+    # the prefix in the state dict (loaded from trainer_args.tracing_from_weights) to be used for tracing
+    tracing_from_weights_prefix: str = None
+
+    # For the following config, If None, the config of the trainer_args will be used
+    compute_config: Optional[OptionalComputeConfig] = None
+    gen_savedir: Optional[str] = None
+    gen_reuse: Optional[str] = None
+    pas_policy: Optional[str] = None
+    broadcast_strategy: Optional[str] = None
+    instance_name: Optional[str] = None
+    precision: Union[str, Dict[_TENSOR_TYPE, _PRECISION_TYPE], None] = None
+
+    def __post_init__(self):
+        if not self.type:
+            raise ValueError("type is required")
+        if not self.forward_args_gen_fn:
+            raise ValueError("forward_args_gen_fn is required")
+
+        if self.tracing_from_weights and self.tracing_from_weights_prefix:
+            raise ValueError("tracing_from_weights and tracing_from_weights_prefix must not be used together")
+
+        if self.precision is not None:
+            self.precision = _resolve_precision(self.precision)
+
+    @property
+    def model_type(self):
+        return load_type(self.type)
+
+    def create_model(self, trainer_args: 'TrainerArgs') -> torch.nn.Module:
+        kwargs = trainer_args.create_kwarg(self.args)
+        return self.model_type(**kwargs)
+
+    def create_dummy_forward_args(self, trainer_args: 'TrainerArgs') -> dict[str, Any]:
+        forward_args_gen_fn = load_type(self.forward_args_gen_fn)
+        return forward_args_gen_fn(trainer_args)
+
+
 @dataclass
 class ModelConfig:
     type: str = None
-    args: Dict[str, Any] = field(default_factory=dict)
+    args: dict[str, Any] = field(default_factory=dict)
+    # if parallel_modules is not empty,
+    # these modules will be parallelized instead of the whole model
+    # and sub modules (in the list of `parallel_modules`) in the model
+    # will be replaced with parallelized version
+    parallel_modules: list[ModuleParallelizeConfig] = field(default_factory=list)
 
+    def __post_init__(self):
+        parallel_sub_modules = [load_type(m.type) for m in self.parallel_modules]
+        if set(parallel_sub_modules) != set(parallel_sub_modules):
+            raise ValueError(f"parallelized sub modules must be unique")
 
 @dataclass
 class OptimizerConfig:
@@ -287,18 +476,8 @@ class ArgsTrainHook(TrainHook):
                 setattr(self, k, load_type(v))
 
 
-_TENSOR_TYPE = Literal['param', 'buffer', 'input']
-_PRECISION_TYPE = Literal['fp32', 'fp16', 'bf16', 'none']
-_PRECISION_MAP = {
-    'fp32': torch.float32,
-    'fp16': torch.float16,
-    'bf16': torch.bfloat16,
-    'none': None  # as it is. no conversion will happen.
-}
-
-
 @dataclass
-class TrainerArgs:
+class TrainerArgs(PrecisionMixin, PolicyMixin):
     compute_config: ComputeConfig = None
 
     gen_savedir: str = './.nnscaler'
@@ -390,24 +569,25 @@ class TrainerArgs:
         if self.broadcast_strategy not in [e.value for e in BroadcastGenFilesStrategy]:
             raise ValueError(f"Invalid broadcast_strategy {self.broadcast_strategy}")
 
-        supported_precision_type = get_args(_PRECISION_TYPE)
-        supported_tensor_type = get_args(_TENSOR_TYPE)
-        if not self.precision:
-            self.precision = 'none'
-        if isinstance(self.precision, str):
-            self.precision = {k: self.precision for k in supported_tensor_type}
-        for tensor_type in supported_tensor_type:
-            if tensor_type not in self.precision:
-                self.precision[tensor_type] = 'none'
-            if self.precision[tensor_type] not in supported_precision_type:
-                raise ValueError(f"Invalid precision {self.precision[tensor_type]} for {tensor_type}")
-        if any(k not in supported_tensor_type for k in self.precision):
-            raise ValueError(f"Invalid tensor type found in {self.precision.keys()}")
+        self.precision = _resolve_precision(self.precision)
 
         if not self.max_epochs and not self.max_train_steps:
             raise ValueError("max_epochs or max_train_steps is required")
+
         if not self.model.type:
             raise ValueError("model type is required")
+
+        for m in self.model.parallel_modules:
+            if m.compute_config:
+                # will raise ValueError if m.compute_config is invalid when combining with the global compute_config
+                m.compute_config.resolve(self.compute_config)
+
+            if load_type(m.type) == self.model_type:
+                raise ValueError(f"parallelized sub module {m.type} cannot be the same as the model type in trainer args")
+
+            if m.tracing_from_weights_prefix and not self.tracing_from_weights:
+                raise ValueError("`tracing_from_weights` is required when `tracing_from_weights_prefix` is specified")
+
         if not self.optimizer.type:
             raise ValueError("optimizer type is required")
         if not self.dataset.type:
@@ -418,6 +598,13 @@ class TrainerArgs:
             raise ValueError("dataset_sampler type is required")
         if self.lr_scheduler and not self.lr_scheduler.type:
             raise ValueError("lr_scheduler type is required")
+
+        if self.seed is None and self.init_env_fn is None:
+            logger.warning(
+                "Neither `seed` nor `init_env_fn` is not provided. "
+                "The training may not be reproducible "
+                "and the model weights on different devices can be different."
+            )
 
     @classmethod
     def from_cli(cls, argv: List[str]) -> 'TrainerArgs':
@@ -486,12 +673,6 @@ class TrainerArgs:
         return load_type(self.optimizer.aggregate_outputs_fn)
 
     @property
-    def resolved_pas_policy(self):
-        if self.pas_policy in _PREDEFINED_POLICIES:
-            return self.pas_policy
-        return load_type(self.pas_policy)
-
-    @property
     def scaling_factor(self):
         return self.compute_config.runtime_ngpus // self.compute_config.plan_ngpus
 
@@ -506,18 +687,6 @@ class TrainerArgs:
     @property
     def compile_mode(self) -> bool:
         return self.run_mode == 'compile'
-
-    @property
-    def param_dtype(self) -> torch.dtype:
-        return _PRECISION_MAP[self.precision['param']]
-
-    @property
-    def buffer_dtype(self) -> torch.dtype:
-        return _PRECISION_MAP[self.precision['buffer']]
-
-    @property
-    def input_dtype(self) -> torch.dtype:
-        return _PRECISION_MAP[self.precision['input']]
 
     def init_env(self, trainer: 'Trainer'):
         if self.seed is not None:
@@ -536,10 +705,10 @@ class TrainerArgs:
         kwargs = self.create_kwarg(self.model.args)
         return self.model_type(**kwargs)
 
-    def create_parallel_optimizer(self, parallel_model: ParallelModule):
+    def create_parallel_optimizer(self, parallel_model: torch.nn.Module):
         kwargs = self.create_kwarg(self.optimizer.args)
         optimizer_class = load_type(self.optimizer.type)
-        return build_optimizer(parallel_model, optimizer_class, **kwargs)
+        return build_optimizer(parallel_model, optimizer_class, self.compute_config, **kwargs)
 
     def create_dataset(self, stage='train'):
         dataset_args = getattr(self.dataset, f'{stage}_args')

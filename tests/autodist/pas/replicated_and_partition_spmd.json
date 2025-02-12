@@ -1,0 +1,88 @@
+{
+  "desc": {
+    "spmd_descs": [
+      {
+        "partition_descs": [
+          [
+            2,
+            [
+              [
+                [
+                  -1,
+                  -1
+                ],
+                4
+              ]
+            ]
+          ],
+          [
+            3,
+            [
+              [
+                [
+                  0,
+                  0
+                ],
+                4
+              ]
+            ]
+          ],
+          [
+            4,
+            [
+              [
+                [
+                  0,
+                  0
+                ],
+                4
+              ]
+            ]
+          ],
+          [
+            5,
+            [
+              [
+                [
+                  0,
+                  0
+                ],
+                4
+              ]
+            ]
+          ]
+        ],
+        "recompute_groups": [],
+        "mesh_desc": [
+          1,
+          4
+        ],
+        "analysis": {
+          "comp_time_sum": 0.0,
+          "top_comp_time_sum": 0.0,
+          "top_comp_time": [],
+          "top_op_split_info": {},
+          "comm_time_sum": 0.0,
+          "top_comm_time_sum": 0.0,
+          "top_comm_time": [],
+          "module_analysis": {}
+        }
+      }
+    ],
+    "recompute_groups": [],
+    "mesh_desc": [
+      1,
+      4
+    ]
+  },
+  "e2e_time": 0.0,
+  "stage_mems": [
+    0.0, 0.0
+  ],
+  "stage_all_times": [
+    0.0, 0.0
+  ],
+  "stage_comp_times": [
+    0.0, 0.0
+  ]
+}

@@ -3,7 +3,6 @@
 
 from typing import Any, Dict, NamedTuple, Optional, Tuple
 from dataclasses import dataclass, asdict
-import copy
 
 import torch
 from torch.fx.node import Node
@@ -23,6 +22,40 @@ class EmptyResult:
 
 
 @dataclass
+class GradMode:
+    grad_mode: bool
+    no_grad_mode: bool
+    inference_mode: bool
+
+    @classmethod
+    def from_context(cls):
+        return cls(torch.is_grad_enabled(), not torch.is_grad_enabled(), torch.is_inference_mode_enabled())
+
+
+@dataclass
+class AutocastInfo:
+    # the nesting number of autocast context, if =0, means it is not under autocast context
+    # torch use this field to determine whether the cache needs to be cleaned
+    # nnscaler use this field to determine whether generating autocast context manager in code
+    nesting: int
+
+    cache_enabled: bool
+    cpu_enabled: bool
+    cpu_dtype: torch.dtype
+    cuda_enabled: bool
+    cuda_dtype: torch.dtype
+    # NOTE: not care about "xpu" and "hpu" now
+
+    @classmethod
+    def from_context(cls):
+        # use function pair [torch.autocast_increment_nesting, torch.autocast_decrement_nesting] to get the nesting number
+        torch.autocast_increment_nesting()
+        return cls(torch.autocast_decrement_nesting(),  torch.is_autocast_cache_enabled(),
+                   torch.is_autocast_cpu_enabled(), torch.get_autocast_cpu_dtype(),
+                   torch.is_autocast_enabled(), torch.get_autocast_gpu_dtype())
+
+
+@dataclass
 class OpContext:
     """
     OpContext is a dataclass that holds the context of an operation.
@@ -39,7 +72,12 @@ _GLOBAL_OP_CONTEXT = OpContext()
 
 
 def get_op_context() -> OpContext:
-    return asdict(_GLOBAL_OP_CONTEXT)
+    """
+    Get op context information.
+    Please note that current only tracked context managers that modify the tensor properties, for example, modify the requires_grad, dtype,
+    so that nnscaler can generate context manager code for them safety.
+    """
+    return asdict(_GLOBAL_OP_CONTEXT) | {'grad_mode': asdict(GradMode.from_context()), 'autocast_info': asdict(AutocastInfo.from_context())}
 
 
 class TensorMetadata(NamedTuple):
@@ -99,16 +137,18 @@ def _extract_tensor_metadata(result: torch.Tensor) -> TensorMetadata:
     return TensorMetadata(shape, dtype, requires_grad, stride, memory_format, is_quantized, qparams)
 
 
-def extract_results_metadata(results: Any, node: Node):
+def extract_metadata(results: Any, node: Node):
     if results is not EmptyResult:
         res = tuple(results) if isinstance(results, (DICT_KEYS_TYPE, DICT_VALUES_TYPE, DICT_ITEMS_TYPE)) else results
         meta = pytree_utils.tree_map_only(torch.Tensor, _extract_tensor_metadata, res)
         # we should get the meta info of the inner element of these type obj
         if isinstance(results, DICT_KEYS_TYPE):
-            meta = {i: m for i, m in enumerate(meta)}.keys()
+            meta = {m: i for i, m in enumerate(meta)}.keys()
         if isinstance(results, DICT_VALUES_TYPE):
             meta = {i: m for i, m in enumerate(meta)}.values()
         if isinstance(results, DICT_ITEMS_TYPE):
             meta = {i: m for i, m in meta}.items()
         node.meta['tensor_meta'] = meta
         node.meta['type'] = type(results)
+
+    node.meta['op_context'] = get_op_context()

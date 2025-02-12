@@ -1,4 +1,4 @@
 #  Copyright (c) Microsoft Corporation.
 #  Licensed under the MIT License.
 
-__version__ = '0.6'
+__version__ = '0.7'

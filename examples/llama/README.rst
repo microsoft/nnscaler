@@ -247,10 +247,10 @@ Combined Command
 
 .. code-block:: bash
 
-    torchrun --nproc_per_node=8 --nnodes=2 --node_rank=$$OMPI_COMM_WORLD_RANK --master_addr="$$MASTER_ADDR" --master_port=$$MASTER_PORT train.py --name llama3-70b --model_id meta-llama/Meta-Llama-3-70B --dataset_path ./bookcorpus_llama3_8K --gpu_mem_constraint 153 --plan_ngpus=8 --runtime_ngpus=16 --explore_pipeline --grad_accumulation_steps 64 --pipeline_pivots LlamaDecoderLayer 2>&1 | tee run.log
+    torchrun --nproc_per_node=8 --nnodes=2 --node_rank=$$OMPI_COMM_WORLD_RANK --master_addr="$$MASTER_ADDR" --master_port=$$MASTER_PORT train.py --name llama3-70b --model_id meta-llama/Meta-Llama-3-70B --dataset_path ./bookcorpus_llama3_8K --gpu_mem_constraint 153 --plan_ngpus=8 --runtime_ngpus=16 --grad_accumulation_steps 64 --pipeline_pivots LlamaDecoderLayer --pipeline_nstages auto 2>&1 | tee run.log
 
-Note that in the command above, we enable searching for pipeline parallelism by passing ``--explore_pipeline``
-and set the possible pipeline stage boundaries by ``--pipeline_pivots LlamaDecoderLayer``.
+Note that in the command above, we enable searching for pipeline parallelism and set the possible pipeline stage boundaries
+by passing ``--pipeline_pivots LlamaDecoderLayer --pipeline_nstages auto``.
 
 For the 70B model, the flops for forward and backward is about 3968.41 TFLOPs. The detailed config is as following:
 

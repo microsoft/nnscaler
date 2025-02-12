@@ -232,6 +232,38 @@ Example stacktrace: ::
         return torch._C._is_autocast_available(device_type)
     TypeError: _is_autocast_available(): argument 'device_type' (position 1) must be str, not ConcreteAttrProxy
 
+"RuntimeError: Broadcast generated files failed" when use ``run_mode='compile'``
+--------------------------------------------------------------------------------
+
+When using ``Trainer``'s ``run_mode='compile'`` option, ``broadcast_strategy`` must be set to ``'none'``.
+
+How to fix:
+
+.. code-block:: diff
+
+    trainer_args = TrainerArgs(
+        run_mode='compile',
+        ...
+        +broadcast_strategy=('none' if run_mode=='compile' else 'all'),
+    )
+
+Example stacktrace: ::
+
+    Traceback (most recent call last):
+      File "model.py", line 63, in <module>
+        trainer.run()
+      File ".../nnscaler/cli/trainer.py", line 102, in run
+        self._setup()
+      File ".../nnscaler/cli/trainer.py", line 148, in _setup
+        pmodel = parallelize_model(self.train_args, self.dummy_input, load_module=not compile_only)
+      File ".../nnscaler/cli/mixed_module.py", line 281, in parallelize_model
+        return _new_adapter().parallelize(dummy_input, load_module=load_module)
+      File ".../nnscaler/cli/mixed_module.py", line 188, in parallelize
+        pmodel_class = nnscaler.parallelize(
+      File ".../nnscaler/parallel.py", line 1081, in parallelize
+        raise RuntimeError("Broadcast generated files failed: torch.distributed is not initialized.")
+    RuntimeError: Broadcast generated files failed: torch.distributed is not initialized.
+
 Flash Attention Problems
 ========================
 

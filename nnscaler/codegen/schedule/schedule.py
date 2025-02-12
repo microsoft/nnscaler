@@ -71,6 +71,10 @@ class ScheduleCodeGen(FuncEmission):
         gencode = copy.copy(self.init_code)
         device_map = device % len(self.devices)
         device_nodes = self.execplan.seq(device_map)
+        # We will manually set the `skip_reducer` flag and `skip_zero_grad`
+        # when we use scheduler (i.e. pipeline parallelism)
+        # Otherwise, the caller of `_train_step` will set these flags to support gradient accumulation
+        use_scheduler = self.execplan.graph.sched is not None
 
         assert all(not isinstance(n, IRFwOperation) for n in device_nodes), \
             "Expected all forward operators have been grouped into IRSegment"
@@ -82,13 +86,42 @@ class ScheduleCodeGen(FuncEmission):
         with FunctionBlock(func_name='_train_step',
                            args=args) as fb:
             fb.insert_body('_ = None')
+
+            if use_scheduler:
+                fb.insert_body('nnscaler.flags.RuntimeFlag.skip_zero_grad = False')
             fb.insert_body('model.zero_grad()')
+
             # body code
             if len(device_nodes) == 0:
                 fb.insert_body('pass')
             else:
+                def _is_backward_segment(node: IRCell) -> bool:
+                    node = node.cell if isinstance(node, ExeReuseCell) else node
+                    return isinstance(node, IRSegment) and not node.isfw()
+
+                # collect backward segments that needs to reduce gradients
+                # which are the last backward segments of every stage.
+                # (Every segment will be used multiple times via `ExeReuseCell`)
+                last_backward_node_oids = []
+                if use_scheduler:
+                    # Key: segment id
+                    # Value: the last backward ExeReuseCell of the segment
+                    last_backwards = {}
+                    for node in device_nodes[::-1]:
+                        if not _is_backward_segment(node):
+                            continue
+                        assert isinstance(node, ExeReuseCell), 'Expected ExeReuseCell for backward segment when using scheduler'
+                        if node.cell.cid not in last_backwards:
+                            last_backwards[node.cell.cid] = node
+                    last_backward_node_oids = [id(node) for node in last_backwards.values()]
+
                 for line, node in enumerate(device_nodes):
-                    # execute
+                    # when use scheduler, skip reducer if it is not the last backward of same segments
+                    if use_scheduler and _is_backward_segment(node):
+                        fb.insert_body(
+                            f'nnscaler.flags.RuntimeFlag.skip_reducer = '
+                            f'{id(node) not in last_backward_node_oids !r}'
+                        )
                     codes = self.emit_node(node)
                     fb.insert_body(codes)
                     # release

@@ -340,12 +340,7 @@ class IRGraph(IRSegment):
                     rtensor.grad = copy.copy(itensor.grad)
         # insert forward
         for fnode in fnodes:
-            if isinstance(node, IRFwOperation):
-                fnode.recompute = node.recompute
-            if isinstance(node.comment, str):
-                fnode.comment = node.comment
-            fnode.module_stack = node.module_stack
-            fnode.device = node.device
+            self.copy_node_meta_info(node, fnode)
         fsegment.replace(node, fnodes)
         # insert backward
         bsegment: IRSegment = fsegment.mirror
@@ -402,12 +397,7 @@ class IRGraph(IRSegment):
         # insert forward node
         fsegment: IRSegment = self.segment(node)
         for fnode in fnodes:
-            if isinstance(node, IRFwOperation):
-                fnode.recompute = node.recompute
-            if isinstance(node.comment, str):
-                fnode.comment = node.comment
-            fnode.module_stack = node.module_stack
-            fnode.device = node.device
+            self.copy_node_meta_info(node, fnode)
         fsegment.replace(node, fnodes)
 
         if node.mirror is None: return fnodes
@@ -920,8 +910,8 @@ class IRGraph(IRSegment):
         Returns:
             None
         """
-        assert all(isinstance(node, IRFwOperation) for node in nodes), \
-            f"Find node is not IRFwOperation or IRDataOperation: {node}"
+        for node in nodes:
+            assert isinstance(node, IRFwOperation), f"Expected node to be IRFwOperation, but got {node}"
         assert all(node in self._nodes for node in nodes), \
             f"Exist node is not in graph nodes"
         starts = list(self._nodes.index(node) for node in nodes)
@@ -1219,3 +1209,18 @@ class IRGraph(IRSegment):
             states = str((max_tensor_id, max_cell_id, self.extra_repr()))
             checksum = hashlib.md5(states.encode()).hexdigest()
         return checksum
+
+    @staticmethod
+    def copy_node_meta_info(src_node: Union[IRFwOperation, IRDataOperation], dest_node: Union[IRFwOperation, IRDataOperation]):
+        """
+        Copy meta information from src_node to dest_node.
+        Current copy fields: ['recompute', 'comment', 'op_context', 'module_stack', 'device']
+        """
+        if isinstance(src_node, IRFwOperation):
+            dest_node.recompute = src_node.recompute
+        if isinstance(src_node.comment, str):
+            dest_node.comment = src_node.comment
+        if src_node.op_context is not None:
+            dest_node.op_context = src_node.op_context
+        dest_node.module_stack = src_node.module_stack
+        dest_node.device = src_node.device

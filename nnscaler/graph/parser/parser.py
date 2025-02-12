@@ -71,7 +71,7 @@ class FxModuleParser:
         frame.push_var()
 
         # shape propagation
-        assert isinstance(dummy_inputs, dict), "Expected dummy inputs to parse module"
+        assert isinstance(dummy_inputs, dict), f"Expected dummy inputs to parse module, but got {dummy_inputs} of type {type(dummy_inputs)}"
         output_nodes = [node for node in module.graph.nodes if node.op == 'output']
         # currently fx graph always has only one output
         # even if a tuple/list is returned, it is still just one output

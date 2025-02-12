@@ -180,8 +180,6 @@ class ComputeConfig:
             raise ValueError(f"pipeline_nmicros {pipeline_nmicros} must be > 0.")
         if pipeline_nstages <= 0:
             raise ValueError(f"pipeline_nstages {pipeline_nstages} must be > 0.")
-        if self.plan_ngpus % pipeline_nstages != 0:
-            raise ValueError(f"pipeline_nstages {pipeline_nstages} must be a multiple of plan_ngpus {self.plan_ngpus}")
         if pipeline_scheduler not in _PREDEFINE_SCHEDS:
             raise ValueError(f"pipeline_scheduler {pipeline_scheduler} is not supported. "
                              f"Supported schedulers are {_PREDEFINE_SCHEDS.keys()}")
@@ -231,6 +229,12 @@ class ComputeConfig:
             return self.runtime_ngpus // self.zero_ngroups
         else:
             return self.plan_ngpus
+
+    @property
+    def max_bucket_size_bytes(self) -> Optional[int]:
+        return int(self.reducer_bucket_cap_mb * 1024 * 1024) \
+            if self.reducer_bucket_cap_mb \
+            else None
 
     def get_sync_group(self) -> Tuple[List[int], torch.distributed.ProcessGroup]:
         """
@@ -319,8 +323,7 @@ def _compile_flags(compute_config: ComputeConfig):
     return _flags(
         CompileFlag,
         async_reducer=compute_config.use_async_reducer, reducer_op='sum',
-        max_reducer_bucket=int(compute_config.reducer_bucket_cap_mb * 1024 * 1024)
-                if compute_config.reducer_bucket_cap_mb else None,
+        max_reducer_bucket=compute_config.max_bucket_size_bytes,
         async_comm=False,
         use_zero=compute_config.use_zero,
         zero_ngroups=compute_config.zero_ngroups,
@@ -470,6 +473,7 @@ class RegenStatus(Enum):
     NONE = 'none'   # nothing is regenerated.
     ALL = 'all'     # everything is regenerated, including graph and code
     CODE = 'code'   # only code is regenerated.
+    ERROR = 'error' # error occurs during generation.
 
 
 def _prepare_namespace(
@@ -1016,26 +1020,38 @@ def parallelize(
     if torch.distributed.is_initialized():
         _ = DeviceGroup()
 
-    # generate code only in node0
-    # if it is not in a torchrun environment, just generate.
-    if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-        outdir, reusable = _prepare_and_check_reusable(gen_savedir, module_class, compute_config, instance_name, reuse)
-        if not reusable:
-            config_file = outdir / ParallelModule.COMPUTE_CONFIG_FILE
-            ComputeConfig.safe_dump_to_file(compute_config, config_file)  # always refresh compute config
-            with _compile_flags(compute_config):
-                regen_status = _gencode(
-                    module_or_module_class,
-                    dummy_forward_args,
-                    pas_policy,
-                    compute_config,
-                    outdir,
-                    module_dtype=module_dtype,
-                    module_fn=module_fn,
-                )
-        else:
-            regen_status = RegenStatus.NONE
-            logger.info(f"Reuse generated code in {outdir}")
+    # try...finally to ensure the barrier is called
+    # even if an exception is raised in the middle of the code generation.
+    try:
+        # generate code only in node0
+        # if it is not in a torchrun environment, just generate.
+        if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+            outdir, reusable = _prepare_and_check_reusable(gen_savedir, module_class, compute_config, instance_name, reuse)
+            if not reusable:
+                config_file = outdir / ParallelModule.COMPUTE_CONFIG_FILE
+                ComputeConfig.safe_dump_to_file(compute_config, config_file)  # always refresh compute config
+                with _compile_flags(compute_config):
+                    regen_status = _gencode(
+                        module_or_module_class,
+                        dummy_forward_args,
+                        pas_policy,
+                        compute_config,
+                        outdir,
+                        module_dtype=module_dtype,
+                        module_fn=module_fn,
+                    )
+            else:
+                regen_status = RegenStatus.NONE
+                logger.info(f"Reuse generated code in {outdir}")
+    except Exception as e:
+        regen_status = RegenStatus.ERROR
+        regen_exception = e
+    else:
+        # if the code generation is successful, set `regen_exception` to `None` in all nodes
+        # If the code generation is failed, `regen_exception` will be set to `None` in non-zero rank nodes.
+        # Please note exception is not broadcasted to other nodes
+        # because it may contain unpicklable objects.
+        regen_exception = None
 
     if torch.distributed.is_initialized():
         # code generation can take very long time (for example, over 1 hour)
@@ -1043,11 +1059,6 @@ def parallelize(
         # because the default timeout for nccl is 30 minutes
         # (we can't control the timeout setting if torch.distributed is not initialized by us)
         DeviceGroup().long_barrier()
-
-    if broadcast_strategy != BroadcastGenFilesStrategy.NONE:
-        if not torch.distributed.is_initialized(): # we only support loading in torchrun environment
-            raise RuntimeError("Broadcast generated files failed: torch.distributed is not initialized.")
-        torch.distributed.barrier()
         # sync regen_status
         curr_rank = torch.distributed.get_rank()
         if curr_rank == 0:
@@ -1061,7 +1072,16 @@ def parallelize(
         if curr_rank != 0:
             regen_status = sent_obj[0]
 
-        # narrow down broadcast_strategy according to regen_status
+    # all nodes will raise an exception if the code generation is failed.
+    if regen_status == RegenStatus.ERROR:
+        raise RuntimeError("Reuse generated code failed.") from regen_exception
+
+    if broadcast_strategy != BroadcastGenFilesStrategy.NONE:
+        if not torch.distributed.is_initialized(): # we only support loading in torchrun environment
+            raise RuntimeError("Broadcast generated files failed: torch.distributed is not initialized.")
+        torch.distributed.barrier()
+
+         # narrow down broadcast_strategy according to regen_status
         if regen_status == RegenStatus.NONE:
             # we don't need to broadcast anything
             broadcast_strategy = BroadcastGenFilesStrategy.NONE
@@ -1228,7 +1248,7 @@ OptimizerT = TypeVar('OptimizerT', bound=torch.optim.Optimizer)
 def build_optimizer(
     module: torch.nn.Module,
     optimizer_fn: Union[Type[OptimizerT], Callable[..., OptimizerT]],
-    *args,
+    compute_config: Optional[ComputeConfig] = None,
     **kwargs,
 ) -> Union[OptimizerT, ParallelOptimizer]:
     """
@@ -1253,7 +1273,9 @@ def build_optimizer(
         optimizer_fn (Union[Type[torch.optim.Optimizer], Callable[..., torch.optim.Optimizer]]):
             It can be the optimizer class or optimizer factory function.
             The first parameter of the optimizer_fn should be the parameters of the module.
-        *args: other args for `optimizer_fn` besides parameters.
+        compute_config (Optional[ComputeConfig]):
+            The config will be used to generate communication reducer.
+            If it is None, Default configuration will be used when creating reducer for non-parallel modules.
         **kwargs: the kwargs for optimizer constructor
 
     Returns:
@@ -1284,13 +1306,24 @@ def build_optimizer(
     for i in range(1, len(compute_configs)):
         if compute_configs[i].gpu_config != compute_configs[0].gpu_config:
             raise RuntimeError("All ParallelModules should have the same gpu_config.")
+    if compute_config and compute_config.gpu_config != compute_configs[0].gpu_config:
+        raise RuntimeError("All ParallelModules should have the same gpu_config.")
     plan_ngpus, runtime_ngpus = compute_configs[0].plan_ngpus, compute_configs[0].runtime_ngpus
 
     # we need to add all parameters of non-parallel modules to a reducer to reduce grads
     # if there are non-parallel parameters
     if plan_ngpus != runtime_ngpus and non_parallel_modules and any(p.numel() for m in non_parallel_modules for p in m.parameters(False)):
         group, _ = compute_configs[0].get_sync_group()
-        non_parallel_module_reducer = Reducer(group)
+        reducer_config = {}
+        if compute_config:
+            reducer_config = {
+                'async_op': compute_config.use_async_reducer,
+                'zero': compute_config.use_zero,
+                'max_bucket_size_bytes': compute_config.max_bucket_size_bytes,
+                'zero_use_reduce_scatter': compute_config.zero_use_reduce_scatter,
+                'zero_ngroups': compute_config.zero_ngroups,
+            }
+        non_parallel_module_reducer = Reducer(group, **reducer_config)
         for m in non_parallel_modules:
             for param in m.parameters(recurse=False): # only add leaf parameters to avoid duplicate
                 non_parallel_module_reducer.add_param(param)
@@ -1322,7 +1355,7 @@ def build_optimizer(
                     opt_module_locs[name].count += 1
             yield param
 
-    optimizer: torch.optim.Optimizer = optimizer_fn(_local_parameters(module), *args, **kwargs)
+    optimizer: torch.optim.Optimizer = optimizer_fn(_local_parameters(module), **kwargs)
     optimizer._non_parallel_module_reducer = non_parallel_module_reducer
     optimizer._extra_state = OptimizerExtraState(
             rank=torch.distributed.get_rank(),
@@ -1611,8 +1644,30 @@ def merge_state_dicts(
     if not module_state_dicts:
         raise ValueError("model_state_dicts should not be empty.")
 
+    def _get_state_dict_rank(state_dict: Dict[str, Any]) -> int:
+        for k in state_dict:
+            if k.split('.')[-1] == ParallelModule.EXTRA_STATE_KEY:
+                return state_dict[k]['rank']
+        raise ValueError("Invalid state dict: no rank found.")
+
+    def _sort_state_dicts(state_dicts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        sorted_state_dicts =[None] * len(state_dicts)
+        for state_dict in state_dicts:
+            rank = _get_state_dict_rank(state_dict)
+            if sorted_state_dicts[rank] is not None:
+                raise ValueError(f"Duplicate rank {rank} in state_dicts.")
+            if rank >= len(state_dicts):
+                raise ValueError(f"Invalid rank {rank} in state_dicts.")
+            sorted_state_dicts[rank] = state_dict
+        return sorted_state_dicts
+
+    # sort state dicts by rank
+    module_state_dicts = _sort_state_dicts(module_state_dicts)
+
     pm_extra_states, pm_state_dicts, ret_state_dict = _get_parallel_module_state_dict_info(module_state_dicts)
     if optimizer_state_dicts is not None:
+        # sort state dicts by rank
+        optimizer_state_dicts = _sort_state_dicts(optimizer_state_dicts)
         opt_extra_states, opt_state_dicts, ret_opt_state_dict = _get_optimizer_state_dict_info(optimizer_state_dicts)
         # the new optimizer state dict for ParallelModules
         # key: the parallel module location in the optimizer state
@@ -2262,7 +2317,7 @@ def _broadcast_opt_state(optimizer_state_dict, state_indexes: List[int], dedup_g
     else:
         step_stack = torch.zeros(
             len(state_indexes),
-            dtype=optimizer_state_dict['state'][0]['step'].dtype,
+            dtype=optimizer_state_dict['state'][state_indexes[0]]['step'].dtype,
             device=torch.cuda.current_device()
         )
     torch.distributed.broadcast(step_stack, src=src_rank, group=curr_parallel_group)
@@ -2320,7 +2375,7 @@ def _broadcast_weights(module: torch.nn.Module, stride_size: int):
             module._warn_uninitialized_non_persistent_buffers(raise_error=True)
 
     # we have a special optimization for ParallelModule
-    params = module.parameters_for_broadcast() if isinstance(module, ParallelModule) else module._parameters.values()
+    params = module.parameters_for_broadcast() if isinstance(module, ParallelModule) else list(module.parameters(False))
     logging.info(f'Inplace broadcasting {len(params)} parameters...')
     for i, param in enumerate(params):
         torch.distributed.broadcast(param.data, src=src_rank, group=curr_parallel_group)
@@ -2328,8 +2383,9 @@ def _broadcast_weights(module: torch.nn.Module, stride_size: int):
 
     # NOTE: may batch buffers for efficient broadcast,
     # current implementation is the most memory efficient way.
-    logging.info(f'Inplace broadcasting {len(module._buffers)} buffers...')
-    for _, buffer in module._buffers.items():
+    buffers = list(module.buffers(False))
+    logging.info(f'Inplace broadcasting {len(buffers)} buffers...')
+    for buffer in buffers:
         torch.distributed.broadcast(buffer.data, src=src_rank, group=curr_parallel_group)
 
     if isinstance(module, ParallelModule):
@@ -2379,8 +2435,10 @@ def sync_grad_when(cond: bool):
     only when `cond` is True.
 
     This is needed when
+
     1. The mode is not end2end model.
-        For end2end model, gradients are synchronized across workers automatically.
+       For end2end model, gradients are synchronized across workers automatically.
+
     2. async is enabled (`compute_config.use_async_reducer` is `True`).
 
     If both conditions are not satisfied, this function has no effect.

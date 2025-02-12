@@ -97,7 +97,7 @@ def calc_parallel_plan(graph: IRGraph,
         [node.cid for node in group] for group in recompute_groups
     ]
 
-    if autodist_config.pipeline:
+    if autodist_config.pipeline_enabled:
         pp_out = calc_optimal_pp_plan(autodist_graph, autodist_config)
     else:
         pp_out = calc_optimal_spmd_plan(autodist_graph, autodist_config)
@@ -178,25 +178,29 @@ def parallelize_graph(graph: IRGraph,
                 break
             assert find_desc, f'node {consumer} not found in any stage'
 
+    # add multiref for shared parameters across stages
+    # note that we have constrained that shared parameters cannot be partitioned in SPMDSolver, other input tensors
+    # belonging to the same operator can be partitioned. For example, in some LLMs, the embedding matrix is shared
+    # with the output layer. In this case, the batch dim / seq dim of the activation tensor can be partitioned.
+    for ftensor, stage_info in tensor_split_info.items():
+        if not ftensor.is_param():
+            continue
+        splits = set()
+        find_replicated = False
+        for stage_splits in stage_info.values():
+            splits.update(stage_splits)
+            if any(s[0] == 'REPLICATED' for s in stage_splits):
+                find_replicated = True
+        splits = list(splits)
+        # For safety, we will add multiref when detecting shared param are all replicated for pipeline parallelism.
+        # The reason is that stages may have different number of devices, it is hard to synchronize gradients directly
+        # by inserting reducers although weights are all REPLICAED.
+        if len(splits) > 1 or (len(pp_desc.spmd_descs) > 1 and find_replicated):
+            _logger.info(f'add multiref for shared param {ftensor}')
+            graph.multiref(ftensor, comment='shared param')
+
     # graph staging
     if len(pp_desc.spmd_descs) > 1:
-        # add multiref for shared parameters across stages
-        # note that we have constrained that shared parameters cannot
-        # be partitioned in SPMDSolver.
-        for ftensor, stage_info in tensor_split_info.items():
-            if not ftensor.is_param():
-                continue
-            splits = set()
-            find_replicated = False
-            for stage_splits in stage_info.values():
-                splits.update(stage_splits)
-                if any(s[0] == 'REPLICATED' for s in stage_splits):
-                    find_replicated = True
-            splits = list(splits)
-            if len(splits) > 1 or find_replicated:
-                _logger.info(f'add multiref for shared param {ftensor}')
-                graph.multiref(ftensor, comment='shared param')
-
         stages = []
         for spmd_desc in pp_desc.spmd_descs:
             stage = []
@@ -211,9 +215,8 @@ def parallelize_graph(graph: IRGraph,
     else:
         stages = [graph]
 
-    # TODO: check pipeline_nstages when ready.
-    # if autodist_config.pipeline and len(stages) != autodist_config.pipeline_nstages:
-    #     raise RuntimeError("pipeline_nstages doesn't match the number of stages (based on your pipeline_pivots config) in the plan")
+    if autodist_config.pipeline_nstages != 'auto' and len(stages) != autodist_config.pipeline_nstages:
+        raise RuntimeError("pipeline_nstages doesn't match the number of stages (based on your pipeline_pivots config) in the plan")
 
     # add multiref to an activation tensor when the states of the tensor and its grad are different
     # among consumers and current segment's outputs

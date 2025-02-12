@@ -10,6 +10,7 @@ from nnscaler.parallel import parallelize, ComputeConfig
 
 from .common import init_distributed
 from ..launch_torchrun import launch_torchrun
+from ..utils import raises_with_cause
 
 def _to_cube_model(module, pas, compute_config, cube_savedir):
     return parallelize(
@@ -47,7 +48,7 @@ def _nested_module_worker():
             def forward(self, x):
                 return self.module1(x)
 
-        with pytest.raises(RuntimeError, match='Parallel modules can not be nested.'):
+        with raises_with_cause(RuntimeError, match='Parallel modules can not be nested.'):
             _to_cube_model(Module2(), 'data', ComputeConfig(1, 1), cube_savedir=tempdir)
 
 

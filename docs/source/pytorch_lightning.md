@@ -78,7 +78,7 @@ where `checkpoint_files` is a list of checkpoint files to merge, and `output_fil
 
 ## Limitations
 
-Currently, nnScaler only supports: 
+Currently, nnScaler only supports:
 - single parameter group.
 - single optimizer.
 - single learning rate scheduler.

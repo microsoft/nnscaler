@@ -51,11 +51,11 @@ def init_parameter(model: torch.nn.Module, seed: int = 0):
             torch.nn.init.constant_(param, 0)
 
 
-def init_random():
-    np.random.seed(1)
-    torch.manual_seed(1)
+def init_random(seed: int = 1):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed(1)
+        torch.cuda.manual_seed(seed)
 
 
 def assert_parity(baseline_fn: Callable, compile_fn: Callable, atol: float=1e-4) -> bool:
@@ -377,3 +377,27 @@ def clear_dir_on_rank0(tempdir):
     torch.distributed.barrier()
     if torch.distributed.get_rank() == 0 and tempdir.exists():
         shutil.rmtree(tempdir)
+
+
+def clear_parallel_cache():
+    """
+    Clear all parallel modules in sys.modules
+    """
+    import sys
+    parallel_modules = [name for name in sys.modules if name.startswith('_parallel_modules')]
+    for name in parallel_modules:
+        del sys.modules[name]
+
+
+@contextmanager
+def raises_with_cause(exception_type, match=None):
+    try:
+        yield
+    except Exception as e:
+        cause = e
+        while cause.__cause__:
+            cause = cause.__cause__
+        assert isinstance(cause, exception_type), f"unexpected cause: {cause}"
+        assert not match or re.search(match, str(cause)), f"unexpected cause message: {cause}"
+    else:
+        raise AssertionError(f"expected exception {exception_type} not raised")

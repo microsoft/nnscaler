@@ -112,6 +112,9 @@ default_autowrap_leaf_function: Dict[Any, LeafWrapInfo] = {
     torch.nn.ParameterDict.__len__:      LeafWrapInfo([], False, builtins.len),
     torch.nn.ParameterDict.__iter__:     LeafWrapInfo([], False, builtins.iter),
     torch.nn.ParameterDict.__contains__: LeafWrapInfo([], False, operator.contains),
+
+    torch.autocast.__enter__:            LeafWrapInfo([], False, None),
+    torch.autocast.__exit__:             LeafWrapInfo([], False, None),
 }
 
 
@@ -297,6 +300,10 @@ def create_wrapped_leaf_class(clz, *, replace_cls: Optional[Callable]=None, defa
                     setattr(clz_wrapper_clz, name, wrapped_method)
                 else:
                     setattr(clz_wrapper_clz, name, attr)
+
+        # to support subscriptable type hint like func(x: dict[str, str])
+        if hasattr(clz, '__class_getitem__'):
+            setattr(clz_wrapper_clz, '__class_getitem__', clz.__class_getitem__)
 
     wrapped_cls_to_orig_cls[clz_wrapper_clz] = clz
     return clz_wrapper_clz
@@ -538,6 +545,23 @@ class type_wrapper_clz:
         return id(self)
 
 wrapped_cls_to_orig_cls[type_wrapper_clz] = orig_func.type
+
+
+# wrap autocast to make it support proxy input and the related node will be DCE in DCE stage.
+class torch_autocast_wrapper_clz:
+    # used to track the original class
+    _fx_wrapped_ori_clz = orig_func.torch_autocast
+
+    def __new__(cls, *args, **kwargs):
+        return orig_func.torch_autocast(*args, **kwargs)
+
+    def __eq__(self, __o: object) -> bool:
+        return id(__o) in (id(self), id(orig_func.type))
+
+    def __hash__(self):
+        return id(self)
+
+wrapped_cls_to_orig_cls[torch_autocast_wrapper_clz] = orig_func.torch_autocast
 
 
 @functools.wraps(orig_func.torch_assert)

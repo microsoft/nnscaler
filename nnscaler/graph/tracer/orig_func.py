@@ -48,6 +48,7 @@ torch_agfunc_apply = torch.autograd.function.Function.apply
 torch_assert = torch._assert
 torch_Size = torch.Size
 torch_finfo = torch.finfo
+torch_autocast = torch.autocast
 
 import importlib
 import_module = importlib.import_module

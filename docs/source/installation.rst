@@ -12,7 +12,7 @@ The wheel package is hosted on `GitHub release <https://github.com/microsoft/nns
 
 .. code-block:: bash
 
-    pip install https://github.com/microsoft/nnscaler/releases/download/0.6/nnscaler-0.6-py3-none-any.whl
+    pip install https://github.com/microsoft/nnscaler/releases/download/0.7/nnscaler-0.7-py3-none-any.whl
 
 ************************
 Install from Source Code

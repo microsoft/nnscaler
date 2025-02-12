@@ -23,10 +23,10 @@ from tqdm import tqdm
 
 import nnscaler
 from nnscaler.utils import enforce_zero_num_worker, is_running_distributed
-import nnscaler.utils
 
-from .trainer_args import AggregatedOutputs, TrainerArgs
+from .trainer_args import AggregatedOutputs, TrainerArgs, fix_input
 from .train_hook import AggregatedTrainHook, TrainHook
+from .mixed_module import parallelize_model, mixin_module
 
 
 logger = logging.getLogger(__name__)
@@ -105,29 +105,7 @@ class Trainer:
         self._train()
 
     def _fix_input(self, input):
-        if isinstance(input, dict):
-            return {k: self._fix_input(v) for k, v in input.items()}
-        elif isinstance(input, list):
-            return [self._fix_input(v) for v in input]
-        elif isinstance(input, tuple):
-            return tuple(self._fix_input(v) for v in input)
-        elif isinstance(input, torch.Tensor):
-            if input.is_floating_point() and self.train_args.input_dtype is not None:
-                return input.to(self.train_args.input_dtype).cuda()
-            else:
-                return input.cuda()
-        return input
-
-    def _create_dummy_forward_args(self):
-        assert self.dummy_input is not None, "dummy_input is not set"
-        assert self.train_args.model_type is not None, "model_type is not set"
-
-        arg_names = list(
-            inspect.signature(
-                inspect.unwrap(getattr(self.train_args.model_type, 'forward'))
-            ).parameters.keys()
-        )
-        return {arg_names[1]: self.dummy_input}  # arg_names[0] is self
+        return fix_input(input, self.train_args.input_dtype)
 
     def _load_dummy_input(self):
         with enforce_zero_num_worker(DataLoader):
@@ -146,33 +124,6 @@ class Trainer:
                 logging.getLogger().setLevel(logging.INFO)
             else:
                 logging.getLogger().setLevel(logging.WARNING)
-
-        def _create_model():
-            model = self.train_args.create_model()
-            if self.train_args.param_dtype == self.train_args.buffer_dtype:
-                if self.train_args.param_dtype is not None:
-                    model = model.to(self.train_args.param_dtype)
-            else:
-                # separate param and buffer dtype
-                # TODO: a little hacky. A better way?
-                # 3 kinds of tensors are converted in Module._apply:
-                # model parameters, its grad, and buffer
-                # param_dtype controls the first two, (but grad is `None` here)
-                # and buffer_dtype controls the last one
-                buf_ids = { id(buf) for buf in model.buffers(recurse=True) }
-                if self.train_args.param_dtype is not None:
-                    model._apply(
-                        lambda t: t.to(self.train_args.param_dtype)
-                            if t.is_floating_point() and id(t) not in buf_ids
-                            else t)
-                if self.train_args.buffer_dtype is not None:
-                    model._apply(
-                        lambda t: t.to(self.train_args.buffer_dtype)
-                            if t.is_floating_point() and id(t) in buf_ids
-                            else t)
-            if self.train_args.tracing_from_weights:
-                model.load_state_dict(torch.load(self.train_args.tracing_from_weights))
-            return model
 
         # create dataset and dataloader
         for stage in ['train', 'val', 'test']:
@@ -194,34 +145,7 @@ class Trainer:
                         f"You can specify `drop_last=True` in DataLoader to fix this problem."
                     )
 
-        # setup compute config
-        compute_config = copy.deepcopy(self.train_args.compute_config)
-        compute_config.pas_config['__pas_name'] = self.train_args.pas_policy
-        # autodist configs
-        compute_config.pas_config['update_freq'] = self.train_args.update_freq
-        compute_config.pas_config['use_bf16'] = self.train_args.param_dtype == torch.bfloat16
-        compute_config.pas_config['use_fp16'] = self.train_args.param_dtype == torch.float16
-
-        compute_config.user_config['__from_trainer_args'] = {
-            'mbs': self.train_args.micro_batch_size,
-            'gbs': self.train_args.global_batch_size,
-            'precision': self.train_args.precision,
-            'model_args': self.train_args.model.args,
-        }
-
-        # parallalize model
-        pmodel_class = nnscaler.parallelize(
-            self.train_args.model_type,
-            self._create_dummy_forward_args(),
-            self.train_args.resolved_pas_policy,
-            compute_config,
-            module_fn=_create_model,
-            gen_savedir=self.train_args.gen_savedir,
-            reuse=self.train_args.gen_reuse,
-            instance_name=self.train_args.instance_name,
-            broadcast_strategy=self.train_args.broadcast_strategy,
-            load_module=not compile_only,
-        )
+        pmodel = parallelize_model(self.train_args, self.dummy_input, load_module=not compile_only)
         if compile_only:
             return
 
@@ -244,9 +168,11 @@ class Trainer:
             self.max_train_steps = self.total_train_steps_per_epoch * self.train_args.max_epochs
 
         _, self.sync_group = self.train_args.compute_config.get_sync_group()
-        self.model = pmodel_class()
+        self.model = pmodel
         self.model.cuda()
         self.optimizer = self.train_args.create_parallel_optimizer(self.model)
+        # unify the interface of ParallelModule and partial-parallelized model
+        self.model = mixin_module(self.model, self.optimizer)
         # Here we carefully scale down the gradient locally with 1/scale_factor before reduce,
         # (the reduce op is `sum` by default, follow torch's c10d, grad is divided by scaling_factor before allreduce)
         # and scale up the gradient after reduce

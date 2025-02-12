@@ -44,7 +44,7 @@ ParallelizedLLM = parallelize(
 
 - Example 2: Parallelize submodules.
 
-In this case, for non-paralle modules, they are replicated inside unit, and run data parallelism across units. See more details about unit in [Compute Config](###ComputeConfig) section.
+In this case, for non-paralle modules, they are replicated inside unit, and run data parallelism across units. See more details about unit in [Compute Config](./trainer) section.
 
 ```python
 import torch
@@ -270,7 +270,7 @@ Please note the module can't be parallelize if `Module.forward` has positional-o
 - `pas_policy` (`Union[str, Callable[[IRGraph, ComputeConfig], IRGraph]]`): the pas (partition-assign-schedule) policy, which describes how to place all computations across devices.
 You need either pass a builtin PAS policy name or a a custom policy function which should take an `IRGraph` and a `ComputeConfig` as input, and return a new `IRGraph` with the PAS policy applied.
  We have 6 builtin PAS policies: `dp`, `tp`, `pp`, `data`, `hybrid`, and `autodist`. Please note all builtin PAS policies except `autodist` are only for test purpose. The `autodist` policy is the recommended policy for most cases.
- For details, please refer to [PAS Policies](#pas-policies) section.
+ For details, please refer to [PAS Policies](./trainer) section.
 
 - `compute_config` (`ComputeConfig`): the environment resource
 
@@ -320,7 +320,7 @@ We have `build_optimizer` to build an optimizer for distributed training.
 def build_optimizer(
     module: torch.nn.Module,
     optimizer_fn: Union[Type[OptimizerT], Callable[..., OptimizerT]],
-    *args,
+    compute_config: Optional[ComputeConfig] = None,
     **kwargs,
 ) -> OptimizerT:
 ```
@@ -329,8 +329,10 @@ It has the following parameters:
 - `optimizer_fn` (`Union[Type[torch.optim.Optimizer], Callable[..., torch.optim.Optimizer]]`):
     It can be the optimizer class or optimizer factory function.
     The first parameter of the `optimizer_fn` should be the module parameters.
-- *args: other args for `optimizer_fn` besides module parameters.
-- **kwargs: the kwargs will pass to `optimizer_fn`
+- compute_config (Optional[ComputeConfig]):
+    The config will be used to generate communication reducer.
+    If it is None, Default configuration will be used when creating reducer for non-parallel modules.
+- **kwargs: the kwargs will pass to `optimizer_fn`.
 
 To support distributed training, in the function we need to hook 4 places (which we have done for you in `build_optimizer`. That's why you should use `build_optimizer` to create optimizer):
 

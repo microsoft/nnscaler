@@ -34,7 +34,7 @@ class Model(torch.nn.Module):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA unavailable')
-@pytest.mark.parametrize('cfg_fname', ['all_replicated_pp.json', 'replicated_and_partition.json'])
+@pytest.mark.parametrize('cfg_fname', ['all_replicated_pp.json', 'replicated_and_partition_pp.json', 'replicated_and_partition_spmd.json'])
 def test_shared_param_pipeline(cfg_fname):
     bsz, hidden_dim = 4, 1024
 
@@ -68,15 +68,24 @@ def test_shared_param_pipeline(cfg_fname):
         plan_path = Path(os.path.dirname(__file__)) / cfg_fname
         cfg = AutoDistConfig(load_plan_path=plan_path, mesh_col=4)
         graph = parallelize_graph(ir_graph, cfg)
-        assert isinstance(graph.nodes()[4], IRSegment)
-        # check multiref is correctly inserted at the 1st IRSegment (pipeline stage)
-        has_multiref = False
-        for node in graph.nodes()[4].nodes():
-            if node.signature == 'nnscaler.runtime.function.multiref':
-                has_multiref = True
-                break
-        assert has_multiref
+        if 'pp' in cfg_fname:
+            assert isinstance(graph.nodes()[4], IRSegment)
+            # check multiref is correctly inserted at the 1st IRSegment (pipeline stage)
+            has_multiref = False
+            for node in graph.nodes()[4].nodes():
+                if node.signature == 'nnscaler.runtime.function.multiref':
+                    has_multiref = True
+                    break
+            assert has_multiref
+        else:
+            has_multiref = False
+            for node in graph.nodes():
+                if node.signature == 'nnscaler.runtime.function.multiref':
+                    assert not has_multiref, 'multiple multiref nodes found'
+                    has_multiref = True
 
         graph = IRAdapterGener.gen(graph, cost_fn=None)
         if graph.sched is not None:
             graph.sched.apply()
+
+        assert True, 'should not raise exception'

@@ -13,7 +13,7 @@ nnScaler is a parallelization engine that compiles a Deep neural network (DNN) m
 
 # Latest News
 nnScaler (also known as CUBE as code name) has been adopted by multiple product and research projects, this section includes some of the latest news from the team and partner projects.
-* **2025-01-08** nnScaler 0.6 released: https://github.com/microsoft/nnscaler/releases/tag/0.6
+* **2025-02-12** nnScaler 0.7 released: https://github.com/microsoft/nnscaler/releases/tag/0.7
 * **2024-10-07** Diff-Transformer utilizes nnScaler for differential attention mechanism: [DIFFERENTIAL TRANSFORMER](https://arxiv.org/abs/2410.05258)
 * **2024-05-09** YOCO utilizes nnScaler for long-sequence training: [(YOCO)You only cache once: Decoder-decoder architectures for language models](https://arxiv.org/abs/2405.05254)
 * **2024-04-22** Post training for the long context version of [Phi-3 series](https://arxiv.org/abs/2404.14219)

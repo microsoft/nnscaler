@@ -16,17 +16,24 @@ except ModuleNotFoundError:
 import logging
 import math
 
-from transformers.utils import (
-    is_flash_attn_2_available,
-    is_flash_attn_greater_or_equal_2_10,
-)
+from transformers.utils import is_flash_attn_greater_or_equal_2_10
 
-from nnscaler.graph.parser.register import register_op
-if is_flash_attn_2_available():
-    from flash_attn import flash_attn_func
-
+from .utils import nnscaler_flash_attention_forward
 
 logger = logging.getLogger(__name__)
+
+
+try:
+    import os
+    import sys
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(
+        os.path.abspath(__file__)), '../../customized_ops/ring_attention')))
+    from ring_attn import wrap_ring_attn_func
+
+    def nnscaler_ring_attn_func(query_states, key_states, value_states, *args, **kwargs):
+        return wrap_ring_attn_func(query_states, key_states, value_states)
+except ModuleNotFoundError:
+    logger.warning("Ring Attention is not import correctly.")
 
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -63,9 +70,6 @@ class NNScalerMultiheadDiffAttn(LlamaAttention):
                 f" and `num_heads`: {self.num_heads})."
             )
 
-        self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=self.config.attention_bias)
-        self.k_proj = nn.Linear(self.hidden_size, self.hidden_size // self.num_key_value_groups, bias=self.config.attention_bias)
-        self.v_proj = nn.Linear(self.hidden_size, self.hidden_size // self.num_key_value_groups, bias=self.config.attention_bias)
         self._init_rope()
 
         assert self.layer_idx is not None, "layer_idx must be provided for NNScalerMultiheadDiffAttn"
@@ -118,6 +122,7 @@ class NNScalerMultiheadDiffAttn(LlamaAttention):
             causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
         else:
             causal_mask = torch.triu(torch.zeros([q_len, q_len]).float().fill_(float("-inf")).type_as(query_states), 1)
+
         if query_states.device.type == "cuda" and causal_mask is not None:
             query_states = query_states.contiguous()
             key_states = key_states.contiguous()
@@ -163,6 +168,7 @@ class NNScalerMultiheadDiffFlashAttn(NNScalerMultiheadDiffAttn):
         # flash_attn<2.1 generates top-left aligned causal mask, while what is needed here is bottom-right alignement, that was made default for flash_attn>=2.1. This attribute is used to handle this difference. Reference: https://github.com/Dao-AILab/flash-attention/releases/tag/v2.1.0.
         # Beware that with flash_attn<2.1, using q_seqlen != k_seqlen (except for the case q_seqlen == 1) produces a wrong mask (top-left).
         self._flash_attn_uses_top_left_mask = not is_flash_attn_greater_or_equal_2_10()
+        self.attn_func = nnscaler_flash_attention_forward
     
     def forward(
         self,
@@ -199,11 +205,6 @@ class NNScalerMultiheadDiffFlashAttn(NNScalerMultiheadDiffAttn):
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
-
-        if query_states.device.type == "cuda":
-            query_states = query_states.contiguous()
-            key_states = key_states.contiguous()
-            value_states = value_states.contiguous()
         
         query_states = query_states.reshape(bsz, q_len, self.num_heads, 2, self.head_dim)
         key_states = key_states.reshape(bsz, q_len, self.num_key_value_heads, 2, self.head_dim)
@@ -211,12 +212,12 @@ class NNScalerMultiheadDiffFlashAttn(NNScalerMultiheadDiffAttn):
         k1, k2 = key_states[:, :, :, 0], key_states[:, :, :, 1]
         v1, v2 = value_states[:, :, :, 0], value_states[:, :, :, 1]
 
-        attn11 = flash_attn_func(q1, k1, v1, causal=True)
-        attn12 = flash_attn_func(q1, k1, v2, causal=True)
+        attn11 = self.attn_func(q1, k1, v1, attention_mask, q_len, causal=True)
+        attn12 = self.attn_func(q1, k1, v2, attention_mask, q_len, causal=True)
         attn1 = torch.cat([attn11, attn12], dim=-1)
         
-        attn21 = flash_attn_func(q2, k2, v1, causal=True)
-        attn22 = flash_attn_func(q2, k2, v2, causal=True)
+        attn21 = self.attn_func(q2, k2, v1, attention_mask, q_len, causal=True)
+        attn22 = self.attn_func(q2, k2, v2, attention_mask, q_len, causal=True)
         attn2 = torch.cat([attn21, attn22], dim=-1)
 
         lambda_1 = torch.exp(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1))
@@ -225,23 +226,14 @@ class NNScalerMultiheadDiffFlashAttn(NNScalerMultiheadDiffAttn):
         attn_output = attn1 - lambda_full * attn2
         attn_output = self.subln(attn_output)
         attn_output = attn_output * (1 - self.lambda_init)
-        attn_output = attn_output.reshape(bsz, q_len, self.num_heads * 2 * self.head_dim)
+        attn_output = attn_output.reshape(bsz, q_len, self.num_heads * 2 * self.head_dim).contiguous()
         
         attn_output = self.o_proj(attn_output)
 
         return attn_output, None, past_key_value
-    
 
-def flash_attention_anno(query_states, key_states, value_states, *args, **kwargs) -> str:
-    if query_states.shape[2] != key_states.shape[2]:
-        assert query_states.shape[2] % key_states.shape[2] == 0
-        group_size = query_states.shape[2] // key_states.shape[2]
-        assert query_states.shape[2] == value_states.shape[2] * group_size
-        q_anno = f'(group_num {group_size})'
-        kv_anno = 'group_num'
-    else:
-        q_anno = kv_anno = 'num_heads'
-    return f'b l^ {q_anno} hd^, b s^ {kv_anno} hd^, b s^ {kv_anno} vd^ -> b l^ {q_anno} vd^'
 
-if is_flash_attn_2_available():
-    register_op(flash_attention_anno)(flash_attn_func)
+class NNScalerMultiheadDiffRingAttn(NNScalerMultiheadDiffFlashAttn):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.attn_func = nnscaler_ring_attn_func

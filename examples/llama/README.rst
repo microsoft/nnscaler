@@ -150,7 +150,7 @@ Here ``b`` stands for batch size, ``l`` stands for sequence length, ``d`` stands
 The ``^`` means the dimension cannot be partitioned.
 More details about the annotation can be found in :doc:`../register_custom_op`.
 
-You can enable this customized function by passing ``--enable-chunk-loss`` to ``train.py`` when compiling.
+You can enable this customized function by passing ``--enable_chunk_loss`` to ``train.py`` when compiling.
 When the sequence length is small (like 8K), this option can be turned off.
 
 Profile Communication
@@ -205,7 +205,7 @@ Compile
 
 .. code-block:: bash
 
-    python train.py --run_mode compile --model_id meta-llama/Meta-Llama-3-8B-Instruct --dataset_path ./bookcorpus_llama3_128K --plan_ngpus=8 --runtime_ngpus=8 --recompute_modules LlamaDecoderLayer --enable-chunk-loss 2>&1 | tee compile.log
+    python train.py --run_mode compile --model_id meta-llama/Meta-Llama-3-8B-Instruct --dataset_path ./bookcorpus_llama3_128K --plan_ngpus=8 --runtime_ngpus=8 --recompute_modules LlamaDecoderLayer --enable_chunk_loss 2>&1 | tee compile.log
 
 Run
 ---
@@ -275,6 +275,13 @@ Based on AutoDist's analysis, the low utilization results from following aspects
 * Enlarge search space in the future.
   Currently we only consider plan_ngpus=8 and fix the pipeline schedule to be ``1f1b``.
   We can refine this assumption in the future.
+
+****************
+DIFFERENTIAL TRANSFORMER
+****************
+
+Users can utilize ``DIFFERENTIAL TRANSFORMER`` by using the flag ``--enable_diff_attn``. ``DIFFERENTIAL TRANSFORMER`` is an alternative to the traditional attention mechanism `<https://arxiv.org/pdf/2410.05258>`. It implements differential attention as the Attention module, replacing the conventional ``eager attention`` or ``flash attention`` modules. 
+When the sequence length is extremely long, ``ring diff attn`` can be employed by using the flag ``--enable_ring_attn``. This approach can break through the limitations of key - value heads, achieving a more refined partitioning.
 
 *********
 Debugging

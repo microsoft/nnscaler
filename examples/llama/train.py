@@ -312,7 +312,7 @@ if __name__ == '__main__':
         help='trace strategy control the function execution during tracing model graph, `cuda_run_cpu_offload` and `reuse_cache` are recommended, please read `docs/source/parallel_module.md` for more information',
     )
     parser.add_argument(
-        '--enable-chunk-loss',
+        '--enable_chunk_loss',
         action='store_true',
         help='enable chunk loss that exchanges the speed of training for the memory usage',
     )
@@ -356,6 +356,11 @@ if __name__ == '__main__':
         '--enable_diff_attn',
         action='store_true',
         help='enable diff attention implementation, eager is normal diff attention, flash_attention_2 is diff flash attention, and spda diff attention is not currently supported',
+    )
+    parser.add_argument(
+        '--enable_ring_attn',
+        action='store_true',
+        help='enable ring attention, currently only diff flash attention is supported',
     )
     args = parser.parse_args()
     if args.pipeline_nstages != 'auto':

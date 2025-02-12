@@ -2,21 +2,19 @@
 #  Licensed under the MIT License.
 
 from typing import Tuple, List, Dict
-import torch
 from torch import Tensor
-import torch.distributed
 
 from nnscaler.graph.parser.register import register_op
 from nnscaler.ir.operator import IRFwOperation
 from core.ring_attn_implementation import RingFlashAttnFunc
 from flash_attn import flash_attn_func
 
-import torch.distributed as dist
 from nnscaler.runtime.device import DeviceGroup
+
 
 def wrap_ring_attn_func(q: Tensor, k: Tensor, v: Tensor, softmax_scale: Tensor=None,
                           dropout_p: float=0.0, causal: bool=True, window_size: Tuple[int]=(-1, -1),
-                          alibi_slopes: Tensor=None, deterministic: bool=False,
+                          softcap: float=0.0, alibi_slopes: Tensor=None, deterministic: bool=False,
                           return_attn_probs: bool=False,
                           process_group: Tuple[int]=None) -> Tensor:
     '''
@@ -49,6 +47,10 @@ def wrap_ring_attn_func(q: Tensor, k: Tensor, v: Tensor, softmax_scale: Tensor=N
 
     local_process_group = DeviceGroup().get_group(process_group)
 
+    # In the RingFlashAttnFunc.apply function, the torch.distributed._all_gather_base function 
+    # requires that the k and v tensors be contiguous.
+    k = k.contiguous()
+    v = v.contiguous()
     output = RingFlashAttnFunc.apply(
         q,
         k,
@@ -57,6 +59,7 @@ def wrap_ring_attn_func(q: Tensor, k: Tensor, v: Tensor, softmax_scale: Tensor=N
         softmax_scale,
         causal,
         window_size,
+        softcap,
         alibi_slopes,
         deterministic,
         return_attn_probs,

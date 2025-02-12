@@ -188,3 +188,19 @@ def test_deserialize_value_type():
     x = parse_args(['--p.value=1'])
     y = deserialize_dataclass(x, A)
     assert y.p == {'value': 1}
+
+
+def test_deserialize_union_type():
+    # union annotation is actually ignored.
+    # Here the correct result depends on `_guess_deserialize_object` function.
+    @dataclass
+    class A:
+        p: Union[int, str] = None
+
+    x = parse_args(['--p.value=1'])
+    y = deserialize_dataclass(x, A)
+    assert y.p == {'value': 1}
+
+    x = parse_args(['--p.value=auto'])
+    y = deserialize_dataclass(x, A)
+    assert y.p == {'value': 'auto'}

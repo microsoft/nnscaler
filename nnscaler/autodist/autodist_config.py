@@ -88,13 +88,11 @@ class AutoDistConfig:
         Whether to print verbose information.
     - re_profile (`bool`, *optional*, defaults to `False`):
         If set to `True`, the computation profiling results will be overridden.
-    - pipeline (`bool`, *optional*, defaults to `False`):
-        Whether to use pipeline parallelism or tensor parallelism.
     - pipeline_pivots (`str`, *optional*, defaults to `''`):
         The module names to pivot the pipeline, separated by `,`. For example, if `module1,module2`
         is specified, stages searched by pipeline solver only start from either `module1` or `module2`.
-    - pipeline_nstages(`int`, *optional*, defaults to `1`):
-        The number of stages in pipeline parallelism. This option is only used when pipeline is True.
+    - pipeline_nstages(`int | Literal['auto']`, *optional*, defaults to `'auto'`):
+        When `pipeline_pivots` is not empty, this specify the number of stages in pipeline parallelism. `1` means not to use pipelines.
     - pipeline_scheduler (`str`, *optional*, defaults to `'1f1b'`):
         The pipeline scheduler to use. Currently only support `'1f1b'`.
     - max_pipeline_bubble_ratio (`float`, *optional*, defaults to `0.2`):
@@ -142,9 +140,8 @@ class AutoDistConfig:
                  ignore_small_tensor_threshold=1,
                  verbose=False,
                  re_profile=False,
-                 pipeline=False,
                  pipeline_pivots='',
-                 pipeline_nstages=1,
+                 pipeline_nstages='auto',
                  pipeline_scheduler='1f1b',
                  max_pipeline_bubble_ratio=0.2,
                  max_pipeline_unbalance_ratio=0.5,
@@ -178,7 +175,6 @@ class AutoDistConfig:
         self.ignore_small_tensor_threshold = ignore_small_tensor_threshold
         self.verbose = verbose
         self.re_profile = re_profile
-        self.pipeline = pipeline
         self.pipeline_pivots = pipeline_pivots
         self.pipeline_nstages = pipeline_nstages
         self.pipeline_scheduler = pipeline_scheduler
@@ -187,7 +183,7 @@ class AutoDistConfig:
         self.max_pipeline_bubble_ratio = max_pipeline_bubble_ratio
         self.max_pipeline_unbalance_ratio = max_pipeline_unbalance_ratio
         self.solver = solver
-        if pipeline and solver != 'dp':
+        if self.pipeline_enabled and solver != 'dp':
             _logger.warning(
                 f'pipeline is enabled, but solver is not dp, set solver to dp'
             )
@@ -210,7 +206,7 @@ class AutoDistConfig:
             _logger.info(f'create folder: {self.profile_dir}')
             Path(self.profile_dir).mkdir(parents=True, exist_ok=True)
 
-        if self.pipeline:
+        if self.pipeline_enabled:
             if self.max_pipeline_bubble_ratio <= 0 or self.max_pipeline_bubble_ratio >= 1:
                 raise ValueError(
                     f'max pipeline bubble ratio {self.max_pipeline_bubble_ratio} must be in (0, 1)'
@@ -261,3 +257,11 @@ class AutoDistConfig:
     @property
     def ngpus(self):
         return self.mesh_desc.ngpus
+
+    @property
+    def pipeline_enabled(self) -> bool:
+        # whether to explore pipeline
+        # "auto" is considered as enabled although the exploration result might be not to use pipeline
+        if not self.pipeline_pivots:
+            return False
+        return self.pipeline_nstages == 'auto' or self.pipeline_nstages > 1

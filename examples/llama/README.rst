@@ -150,7 +150,7 @@ Here ``b`` stands for batch size, ``l`` stands for sequence length, ``d`` stands
 The ``^`` means the dimension cannot be partitioned.
 More details about the annotation can be found in :doc:`../register_custom_op`.
 
-You can enable this customized function by passing ``--enable-chunk-loss`` to ``train.py`` when compiling.
+You can enable this customized function by passing ``--enable_chunk_loss`` to ``train.py`` when compiling.
 When the sequence length is small (like 8K), this option can be turned off.
 
 Profile Communication
@@ -205,7 +205,7 @@ Compile
 
 .. code-block:: bash
 
-    python train.py --run_mode compile --model_id meta-llama/Meta-Llama-3-8B-Instruct --dataset_path ./bookcorpus_llama3_128K --plan_ngpus=8 --runtime_ngpus=8 --recompute_modules LlamaDecoderLayer --enable-chunk-loss 2>&1 | tee compile.log
+    python train.py --run_mode compile --model_id meta-llama/Meta-Llama-3-8B-Instruct --dataset_path ./bookcorpus_llama3_128K --plan_ngpus=8 --runtime_ngpus=8 --recompute_modules LlamaDecoderLayer --enable_chunk_loss 2>&1 | tee compile.log
 
 Run
 ---
@@ -247,10 +247,10 @@ Combined Command
 
 .. code-block:: bash
 
-    torchrun --nproc_per_node=8 --nnodes=2 --node_rank=$$OMPI_COMM_WORLD_RANK --master_addr="$$MASTER_ADDR" --master_port=$$MASTER_PORT train.py --name llama3-70b --model_id meta-llama/Meta-Llama-3-70B --dataset_path ./bookcorpus_llama3_8K --gpu_mem_constraint 153 --plan_ngpus=8 --runtime_ngpus=16 --explore_pipeline --grad_accumulation_steps 64 --pipeline_pivots LlamaDecoderLayer 2>&1 | tee run.log
+    torchrun --nproc_per_node=8 --nnodes=2 --node_rank=$$OMPI_COMM_WORLD_RANK --master_addr="$$MASTER_ADDR" --master_port=$$MASTER_PORT train.py --name llama3-70b --model_id meta-llama/Meta-Llama-3-70B --dataset_path ./bookcorpus_llama3_8K --gpu_mem_constraint 153 --plan_ngpus=8 --runtime_ngpus=16 --grad_accumulation_steps 64 --pipeline_pivots LlamaDecoderLayer --pipeline_nstages auto 2>&1 | tee run.log
 
-Note that in the command above, we enable searching for pipeline parallelism by passing ``--explore_pipeline``
-and set the possible pipeline stage boundaries by ``--pipeline_pivots LlamaDecoderLayer``.
+Note that in the command above, we enable searching for pipeline parallelism and set the possible pipeline stage boundaries
+by passing ``--pipeline_pivots LlamaDecoderLayer --pipeline_nstages auto``.
 
 For the 70B model, the flops for forward and backward is about 3968.41 TFLOPs. The detailed config is as following:
 
@@ -275,6 +275,13 @@ Based on AutoDist's analysis, the low utilization results from following aspects
 * Enlarge search space in the future.
   Currently we only consider plan_ngpus=8 and fix the pipeline schedule to be ``1f1b``.
   We can refine this assumption in the future.
+
+****************
+DIFFERENTIAL TRANSFORMER
+****************
+
+Users can utilize ``DIFFERENTIAL TRANSFORMER`` by using the flag ``--enable_diff_attn``. ``DIFFERENTIAL TRANSFORMER`` is an alternative to the traditional attention mechanism `<https://arxiv.org/pdf/2410.05258>`. It implements differential attention as the Attention module, replacing the conventional ``eager attention`` or ``flash attention`` modules. 
+When the sequence length is extremely long, ``ring diff attn`` can be employed by using the flag ``--enable_ring_attn``. This approach can break through the limitations of key - value heads, achieving a more refined partitioning.
 
 *********
 Debugging

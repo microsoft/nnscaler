@@ -1,6 +1,12 @@
 #  Copyright (c) Microsoft Corporation.
 #  Licensed under the MIT License.
 
+"""
+The functions in this file might be inserted as node to graph, to ensure that the inserted node can generate the correct code,
+please following the assumption:
+  - should execute under default context (not under for example, torch.no_grad) no matter what the producer and consumer context are.
+"""
+
 from contextlib import contextmanager
 from typing import Optional, List, Tuple, Union, Any
 import torch

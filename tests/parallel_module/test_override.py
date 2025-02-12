@@ -13,7 +13,7 @@ from nnscaler.graph.parser import FxModuleParser
 from nnscaler.parallel import ReuseType, parallelize, ComputeConfig, _load_parallel_module_class
 from nnscaler.runtime.module import ParallelModule
 
-from ..utils import new_empty, replace_all_device_with
+from ..utils import new_empty, replace_all_device_with, raises_with_cause
 
 
 def _to_cube_model(model_class, compute_config, cube_savedir, reuse, instance_name, load_module=True):
@@ -73,7 +73,7 @@ def test_override():
 
         # MATCH  | unmatch | raise error
         _to_cube_model(MyModule, ComputeConfig(1, 1),tempdir, ReuseType.MATCH, 'm0')
-        with pytest.raises(RuntimeError, match='.*not empty.*'):
+        with raises_with_cause(RuntimeError, match='.*not empty.*'):
             _to_cube_model(MyModule, ComputeConfig(2, 2),tempdir, 'match', 'm0')
 
         # MOO   | empty | generate
@@ -90,19 +90,19 @@ def test_override():
 
         # MOO  | imported | raise error
         _to_cube_model(MyModule, ComputeConfig(1, 1),tempdir, ReuseType.MOO, 'o2', load_module=True)
-        with pytest.raises(RuntimeError):
+        with raises_with_cause(RuntimeError):
             _to_cube_model(MyModule, ComputeConfig(2, 2),tempdir, ReuseType.MOO, 'o2')
 
         # OVERRIDE   | imported | raise error
-        with pytest.raises(RuntimeError):
+        with raises_with_cause(RuntimeError):
             _to_cube_model(MyModule, ComputeConfig(1, 1),tempdir, ReuseType.OVERRIDE, 'mm0')
 
         # OVERRIDE   | imported | raise error
-        with pytest.raises(RuntimeError):
+        with raises_with_cause(RuntimeError):
             _to_cube_model(MyModule, ComputeConfig(1, 1),tempdir, ReuseType.OVERRIDE, 'test')
 
         # OVERRIDE  | imported | raise error
-        with pytest.raises(RuntimeError):
+        with raises_with_cause(RuntimeError):
             _to_cube_model(MyModule, ComputeConfig(2, 2),tempdir, ReuseType.OVERRIDE, 'test')
 
         # OVERRIDE   | empty | generate
@@ -168,7 +168,7 @@ def test_override():
         g6_module = _to_cube_model(MyModule, ComputeConfig(1, 1), tempdir, 'graph', 'g6')
 
         # Graph | imported | raise error
-        with pytest.raises(RuntimeError):
+        with raises_with_cause(RuntimeError):
             _to_cube_model(MyModule, ComputeConfig(1, 1), tempdir, 'graph', 'g6')
 
         # Graph | unmatch | generate

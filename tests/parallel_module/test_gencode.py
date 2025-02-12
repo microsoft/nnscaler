@@ -21,7 +21,7 @@ from nnscaler.parallel import parallelize, ComputeConfig, CubeModule, _gen_graph
 
 from .common import init_distributed
 from ..launch_torchrun import launch_torchrun
-from ..utils import replace_all_device_with
+from ..utils import replace_all_device_with, raises_with_cause
 
 def _to_cube_model(module, compute_config, cube_savedir, load_module):
     return parallelize(
@@ -151,7 +151,7 @@ class TupleReturnModule2(torch.nn.Module):
 @replace_all_device_with('cpu')
 @pytest.mark.parametrize('return_type', [0, 1])
 def test_codegen_tuple_return2(return_type):
-    test_context = nullcontext() if return_type != 0 else pytest.raises(RuntimeError, match='Single tuple outputs.*')
+    test_context = nullcontext() if return_type != 0 else raises_with_cause(RuntimeError, match='Single tuple outputs.*')
     with tempfile.TemporaryDirectory() as tempdir, test_context:
         parallelize(
             TupleReturnModule2(return_type),
@@ -603,7 +603,7 @@ def test_codegen_tensor_slice():
     with tempfile.TemporaryDirectory() as tempdir:
         m = TensorSliceModule()
         m.train()
-        with pytest.raises(RuntimeError, match='Tensor is not supported in slice.'):
+        with raises_with_cause(RuntimeError, match='Tensor is not supported in slice.'):
             parallelize(
                 m,
                 {'x': torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])},
@@ -903,7 +903,7 @@ def test_codegen_end2end():
             )
             p(tempdir, use_pipeline=use_pipeline, constant_folding=True, return_type=0)  # should success
             if use_pipeline:
-                with pytest.raises(RuntimeError, match='.*Communication generation.*'):
+                with raises_with_cause(RuntimeError, match='.*Communication generation.*'):
                     # fail for non-tensor IRObject return in pipeline mode
                     p(tempdir, use_pipeline=use_pipeline, constant_folding=False, return_type=1)
             else:
@@ -911,13 +911,13 @@ def test_codegen_end2end():
             p(tempdir, use_pipeline=use_pipeline, constant_folding=True, return_type=1)  # should success
             p(tempdir, use_pipeline=use_pipeline, constant_folding=False, return_type=2)  # should success
             p(tempdir, use_pipeline=use_pipeline, constant_folding=True, return_type=2)  # should success
-            with pytest.raises(RuntimeError, match='.*Loss can only be scalar tensor.*'):
+            with raises_with_cause(RuntimeError, match='.*Loss can only be scalar tensor.*'):
                 p(tempdir, use_pipeline=use_pipeline, constant_folding=False, return_type=3)
-            with pytest.raises(RuntimeError, match='.*Loss can only be scalar tensor.*'):
+            with raises_with_cause(RuntimeError, match='.*Loss can only be scalar tensor.*'):
                 p(tempdir, use_pipeline=use_pipeline, constant_folding=True, return_type=3)
-            with pytest.raises(RuntimeError, match='.*Loss can only be scalar tensor.*'):
+            with raises_with_cause(RuntimeError, match='.*Loss can only be scalar tensor.*'):
                 p(tempdir, use_pipeline=use_pipeline, constant_folding=False, return_type=4)
-            with pytest.raises(RuntimeError, match='.*Loss can only be scalar tensor.*'):
+            with raises_with_cause(RuntimeError, match='.*Loss can only be scalar tensor.*'):
                 p(tempdir, use_pipeline=use_pipeline, constant_folding=True, return_type=4)
 
             p(tempdir, use_pipeline=use_pipeline, constant_folding=False, return_type=0, inference_only=True)  # should success
@@ -1222,7 +1222,7 @@ def test_invalid_partition(tmp_path):
     m = CVModel()
     m.train()
 
-    with pytest.raises(ValueError):
+    with raises_with_cause(ValueError):
         parallelize(
             m,
             dummy_input,
@@ -1756,7 +1756,7 @@ def test_use_none_return(tmp_path):
     m = IRUseNoneModule()
     m.train()
     # it should raise an error, because _op1 has no return value, but it is used in _op4
-    with pytest.raises(KeyError):
+    with raises_with_cause(KeyError):
         parallelize(
             m,
             {'x': torch.randn(128, 64)},
@@ -1826,3 +1826,89 @@ def test_multi_output_op(tmp_path):
     SignFx2Op.kOpMap.pop('tests.parallel_module.test_gencode._op6')
     # should success
     assert True
+
+
+class InitErrorModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        raise ValueError('world error')
+
+    def forward(self, input):
+        pass
+
+
+def _gencode_init_error_worker(tmp_path, without_init_distributed=False):
+    if not without_init_distributed:
+        init_distributed()
+    try:
+        m_new = parallelize(
+            InitErrorModule,
+            {
+                'input': torch.randn(2, 3, 32, 32),
+            },
+            'dp',
+            ComputeConfig(1, 2),
+            gen_savedir=tmp_path,
+            load_module=True
+        )
+    except Exception as e:
+        assert isinstance(e, RuntimeError)
+        if without_init_distributed or torch.distributed.get_rank() == 0:
+            root_cause = e.__cause__
+            while root_cause.__cause__ is not None:
+                root_cause = root_cause.__cause__
+            assert isinstance(root_cause, ValueError)
+            assert root_cause.args[0] == 'world error'
+        else:
+            assert e.__cause__ is None
+
+
+@replace_all_device_with('cpu')
+def test_codegen_init_error_compile(tmp_path):
+    _gencode_init_error_worker(tmp_path, without_init_distributed=True)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.device_count() < 2, reason='lack of GPU devices')
+def test_codegen_init__error(tmp_path):
+    launch_torchrun(2, _gencode_init_error_worker, tmp_path)
+
+
+class ForwardErrorModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, input):
+        raise ValueError('hello error')
+
+
+def _gencode_forward_error_worker(tmp_path, without_init_distributed=False):
+    if not without_init_distributed:
+        init_distributed()
+    try:
+        m_new = parallelize(
+            ForwardErrorModule,
+            {
+                'input': torch.randn(2, 3, 32, 32),
+            },
+            'dp',
+            ComputeConfig(1, 2),
+            gen_savedir=tmp_path,
+            load_module=True
+        )
+    except Exception as e:
+        assert isinstance(e, RuntimeError)
+        if without_init_distributed or torch.distributed.get_rank() == 0:
+            assert isinstance(e.__cause__, ValueError)
+            assert e.__cause__.args[0] == 'hello error'
+        else:
+            assert e.__cause__ is None
+
+
+@replace_all_device_with('cpu')
+def test_codegen_forward_error_compile(tmp_path):
+    _gencode_forward_error_worker(tmp_path, without_init_distributed=True)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.device_count() < 2, reason='lack of GPU devices')
+def test_codegen_forward_error(tmp_path):
+    launch_torchrun(2, _gencode_forward_error_worker, tmp_path)

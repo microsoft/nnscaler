@@ -8,11 +8,13 @@ import torch
 import pytest
 import torch.distributed
 
+from nnscaler import merge_state_dicts
 from nnscaler.cli.trainer import Trainer
 from nnscaler.cli.trainer_args import AggregatedOutputs, TrainerArgs
-from tests.parallel_module.common import assert_equal
-from tests.utils import replace_all_device_with
+from tests.parallel_module.common import assert_equal, assert_close
+from tests.utils import init_random, replace_all_device_with, clear_parallel_cache
 from ..launch_torchrun import launch_torchrun
+from .common import MixedModule, MixModuleMLP, MixModuleMLP3
 
 
 def trainer_logging_worker(save_dir):
@@ -85,17 +87,75 @@ def test_trainer_compile_worker(tmp_path):
     shutil.rmtree(gen_savedir)
 
 
-def trainer_resume_worker(save_dir, save_type, bf16):
+def trainer_resume_worker(save_dir, save_type, bf16, parallel_type=0):
     save_dir = Path(save_dir)
     config_path = str(Path(__file__).with_name('trainer_args.yaml').resolve())
     gen_savedir = save_dir / 'gen'
     ckpt_savedir = save_dir / 'ckpt'
-    # train 4 epcho in one time
+
     optimizer_type = 'nnscaler.runtime.f16_optimizer.MixedPrecisionAdam' \
         if bf16 == 'Mixed' \
         else 'torch.optim.Adam'
     use_zero = save_type == 'sharded'
 
+    if parallel_type == 0:
+        additional_args = []
+    elif parallel_type == 1:
+        # 1. parallelize MixModuleMLP2 (self.mlp1)
+        additional_args = [
+            '--model.type', 'tests.cli.common.MixedModule',
+            '--model.parallel_modules.0.type', 'tests.cli.common.MixModuleMLP2',
+            '--model.parallel_modules.0.args.dim', '16',
+            '--model.parallel_modules.0.args.nlayers', '16',
+            '--model.parallel_modules.0.forward_args_gen_fn', 'tests.cli.common.forward_args_gen_fn',
+        ]
+    elif parallel_type == 2:
+        # 2. parallelize MixModuleMLP (self.mlp0, self.mlploss.mlp)
+        additional_args = [
+            '--model.type', 'tests.cli.common.MixedModule',
+            '--model.parallel_modules.0.type', 'tests.cli.common.MixModuleMLP',
+            '--model.parallel_modules.0.args.dim', '16',
+            '--model.parallel_modules.0.args.nlayers', '16',
+            '--model.parallel_modules.0.forward_args_gen_fn', 'tests.cli.common.forward_args_gen_fn',
+        ]
+    elif parallel_type == 3:
+        # 3. parallelize MixModuleMLP and MixModuleMLP3 (self.mlp0, self.mlploss.mlp, self.mlp2)
+        # We will use different compute_config for the two parallelized modules
+        additional_args = [
+            '--model.type', 'tests.cli.common.MixedModule',
+            '--model.parallel_modules.0.type', 'tests.cli.common.MixModuleMLP',
+            '--model.parallel_modules.0.args.dim', '16',
+            '--model.parallel_modules.0.args.nlayers', '16',
+            '--model.parallel_modules.0.compute_config.use_zero', 'False' if use_zero else 'True',
+            '--model.parallel_modules.0.compute_config.constant_folding', 'False',
+            '--model.parallel_modules.0.pas_policy', 'tp',
+            '--model.parallel_modules.0.forward_args_gen_fn', 'tests.cli.common.forward_args_gen_fn',
+            '--model.parallel_modules.1.type', 'tests.cli.common.MixModuleMLP3',
+            '--model.parallel_modules.1.args.dim', '16',
+            '--model.parallel_modules.1.args.nlayers', '16',
+            '--model.parallel_modules.1.forward_args_gen_fn', 'tests.cli.common.forward_args_gen_fn',
+        ]
+    elif parallel_type == 4:
+        # 4. parallelize MixModuleMLP and MixModuleMLPWithLoss (self.mlp0, self.mlploss)
+        # Note MixModuleMLP is also a member of MixModuleMLPWithLoss
+        additional_args = [
+            '--model.type', 'tests.cli.common.MixedModule',
+            '--model.parallel_modules.0.type', 'tests.cli.common.MixModuleMLP',
+            '--model.parallel_modules.0.args.dim', '16',
+            '--model.parallel_modules.0.args.nlayers', '16',
+            '--model.parallel_modules.0.compute_config.use_zero', 'False' if use_zero else 'True',
+            '--model.parallel_modules.0.compute_config.constant_folding', 'False',
+            '--model.parallel_modules.0.pas_policy', 'tp',
+            '--model.parallel_modules.0.forward_args_gen_fn', 'tests.cli.common.forward_args_gen_fn',
+            '--model.parallel_modules.1.type', 'tests.cli.common.MixModuleMLPWithLoss',
+            '--model.parallel_modules.1.args.dim', '16',
+            '--model.parallel_modules.1.args.nlayers', '16',
+            '--model.parallel_modules.1.forward_args_gen_fn', 'tests.cli.common.forward_args_gen_fn',
+        ]
+    else:
+        raise ValueError(f'parallel_type {parallel_type} is not supported')
+
+    # train 4 epcho in one time
     trainer = Trainer([
         '-f', config_path,
         '--precision', 'bf16' if bf16 else 'none',
@@ -110,6 +170,7 @@ def trainer_resume_worker(save_dir, save_type, bf16):
         '--checkpoint.save_dir', str(ckpt_savedir),
         '--checkpoint.resume_from', 'last',
         '--checkpoint.keep_last_n_checkpoints', '30',
+        *additional_args,
     ])
     trainer.run()
     ckpt_files = set(ckpt_savedir.glob('**/*.ckpt'))
@@ -133,6 +194,7 @@ def trainer_resume_worker(save_dir, save_type, bf16):
         '--checkpoint.save_dir', str(ckpt0_savedir),
         '--checkpoint.resume_from', 'last',
         '--checkpoint.keep_last_n_checkpoints', '30',
+        *additional_args,
     ])
     trainer.run()
     ckpt0_files0 = {f: f.stat().st_mtime_ns for f in ckpt0_savedir.glob('**/*.ckpt')}
@@ -153,6 +215,7 @@ def trainer_resume_worker(save_dir, save_type, bf16):
         '--checkpoint.save_dir', str(ckpt0_savedir),
         '--checkpoint.resume_from', 'last',
         '--checkpoint.keep_last_n_checkpoints', '30',
+        *additional_args,
     ])
     trainer.run()
     ckpt0_files0_x = {f: f.stat().st_mtime_ns for f in ckpt0_savedir.glob('**/*.ckpt')}
@@ -181,6 +244,7 @@ def trainer_resume_worker(save_dir, save_type, bf16):
         '--checkpoint.save_dir', str(ckpt0_savedir),
         '--checkpoint.resume_from', 'last',
         '--checkpoint.keep_last_n_checkpoints', '30',
+        *additional_args,
     ])
     trainer.run()
     left_files = {
@@ -210,6 +274,7 @@ def trainer_resume_worker(save_dir, save_type, bf16):
         '--checkpoint.save_dir', str(ckpt1_savedir),
         '--checkpoint.resume_from', str(ckpt1_savedir / 'merged.pt'),
         '--checkpoint.keep_last_n_checkpoints', '30',
+        *additional_args,
     ])
     trainer.run()
     left_files = {
@@ -251,6 +316,19 @@ def trainer_resume_worker(save_dir, save_type, bf16):
 @pytest.mark.parametrize('bf16', [True, False, 'Mixed'])
 def test_trainer_resume(tmp_path, save_type, bf16):
     launch_torchrun(4, trainer_resume_worker, tmp_path, save_type, bf16)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.device_count() < 4, reason='lack of gpu devices')
+@pytest.mark.parametrize('parallel_type', [1, 2, 3, 4])
+def test_trainer_resume_mixed(tmp_path, parallel_type):
+    # we will parallelize the sub models in MixedModule
+    # We have different ways to parallelize the sub models
+    # 1. parallelize MixModuleMLP2 (self.mlp1)
+    # 2. parallelize MixModuleMLP (self.mlp0, self.mlploss.mlp)
+    # 3. parallelize MixModuleMLP and MixModuleMLP3 (self.mlp0, self.mlploss.mlp, self.mlp2)
+    # 4. parallelize MixModuleMLP and MixModuleMLPWithLoss (self.mlp0, self.mlploss)
+    #    Note MixModuleMLP is also a member of MixModuleMLPWithLoss
+    launch_torchrun(4, trainer_resume_worker, tmp_path, 'deduped', True, parallel_type)
 
 
 def trainer_last_checkpoint_worker(save_dir):
@@ -513,3 +591,205 @@ def trainer_grad_sync_check(save_dir, use_bf16, zero_ngroups, runtime_ngpus):
     ])
     trainer.run()
     torch.distributed.barrier()
+
+
+def trainer_correctness_worker(save_dir, parallel_type=0, async_reducer=False):
+    save_dir = Path(save_dir)
+    config_path = str(Path(__file__).with_name('trainer_args.yaml').resolve())
+    gen_savedir = save_dir / 'gen'
+    ckpt_savedir = save_dir / 'ckpt'
+
+    if parallel_type == 0:
+        # parallelize the whole MixedModule
+        additional_args = [
+            '--model.type', 'tests.cli.common.MixedModule',
+        ]
+    elif parallel_type == 1:
+        # 1. parallelize MixModuleMLP2 (self.mlp1)
+        additional_args = [
+            '--model.type', 'tests.cli.common.MixedModule',
+            '--model.parallel_modules.0.type', 'tests.cli.common.MixModuleMLP2',
+            '--model.parallel_modules.0.args.dim', '16',
+            '--model.parallel_modules.0.args.nlayers', '16',
+            '--model.parallel_modules.0.forward_args_gen_fn', 'tests.cli.common.forward_args_gen_fn',
+        ]
+    elif parallel_type == 2:
+        # 2. parallelize MixModuleMLP (self.mlp0, self.mlploss.mlp)
+        additional_args = [
+            '--model.type', 'tests.cli.common.MixedModule',
+            '--model.parallel_modules.0.type', 'tests.cli.common.MixModuleMLP',
+            '--model.parallel_modules.0.args.dim', '16',
+            '--model.parallel_modules.0.args.nlayers', '16',
+            '--model.parallel_modules.0.forward_args_gen_fn', 'tests.cli.common.forward_args_gen_fn',
+        ]
+    elif parallel_type == 3:
+        # 3. parallelize MixModuleMLP and MixModuleMLP3 (self.mlp0, self.mlploss.mlp, self.mlp2)
+        # We will use different compute_config for the two parallelized modules
+        additional_args = [
+            '--model.type', 'tests.cli.common.MixedModule',
+            '--model.parallel_modules.0.type', 'tests.cli.common.MixModuleMLP',
+            '--model.parallel_modules.0.args.dim', '16',
+            '--model.parallel_modules.0.args.nlayers', '16',
+            '--model.parallel_modules.0.compute_config.use_zero', 'False',
+            '--model.parallel_modules.0.compute_config.constant_folding', 'False',
+            '--model.parallel_modules.0.pas_policy', 'tp',
+            '--model.parallel_modules.0.forward_args_gen_fn', 'tests.cli.common.forward_args_gen_fn',
+            '--model.parallel_modules.1.type', 'tests.cli.common.MixModuleMLP3',
+            '--model.parallel_modules.1.args.dim', '16',
+            '--model.parallel_modules.1.args.nlayers', '16',
+            '--model.parallel_modules.1.forward_args_gen_fn', 'tests.cli.common.forward_args_gen_fn',
+        ]
+    elif parallel_type == 4:
+        # 4. parallelize MixModuleMLP and MixModuleMLPWithLoss (self.mlp0, self.mlploss)
+        # Note MixModuleMLP is also a member of MixModuleMLPWithLoss
+        additional_args = [
+            '--model.type', 'tests.cli.common.MixedModule',
+            '--model.parallel_modules.0.type', 'tests.cli.common.MixModuleMLP',
+            '--model.parallel_modules.0.args.dim', '16',
+            '--model.parallel_modules.0.args.nlayers', '16',
+            '--model.parallel_modules.0.compute_config.use_zero', 'False',
+            '--model.parallel_modules.0.compute_config.constant_folding', 'False',
+            '--model.parallel_modules.0.pas_policy', 'tp',
+            '--model.parallel_modules.0.forward_args_gen_fn', 'tests.cli.common.forward_args_gen_fn',
+            '--model.parallel_modules.1.type', 'tests.cli.common.MixModuleMLPWithLoss',
+            '--model.parallel_modules.1.args.dim', '16',
+            '--model.parallel_modules.1.args.nlayers', '16',
+            '--model.parallel_modules.1.forward_args_gen_fn', 'tests.cli.common.forward_args_gen_fn',
+        ]
+    else:
+        raise ValueError(f'parallel_type {parallel_type} is not supported')
+
+    # train 4 epcho in one time
+    trainer = Trainer([
+        '-f', config_path,
+        '--precision', 'fp32',
+        '--max_epochs', '2',
+        '--enable_progress_bar', 'false',
+        '--gen_savedir', str(gen_savedir),
+        '--compute_config.use_zero', 'False',
+        '--compute_config.plan_ngpus', '1',
+        '--compute_config.runtime_ngpus', '2',
+        '--compute_config.use_async_reducer', str(async_reducer),
+        '--compute_config.reducer_bucket_cap_mb', '1e-6',
+        '--checkpoint.save_dir', str(ckpt_savedir),
+        '--checkpoint.resume_from', 'last',
+        '--checkpoint.keep_last_n_checkpoints', '5',
+        # '--model.args.dim', '16',
+        # '--model.args.nlayers', '2',
+        *additional_args,
+    ])
+    trainer.run()
+
+    torch.distributed.barrier()
+
+    # create merged checkpoint
+    if trainer.rank == 0:
+        Trainer.merge_checkpoint(list((ckpt_savedir / 'last').glob('*.ckpt')), save_dir / 'merged.pt')
+        shutil.rmtree(gen_savedir)
+
+    clear_parallel_cache()
+
+    torch.distributed.barrier()
+
+
+def trainer_correctness_worker_aggregate(tmp_path):
+    for parallel_type in range(5):
+        for async_reducer in [False, True]:
+            print(f'parallel_type={parallel_type}, async_reducer={async_reducer}')
+            save_dir = tmp_path/f'{parallel_type}-{async_reducer}'
+            trainer_correctness_worker(save_dir, parallel_type, async_reducer)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.device_count() < 2, reason='lack of gpu devices')
+def test_trainer_correctness(tmp_path):
+    launch_torchrun(2, trainer_correctness_worker_aggregate, tmp_path)
+    merged_ckpts = {}
+    for parallel_type in range(5):
+        for async_reducer in [False, True]:
+            save_dir = tmp_path/f'{parallel_type}-{async_reducer}'
+            merged_ckpts[(parallel_type, async_reducer)] = torch.load(save_dir/'merged.pt')
+
+    for parallel_type in range(5):
+        for async_reducer in [False, True]:
+            assert_equal(
+                merged_ckpts[(parallel_type, async_reducer)]['model'],
+                merged_ckpts[(0, False)]['model']
+            )
+            assert_equal(
+                merged_ckpts[(parallel_type, async_reducer)]['optimizer'],
+                merged_ckpts[(0, False)]['optimizer']
+            )
+
+
+def tracing_from_weights_worker(tmp_path):
+    config_path = str(Path(__file__).with_name('trainer_args.yaml').resolve())
+
+    init_random(1141)
+    mixed_module = MixedModule(16, 16, False)
+    mixed_module_2 = MixedModule(16, 16)
+    assert not torch.equal(mixed_module.mlp0.layers[0].weight, mixed_module_2.mlp0.layers[0].weight)
+    assert not torch.equal(mixed_module.mlp2.layers[0].weight, mixed_module_2.mlp2.layers[0].weight)
+    assert not torch.equal(mixed_module.mlploss.mlp.layers[0].weight, mixed_module_2.mlploss.mlp.layers[0].weight)
+
+    tracing_weights = mixed_module.state_dict()
+    tracing_from_weights = tmp_path / 'tracing_weights.pt'
+    torch.save(tracing_weights, tracing_from_weights)
+
+    def _compile(index, *additional_args):
+        gen_dir = tmp_path / f'gen{index}'
+        trainer = Trainer([
+            '-f', config_path,
+            '--gen_savedir', str(gen_dir),
+            '--global_batch_size', '0',
+            '--max_epochs', '-1',  # HACK: will exit without training.
+            '--max_train_steps', '-1',
+            '--compute_config.plan_ngpus', '1',
+            '--compute_config.runtime_ngpus', '1',
+            '--broadcast_strategy', 'none',
+            '--model.type', 'tests.cli.common.MixedModule',
+            *additional_args,
+        ])
+        trainer.run()
+        import shutil
+        shutil.rmtree(gen_dir)
+        clear_parallel_cache()
+        return merge_state_dicts([trainer.model.state_dict()])[0]
+
+    model1 = _compile(1)
+    model3 = _compile(3, '--tracing_from_weights', str(tracing_from_weights))
+    model2 = _compile(2)
+
+
+    assert_equal(model1, model2)
+    assert_equal(model1, dict(**mixed_module_2.state_dict()))
+    assert_equal(model3, dict(**tracing_weights))
+
+    # parallelize MixModuleMLP2 and MixModuleMLP3 (self.mlp1, self.mlp2)
+    # We will use different compute_config for the two parallelized modules
+    additional_args = [
+        '--model.parallel_modules.0.type', 'tests.cli.common.MixModuleMLP2',
+        '--model.parallel_modules.0.args.dim', '16',
+        '--model.parallel_modules.0.args.nlayers', '16',
+        '--model.parallel_modules.0.forward_args_gen_fn', 'tests.cli.common.forward_args_gen_fn',
+        '--model.parallel_modules.1.type', 'tests.cli.common.MixModuleMLP3',
+        '--model.parallel_modules.1.args.dim', '16',
+        '--model.parallel_modules.1.args.nlayers', '16',
+        '--model.parallel_modules.1.forward_args_gen_fn', 'tests.cli.common.forward_args_gen_fn',
+    ]
+    model4 = _compile(4, *additional_args)
+    assert_equal(model4, dict(**mixed_module_2.state_dict()))
+
+    model5 = _compile(5,
+        '--tracing_from_weights', str(tracing_from_weights),
+        '--model.parallel_modules.0.tracing_from_weights_prefix', 'mlp1',
+        '--model.parallel_modules.1.tracing_from_weights_prefix', 'mlp2',
+        *additional_args
+    )
+    for key in tracing_weights:
+        if key.startswith('mlp1') or key.startswith('mlp2'):
+            assert torch.equal(model5[key], tracing_weights[key])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason='lack of gpu devices')
+def test_tracing_from_weights(tmp_path):
+    launch_torchrun(1, tracing_from_weights_worker, tmp_path)

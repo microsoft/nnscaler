@@ -19,7 +19,7 @@ from nnscaler.parallel import ComputeConfig, parallelize, build_optimizer
 from nnscaler.ir.operator import IRFwOperation, IRDataOperation
 from nnscaler.graph.segment import IRSegment
 from nnscaler.graph.schedule.predefined import PredefinedSched
-from tests.utils import clear_dir_on_rank0, init_random
+from tests.utils import clear_dir_on_rank0, init_random, raises_with_cause
 from tests.launch_torchrun import torchrun
 from tests.parallel_module.test_gencode import _gencode_contains, print_gencode
 
@@ -404,7 +404,7 @@ def test_shared_param_error(model_cls):
     trace_data = torch.randn([2, 16], dtype=torch.float32, device=torch.cuda.current_device())
 
     with tempfile.TemporaryDirectory() as tempdir:
-        with pytest.raises(RuntimeError, match='The weight consumers can either be ALL replicated or ALL partitioned'):
+        with raises_with_cause(RuntimeError, match='The weight consumers can either be ALL replicated or ALL partitioned'):
             parallelize(
                 m,
                 {'x': trace_data},
@@ -464,7 +464,7 @@ def test_shared_param_error2(model_cls):
     trace_data = torch.randn([2, 16], dtype=torch.float32, device=torch.cuda.current_device())
 
     with tempfile.TemporaryDirectory() as tempdir:
-        with pytest.raises(RuntimeError, match='The weight consumers can either be ALL replicated or ALL partitioned'):
+        with raises_with_cause(RuntimeError, match='The weight consumers can either be ALL replicated or ALL partitioned'):
             parallelize(
                 m,
                 {'x': trace_data},

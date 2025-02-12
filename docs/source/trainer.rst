@@ -17,7 +17,7 @@ All the arguments are defined in ``TrainerArgs`` class. Here is the definition o
     @dataclass
     class TrainerArgs:
         compute_config: ComputeConfig = None
-    
+
         gen_savedir: str = './.nnscaler'
         gen_reuse: str = 'auto'
         pas_policy: str = 'autodist'
@@ -25,7 +25,7 @@ All the arguments are defined in ``TrainerArgs`` class. Here is the definition o
         instance_name: str = None
         run_mode: str = 'run'
         tracing_from_weights: str = None
-    
+
         model: ModelConfig = field(default_factory=ModelConfig)
         optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
         dataset: DatasetConfig = field(default_factory=DatasetConfig)
@@ -35,22 +35,22 @@ All the arguments are defined in ``TrainerArgs`` class. Here is the definition o
         checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
         log: List[LogConfig] = field(default_factory=list)
         hook: Union[HookConfig, HookMapConfig, None] = None
-    
+
         precision: Union[str, Dict[_TENSOR_TYPE, _PRECISION_TYPE], None] = None
-    
+
         micro_batch_size: int = 1
         global_batch_size: Optional[int] = None
         grad_accumulation_steps: Optional[int] = None
-    
+
         max_epochs: Optional[int] = None
         max_train_steps: Optional[int] = None
         max_val_steps: Optional[int] = None
-    
+
         val_every_n_train_steps: Optional[int] = None
         val_every_n_epochs: Optional[int] = 1
-    
+
         enable_progress_bar: bool = True
-    
+
         seed: Optional[int] = None
         init_env_fn: str = None
 
@@ -142,6 +142,98 @@ Component Configs
       class ModelConfig:
           type: str = None
           args: Dict[str, Any] = field(default_factory=dict)
+          parallel_modules: list[ModuleParallelizeConfig] = field(default_factory=list)
+
+  * ``type`` (``str``): The model type. Note: It can't be a factory function.
+  * ``args`` (``Dict[str, Any]``): The arguments of the model's ``__init__`` function.
+  * ``parallel_modules`` (``List[ModuleParallelizeConfig]``): The sub modules to be parallelized.
+    If this is not empty, these modules will be parallelized instead of the whole model.
+    i.e. sub modules (in the list of ``parallel_modules``) in the model
+    will be replaced with parallelized version
+
+    Note: When parallel_modules is not empty,
+    pipeline parallelism is not supported as the model is not end-to-end parallelized any more.
+
+  .. code-block:: python
+
+      @dataclass(frozen=True)
+      class OptionalComputeConfig:
+          constant_folding: Optional[bool] = None
+          trace_strategy: Optional[str] = None
+          use_zero: Optional[bool] = None
+          zero_ngroups: Optional[int] = None
+          zero_use_reduce_scatter: Optional[bool] = None
+          use_async_reducer: Optional[bool] = None
+          reducer_bucket_cap_mb: Optional[float] = None
+
+          pas_config: Optional[Dict[str, Any]] = None
+          user_config: Optional[Dict[str, Any]] = None
+
+This is an optional version of the ``ComputeConfig``.
+Please refer to :ref:`ComputeConfig <computeconfig>` for more information.
+
+  .. code-block:: python
+
+      @dataclass
+      class ModuleParallelizeConfig:
+          type: str = None
+          args: Dict[str, Any] = field(default_factory=dict)
+          forward_args_gen_fn: str = None
+          tracing_from_weights: str = None
+          tracing_from_weights_prefix: str = None
+
+          # For the following config, If None, the config of the trainer_args will be used
+          compute_config: Optional[OptionalComputeConfig] = None
+          gen_savedir: Optional[str] = None
+          gen_reuse: Optional[str] = None
+          pas_policy: Optional[str] = None
+          broadcast_strategy: Optional[str] = None
+          instance_name: Optional[str] = None
+          precision: Union[str, Dict[_TENSOR_TYPE, _PRECISION_TYPE], None] = None
+
+  * ``type`` (``str``): The sub model type to be parallelized. Note: It can't be a factory function.
+  * ``args`` (``Dict[str, Any]``): The arguments of the model's ``__init__`` function.
+  * ``forward_args_gen_fn`` (``str``): The full qualified name of the function to generate dummy forward args.
+    Its type should be ``Callable[[TrainerArgs],Dict[str, Any]]``.
+    The function should return a dict of dummy forward args for the model.
+  * ``tracing_from_weights`` (``str``): The path to the weights to be loaded when tracing(compiling) the model.
+    It is only used in tracing to serve as the initial state dict of the model. Default is ``None``.
+  * ``tracing_from_weights_prefix`` (``str``): the prefix in the state dict (loaded from ``trainer_args.tracing_from_weights``) to be used for tracing.
+    Please note ``trainer_args.tracing_from_weights`` must be set if you want to use this,
+    and ``tracing_from_weights`` and ``tracing_from_weights_prefix`` shouldn't be set at the same time.
+  * ``compute_config`` (``Optional[OptionalComputeConfig]``): The compute config for the parallelized module.
+    The merged config with the compute config of the ``trainer_args.compute_config`` will be used.
+  * ``gen_savedir`` (``Optional[str]``): The directory to save the generated files.
+    If None, the config of the trainer_args will be used. You can find more information below.
+  * ``gen_reuse`` (``Optional[str]``): The reuse strategy of the generated code.
+    If None, the config of the trainer_args will be used. You can find more information below.
+  * ``pas_policy`` (``Optional[str]``): The policy of parameter partitioning.
+    If None, the config of the trainer_args will be used. You can find more information below.
+  * ``broadcast_strategy`` (``Optional[str]``): The strategy of broadcasting the model.
+    If None, the config of the trainer_args will be used. You can find more information below.
+  * ``instance_name`` (``Optional[str]``): The instance name of the trainer.
+    If None, the config of the trainer_args will be used. You can find more information below.
+  * ``precision`` (``Union[str, Dict[_TENSOR_TYPE, _PRECISION_TYPE], None]``): The precision of the model.
+    If None, the config of the trainer_args will be used. You can find more information below.
+
+Please Note:
+1. The parallelization is per-module-type, which means one module type can only be parallelized once.
+   Moreover, the initial weights of the parallelized modules with the same type are all the same.
+
+   So if you want to parallelize a module multiple times (with different arguments or different inital weights),
+   you need to create an alias for it.
+
+   For example, if you want to parallelize a module named ``SomeModule`` twice, you can create an alias for it:
+    .. code-block:: python
+
+       class SomeModuleAlias(SomeModule):
+           pass
+
+2. The initial weights of the whole model will be different when sub module parallelization is enabled,
+   since parallelization process will change the ``rng_state`` of torch.
+
+   To make the initial weights of the whole model the same as the original model,
+   We recommend to save the initial weights of the original model and load them before training.
 
 * ``optimizer`` (``OptimizerConfig``): The optimizer to be used.
 
@@ -378,17 +470,17 @@ Checkpoint Config
       class CheckpointConfig:
           save_dir: str = './checkpoints'
           no_save: bool = False
-      
+
           save_type: str = 'sharded'
-      
+
           save_last: bool = True
           save_best: bool = True
           symlink_best_and_last: bool = True
-      
+
           every_n_train_steps: Optional[int] = None
           every_n_epochs: Optional[int] = None
           keep_last_n_checkpoints: Optional[int] = None
-      
+
           resume_from: str = None
 
 * ``save_dir`` (``str``): The directory to save the checkpoints.
@@ -467,6 +559,7 @@ Other configs
 * ``enable_progress_bar`` (``bool``): Whether to enable the progress bar. Default is ``True``.
 * ``seed`` (``Optional[int]``): The random seed. Default is ``None``.
 * ``init_env_fn`` (``str``): The function to initialize the environment. Default is ``None``.
+  Note: one of ``seed`` and ``init_env_fn`` must be set.
 
 ***
 CLI
@@ -488,25 +581,25 @@ CONFIG_FILE is the path to the configuration yaml file. It looks like (taken fro
       constant_folding: true
       use_zero: true
       use_end2end: true
-    
+
     run_mode: run
     pas_policy: autodist
     micro_batch_size: 2
     global_batch_size: 8
     max_epochs: 4
     max_train_steps: 10
-    
+
     model:
       type: tests.cli.common.MLP
       args:
         dim: 16
         nlayers: 16
-    
+
     optimizer:
       type: torch.optim.Adam
       args:
         lr: 0.01
-    
+
     dataset:
       type: tests.cli.common.SimpleDataset
       train_args:
@@ -515,7 +608,7 @@ CONFIG_FILE is the path to the configuration yaml file. It looks like (taken fro
       val_args:
         dim: 16
         size: 10
-    
+
     checkpoint:
       keep_last_n_checkpoints: 30
       every_n_train_steps: 1
@@ -542,16 +635,16 @@ The configuration of the compute environment. It is a dataclass with the followi
     class ComputeConfig:
         plan_ngpus: int
         runtime_ngpus: int
-    
+
         constant_folding: bool = False
         trace_strategy: Literal['cpu', 'cuda', 'meta', 'cuda_run_cpu_offload', 'reuse_cache'] = 'cuda_run_cpu_offload'
-    
+
         use_zero: bool = False
         zero_ngroups: int = 1
-    
+
         inference_only : bool = False
         use_end2end: bool = False
-    
+
         pas_config: Dict[str, Any] = field(default_factory=dict)
         user_config: Dict[str, Any] = field(default_factory=dict)
 
@@ -710,9 +803,18 @@ The configuration of the PAS policy should be passed in the ``pas_config`` of ``
    and run data parallelism across scale units.
    It requires the ``use_end2end`` to be true. It has the following configurations.
 
-   * ``pipeline_nstages``: the number of stages in the pipeline. Default is ``plan_ngpus``. Optional.
+   * ``pipeline_nstages``: the number of stages in the pipeline, or ``"auto"`` (let autodist to decide).
+     Default is ``"auto"``. Optional.
+
+     * If ``pipeline_nstages`` is ``"auto"`` and ``pipeline_pivots`` is specified, it will use pipeline.
+       (The number of stages will be determined automatically by autodist)
+     * If ``pipeline_nstages`` is ``"auto"`` and ``pipeline_pivots`` is not specified, it will not use pipeline.
+     * If ``pipeline_nstages`` is a 1, pipeline will not be used. (``pipeline_pivots`` must not be set)
+     * If ``pipeline_nstages`` is a number > 1, pipeline will be used. (``pipeline_pivots`` must be set)
+
    * ``pipeline_nmicros``: the number of microbatches in the pipeline. Required.
-   * ``pipeline_scheduler``: the scheduler name for the pipeline. Current we support four schedulers in training ``1f1b``/``1f1b_plus``/``gpipe``/``chimera_direct`` (4 stages pipeline only), and one scheduler in inference ``infer_pipe``. Default is ``1f1b``. Optional.
+   * ``pipeline_scheduler``: the scheduler name for the pipeline. Current we support four schedulers in training ``1f1b``/``1f1b_plus``/``1f1b_interleaved``/``gpipe``/``chimera_direct`` (4 stages pipeline only), and one scheduler in inference ``infer_pipe``. Default is ``1f1b``. Optional.
+   * ``pp_size``: the pipeline parallelism size. Default is ``pipeline_nstages``. Optional.
 
 #. ``autodist``: the recommended policy for most cases. Currently it only support Adam-like optimizers. It will automatically choose the best partition for you by balancing the memory usage and speed. It has the following configurations.
 
@@ -729,10 +831,11 @@ The configuration of the PAS policy should be passed in the ``pas_config`` of ``
    * ``save_plan_path (str)``: The path to the plan file to save. Optional.
    * ``partition_constraints_path (str)``: The path to the partition constraints file. Optional.
    * ``recompute_modules (str)``: The module names to recompute, separated by ``,``. For example, ``module1,module2``. Optional.
-   * ``pipeline_pivots (str)``: The module names to pivot the pipeline, separated by ``,``. For example, if ``module1,module2`` is specified, stages searched by pipeline solver only start from either ``module1`` or ``module2``. Optional.
+   * ``pipeline_pivots (str)``: If set, autodist will try pipeline parallelism to find the best partition plan.
+     It specifies the module names to pivot the pipeline, separated by ``,``.
+     For example, if ``module1,module2`` is specified, stages searched by pipeline solver only start from either ``module1`` or ``module2``.
+     Optional.
    * ``use_apex_fused_adam_v2``: If set to ``True``, the apex fused adam v2 optimizer will be used. Default is ``False``. Optional.
-   * ``explore_pipeline``: If set to ``True``, autodist will try pipeline parallelism to find the best partition plan
-     (but the selected partition plan is not necessarily pipeline parallelism).
    * ``pipeline_scheduler``: The scheduler name for the pipeline. Please note currently ``1f1b`` is the only supported scheduler in ``autodist``. Default is ``1f1b``. Optional.
    * ``parallel_profile``: If set to ``True``, autodist will profile operators in parallel by using available gpus. Default is ``True``. Optional.
    * ``max_partition_degree``: Max degree when partitioning an operator / node. When pipeline parallelism is enabled to explore (``explore_pipeline`` is True), user can change the value to constrain the plan to be composed of stages that span on less or equal to ``max_partition_degree`` devices (recommend to set ``max_partition_degree`` to the number of devices in a node to avoid inter-node communication, but should be be no more than ``plan_ngpus``). Default is ``plan_ngpus``. Optional.

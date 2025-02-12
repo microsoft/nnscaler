@@ -11,6 +11,7 @@ micro_batch_size: 2
 global_batch_size: 8
 max_epochs: 4
 max_train_steps: 100
+seed: 0
 
 model:
   type: tests.cli.common.MLP

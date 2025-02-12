@@ -37,7 +37,7 @@ from . import concrete_proxy as ep
 from . import pytree_utils, orig_func, wrap_utils
 from .frame_utils import get_frame_record
 from .function_patcher import FunctionPatcher
-from .metadata import EmptyResult, extract_results_metadata, get_op_context
+from .metadata import EmptyResult, extract_metadata
 from .operator_patcher import OperatorPatcherContext
 from .torch_fx_patcher import TorchFXPatcher, ExtraSEFPatcher, side_effectful_inplace_ops
 from .trace_strategy import TRACE_STRATEGY
@@ -148,7 +148,6 @@ class ConcreteTracer(TracerBase):
             check_for_mutable_operation(target, args, kwargs)
 
         node = self.graph.create_node(kind, target, args, kwargs, name, type_expr)
-        node.meta['op_context'] = get_op_context()
         # TODO node_name_to_scope will be depricated in favor of
         # node.meta['nn_module_stack']
         self.node_name_to_scope[node.name] = (
@@ -165,7 +164,7 @@ class ConcreteTracer(TracerBase):
 
         # unwrap all proxy in the node result here, because no proxy should be record in the tensor metadata
         node_result = pytree_utils.tree_map_only(ep.ConcreteProxy, unwrap_nested_proxy, node_result)
-        extract_results_metadata(node_result, node)
+        extract_metadata(node_result, node)
         return node
 
     @compatibility(is_backward_compatible=True)
@@ -616,7 +615,7 @@ class ConcreteTracer(TracerBase):
 
         if isinstance(fn, MethodType):
             fn = fn.__func__
-        assert isinstance(fn, FunctionType)
+        assert isinstance(fn, FunctionType), f"Expected a function, but got {fn} with type {type(fn)}"
 
         fn_globals = fn.__globals__  # run before it gets patched
 
@@ -663,6 +662,7 @@ class ConcreteTracer(TracerBase):
                 # for cuda versions of pytorch, autograd.Function.apply should be reverted by delattr
                 self.patcher.patch_method(torch.autograd.Function, "apply", wrap_utils.create_wrapped_autograd_apply(self), deduplicate=False, revert_by_del=True)
                 self.patcher.patch_method(torch, "_assert", wrap_utils.torch_assert_wrapper, deduplicate=False)
+                self.patcher.patch_method(torch, "autocast", wrap_utils.torch_autocast_wrapper_clz, deduplicate=False)
 
                 self.patcher.patch_method(builtins, "map", wrap_utils.map_wrapper_clz, deduplicate=False)
                 self.patcher.patch_method(builtins, "enumerate", wrap_utils.enumerate_wrapper_clz, deduplicate=False)

@@ -45,7 +45,6 @@ def _init_params_worker():
 
         for p1, p3 in zip(module1.parameters(), module3.parameters()):
             assert not torch.equal(p1, p3)
-            assert torch.all(p3 == 0)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason='lack of gpu devices')

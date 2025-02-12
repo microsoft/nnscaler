@@ -10,6 +10,13 @@ from .utils import shuffle_input, recover_output, GlobalMemoryBuffer
 _GLOBAL_MEMORY_BUFFER = GlobalMemoryBuffer()
 
 
+import flash_attn
+
+version = flash_attn.__version__
+if not version.startswith("2.6"):
+    raise ImportError("The current version of Ring Attention is not compatible with Flash Attention versions other than 2.6.x.")
+
+
 def ring_flash_attn_forward(
     process_group,
     q: torch.Tensor,
@@ -19,6 +26,7 @@ def ring_flash_attn_forward(
     dropout_p=0,
     causal=True,
     window_size=(-1, -1),
+    softcap=0.0,
     alibi_slopes=None,
     deterministic=False,
 ):
@@ -45,6 +53,7 @@ def ring_flash_attn_forward(
         softmax_scale,
         causal=causal,
         window_size=window_size,
+        softcap=softcap,
         alibi_slopes=alibi_slopes,
         return_softmax=True and dropout_p > 0,
     )
@@ -63,6 +72,7 @@ def ring_flash_attn_forward(
         softmax_scale,
         causal=causal,
         window_size=window_size,
+        softcap=softcap,
         alibi_slopes=alibi_slopes,
         return_softmax=True and dropout_p > 0,
     )
@@ -84,6 +94,7 @@ def ring_flash_attn_backward(
     dropout_p=0,
     causal=True,
     window_size=(-1, -1),
+    softcap=0.0,
     alibi_slopes=None,
     deterministic=False,
 ):
@@ -124,6 +135,7 @@ def ring_flash_attn_backward(
         softmax_scale,
         causal,
         window_size,
+        softcap,
         alibi_slopes,
         deterministic,
         rng_state=None,
@@ -156,6 +168,7 @@ def ring_flash_attn_backward(
         softmax_scale,
         causal,
         window_size,
+        softcap,
         alibi_slopes,
         deterministic,
         rng_state=None,
@@ -192,6 +205,7 @@ class RingFlashAttnFunc(torch.autograd.Function):
         softmax_scale,
         causal,
         window_size,
+        softcap,
         alibi_slopes,
         deterministic,
         return_softmax,
@@ -219,6 +233,7 @@ class RingFlashAttnFunc(torch.autograd.Function):
             dropout_p=dropout_p,
             causal=causal,
             window_size=window_size,
+            softcap=softcap,
             alibi_slopes=alibi_slopes,
             deterministic=False,
         )
@@ -228,6 +243,7 @@ class RingFlashAttnFunc(torch.autograd.Function):
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
         ctx.window_size = window_size
+        ctx.softcap = softcap
         ctx.alibi_slopes = alibi_slopes
         ctx.deterministic = deterministic
         ctx.group = group
@@ -259,8 +275,9 @@ class RingFlashAttnFunc(torch.autograd.Function):
             dropout_p=ctx.dropout_p,
             causal=ctx.causal,
             window_size=ctx.window_size,
+            softcap=ctx.softcap,
             alibi_slopes=ctx.alibi_slopes,
             deterministic=ctx.deterministic,
         )
         dq = recover_output(dq, ctx.group)
-        return dq, dk, dv, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None

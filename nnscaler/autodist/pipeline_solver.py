@@ -211,7 +211,10 @@ def _compute_tp_info(
 
     tp_info = {}
     for tp_degree in legal_tp_degrees:
-        for stage_num in range(1, _calc_upper_bound(tp_degree) + 1):
+        stage_num_bound = _calc_upper_bound(tp_degree)
+        if cfg.pipeline_nstages != 'auto':
+            stage_num_bound = min(stage_num_bound, cfg.pipeline_nstages)
+        for stage_num in range(1, stage_num_bound + 1):
             solver, intervals, solver_ret = process_case(tp_degree, stage_num)
             for interval, spmd_descs in zip(intervals, solver_ret):
                 start, end = interval
@@ -292,11 +295,12 @@ def calc_optimal_pp_plan(
                             val = max(lhs, rhs)
                             if T[cur_idx][0] > val:
                                 T[cur_idx] = [val, prev_idx]
-
     best_time = float('inf')
     best_state = (-1, -1, -1, -1)
     micro_batch_num = autodist_config.update_freq
     for stage_num in range(1, ngpus + 1):
+        if autodist_config.pipeline_nstages != 'auto' and autodist_config.pipeline_nstages != stage_num:
+            continue
         for pp_dev_num in range(stage_num, ngpus + 1):
             for tp_degree in range(1, pp_dev_num - stage_num + 1 + 1):
                 if tp_degree not in legal_tp_degrees:

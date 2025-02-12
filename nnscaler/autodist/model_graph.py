@@ -589,7 +589,7 @@ class ModelGraph:
             the indices of pivot operators in the operator list
         '''
         # TODO(yizhu1): check recompute_modules are between pivots
-        if not self.autodist_config.pipeline:
+        if not self.autodist_config.pipeline_enabled:
             raise RuntimeError('pipeline is not enabled')
         pp_pivot_modules = self.autodist_config.pipeline_pivots.split(',')
         pp_pivot_modules = [module for module in pp_pivot_modules if module]

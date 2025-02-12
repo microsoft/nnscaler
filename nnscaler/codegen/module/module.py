@@ -1,7 +1,7 @@
 #  Copyright (c) Microsoft Corporation.
 #  Licensed under the MIT License.
 
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple, Dict, Any, Literal
 import more_itertools
 import logging
 import copy
@@ -17,18 +17,20 @@ from nnscaler.ir.adapter.prim import CollectivePrim
 
 from nnscaler.graph.graph import IRSegment
 from nnscaler.graph.parser.register import CustomizedOps
+from nnscaler.graph.tracer.metadata import AutocastInfo, GradMode
 
 from nnscaler.execplan import ExecutionPlan
 from nnscaler.execplan.execplan import ExeReuseCell
 
 from nnscaler.codegen.syntax.symtable import SymbolTable
-from nnscaler.codegen.syntax.blocks import ClassBlock, FunctionBlock
+from nnscaler.codegen.syntax.blocks import ClassBlock, FunctionBlock, Block
 
 from nnscaler.codegen.emit import FuncEmission
 from nnscaler.codegen.module.autograd import AutogradAdapterCodeGen
 from nnscaler.codegen.lifecycle import LifeCycle
 
 from nnscaler.flags import CompileFlag
+from nnscaler.utils import fields
 from nnscaler import __version__ as runtime_version
 
 
@@ -123,7 +125,8 @@ class ModuleCodeGen(FuncEmission):
             'from typing import *',
             'from pathlib import Path',
             'import torch', 'import torch.utils.checkpoint as ckpt',
-            'import nnscaler', 'import _operator', 'from numpy import inf', 'import builtins', '',
+            'import nnscaler', 'import nnscaler.flags',
+            'import _operator', 'from numpy import inf', 'import builtins', '',
             f'runtime_version = {runtime_version!r}', '', ''
         ]
 
@@ -837,23 +840,136 @@ class ModuleCodeGen(FuncEmission):
         The fields storing intermediate codes that are populated by this method:
         - NONE
         """
-        node_codes = []
-        for node in nodes:
+        def has_op_context_info(node: IRCell):
+            if node.op_context is not None:
+                return True
+            else:
+                # if node is a IRFwOperation convert from fx graph (not create by nnscaler), it should have `op_context` field,
+                # otherwise the node is created by nnscaler.
+                return False
+
+        def emit_context_manager(node: IRCell):
+            # Consider to emit torch.no_grad and torch.autocast context manager.
+            #
+            # There have two kinds of return values:
+            #     1. str, "", an empty str means there is no need to add context manager, current node is under default context.
+            #     2. str, "with xxx as yyy, aaa as bbb:", current node is under a specific context, need to add context manager.
+            assert node.op_context is not None
+            grad_mode = GradMode(**node.op_context["grad_mode"])
+            autocast_info = AutocastInfo(**node.op_context["autocast_info"])
+            if grad_mode.grad_mode and autocast_info.nesting == 0:
+                return ""
+            else:
+                ctx_managers = []
+                if grad_mode.inference_mode:
+                    ctx_managers.append("torch.inference_mode()")
+                elif grad_mode.no_grad_mode:
+                    ctx_managers.append("torch.no_grad()")
+
+                # NOTE: assume all tensor on cuda device, just care about cuda autocast now
+                if autocast_info.nesting > 0:
+                    ctx_managers.append(f"torch.autocast(device_type='cuda', dtype={autocast_info.cuda_dtype!r}, enabled={autocast_info.cuda_enabled!r}, cache_enabled={autocast_info.cache_enabled!r})")
+                else:
+                    assert autocast_info.nesting == 0, f'get autocast nesting state: {autocast_info.nesting}'
+                code = "with " + ", ".join(ctx_managers) + ":"
+                return code
+
+        def emit_node(node):
+            node_code = []
             # execute
             if isinstance(node, IRFwOperation):
                 code = self.emit_fnode(node, runtime_devid=runtime_devid, plan_ndevs=len(self.devices), runtime_ndevs=self.runtime_ndevs, prefix_attr='self.')
-                node_codes += code
+                node_code += code
             elif isinstance(node, IRAdapter):
                 # for adapters inside an IRSegment, we don't apply async communication to it
                 # as it is mostly in critical path.
                 code = self.emit_adapter(node, async_op=False)
-                node_codes += code
+                node_code += code
             else:
                 raise RuntimeError(f"unexpected type {type(node)} in IRSegment")
             # release
             tensors_to_del = lifecycle.release_tensors_after_node(node)
             if len(tensors_to_del) > 0:
-                node_codes.append(self.emit_release(tensors_to_del))
+                node_code.append(self.emit_release(tensors_to_del))
+            return node_code
+
+        def insert_codes_under_ctx(ctx_code, codes):
+            if ctx_code != "" and codes:
+                with Block(ctx_code) as cblock:
+                    cblock.insert_body(codes)
+                # [''] to make a new line, make the generated code pretty
+                return [''] + cblock.code + ['']
+            else:
+                return codes
+
+        node_codes = []
+        current_context_manager_code = ""
+        current_codes = []
+        for node in nodes:
+            if has_op_context_info(node):
+                new_context_manager_code = emit_context_manager(node)
+                if current_context_manager_code != new_context_manager_code:
+                    node_codes += insert_codes_under_ctx(current_context_manager_code, current_codes)
+                    current_codes = emit_node(node)
+                    current_context_manager_code = new_context_manager_code
+                else:
+                    current_codes.extend(emit_node(node))
+            else:
+                # Node without op context infortmation means it is inserted by nnscaler, not convert from original fx graph,
+                # for example, multiref node and adapter node, currently for nodes inserted by nnscaler we have the following assumption:
+                #     - the fx traced graph shows a context manager's impact to tensors,
+                #     - the behavior of an inserted node is determined by tensor properties, like data type and requires grad,
+                #     - combine the two points together, it is safe to put the inserted node in the default context.
+                # Base on this assumption, when we meet a node without op context infortmation, will force break the current code context scope
+                # and emit current node code without context managers.
+                #
+                # Here is an example about the inserted node code generation, the inserted node is a multiref node of y,
+                # and all the inserted nodes will under default context (without context managers):
+                #     """
+                #     # original code
+                #     with torch.no_grad():
+                #         y = func1(x)
+                #         z = func2(x)
+                #
+                #     # generated code
+                #     with torch.no_grad():
+                #         y = func1(x)
+                #     y_1, y_2 = nnscaler.runtime.function.multiref(y, 2)
+                #     with torch.no_grad():
+                #         z = func2(x)
+                #     """
+                #
+                # This way have two risks:
+                #     1. the assumption is no longer valid in subsequent development.
+                #     2. nodes that originally belonged to the same context need to be executed in a continuous context and cannot be interrupted.
+                # Fortunately, these two risks have not yet occurred for the current inserted nodes and supported context managers.
+                #
+                # Please note that if one entire context scope is split to multiple sub-scope, it may introduce additional overhead.
+                # Here is an overhead example about torch.autocast:
+                #     """
+                #     # original code
+                #     with torch.autocast(device_type='cuda', dtype=torch.float32, enabled=True, cache_enabled=True):
+                #         y = func1(x, a)
+                #         z = func2(x, b)
+                #
+                #     # generated code
+                #     with torch.autocast(device_type='cuda', dtype=torch.float32, enabled=True, cache_enabled=True):
+                #         y = func1(x, a)
+                #     ...
+                #     with torch.autocast(device_type='cuda', dtype=torch.float32, enabled=True, cache_enabled=True):
+                #         z = func2(x, b)
+                #     """
+                # In the original code, x might cast to float32 and used by both func1 and func2,
+                # but in generated code, because the scope is interrupted, the two new scopes cannot share the x cast result,
+                # then there might have a additional cast x to float32 for func2.
+                #
+                # For torch.no_grad and torch.inference_mode, the overhead is not significant, so we can ignore it.
+                #
+                # TODO: all inserted nodes should have its op context field.
+                node_codes += insert_codes_under_ctx(current_context_manager_code, current_codes)
+                node_codes += emit_node(node)
+                current_codes = []
+        node_codes += insert_codes_under_ctx(current_context_manager_code, current_codes)
 
         return node_codes
 

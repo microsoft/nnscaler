@@ -309,7 +309,7 @@ def test_follow_attention():
 def test_solver_data_parallel():
     from nnscaler.ir.unique import IDGenerator
     IDGenerator().clear()
-    bsz, seq_len, hidden_dim, num_heads = 2, 2048, 512, 8
+    bsz, seq_len, hidden_dim, num_heads = 2, 8192, 512, 8
     dummy_input = {
         'x': torch.rand(bsz, seq_len, hidden_dim),
     }

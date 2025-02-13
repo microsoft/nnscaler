@@ -1,49 +1,49 @@
 {
-  "(2, 2048, 8, 64)-(2, 2048, 512) : torch.float32-torch.float32 : True-True": {
+  "(2, 8192, 8, 64)-(2, 8192, 512) : torch.float32-torch.float32 : True-True": {
     "in_mem_info": [
-      8388608
+      33554432
     ],
     "param_mem_info": [],
     "buffer_mem_info": [],
-    "fw_span": 0.007220730185508728,
-    "bw_span": 0.026119686663150787,
-    "infer_memory": 8388608,
+    "fw_span": 0.005718669854104519,
+    "bw_span": 0.09603481739759445,
+    "infer_memory": 33554432,
     "train_mem_info": [],
     "train_mem2in_idx": []
   },
-  "(1, 2048, 8, 64)-(1, 2048, 512) : torch.float32-torch.float32 : True-True": {
+  "(1, 8192, 8, 64)-(1, 8192, 512) : torch.float32-torch.float32 : True-True": {
     "in_mem_info": [
-      4194304
+      16777216
     ],
     "param_mem_info": [],
     "buffer_mem_info": [],
-    "fw_span": 0.009209662675857544,
-    "bw_span": 0.0355185940861702,
-    "infer_memory": 4194304,
+    "fw_span": 0.007527763955295086,
+    "bw_span": 0.056579639203846455,
+    "infer_memory": 16777216,
     "train_mem_info": [],
     "train_mem2in_idx": []
   },
-  "(2, 1024, 8, 64)-(2, 1024, 512) : torch.float32-torch.float32 : True-True": {
+  "(2, 4096, 8, 64)-(2, 4096, 512) : torch.float32-torch.float32 : True-True": {
     "in_mem_info": [
-      4194304
+      16777216
     ],
     "param_mem_info": [],
     "buffer_mem_info": [],
-    "fw_span": 0.00962037593126297,
-    "bw_span": 0.03517419099807739,
-    "infer_memory": 4194304,
+    "fw_span": 0.009833252988755703,
+    "bw_span": 0.06164633668959141,
+    "infer_memory": 16777216,
     "train_mem_info": [],
     "train_mem2in_idx": []
   },
-  "(2, 2048, 4, 64)-(2, 2048, 256) : torch.float32-torch.float32 : True-True": {
+  "(2, 8192, 4, 64)-(2, 8192, 256) : torch.float32-torch.float32 : True-True": {
     "in_mem_info": [
-      4194304
+      16777216
     ],
     "param_mem_info": [],
     "buffer_mem_info": [],
-    "fw_span": 0.009422190487384796,
-    "bw_span": 0.03640800714492798,
-    "infer_memory": 4194304,
+    "fw_span": 0.0054121483117341995,
+    "bw_span": 0.04739384166896343,
+    "infer_memory": 16777216,
     "train_mem_info": [],
     "train_mem2in_idx": []
   }

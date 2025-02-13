@@ -45,7 +45,7 @@ def _compile(tmp_path, nstages):
             runtime_ngpus=2,
             use_end2end=True,
             pas_config={
-                'pipeline_pivots': 'Linear',
+                'pipeline_pivots': 'Linear' if nstages != 1 else '',
                 'pipeline_nstages': nstages,
                 'max_pipeline_bubble_ratio': 0.99,  # force autodist to accept unbalanced stages
             },

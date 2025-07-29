@@ -1,1 +1,0 @@
-../../../examples/llama/README.rst

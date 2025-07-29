@@ -1,0 +1,2 @@
+success,num_layers,num_dp,num_pp,num_tp,num_mb,gbs,num_heads,hidden_size,seqlen,n_activated_experts,n_routed_experts,t_graph,t_lineage,t_schedule,t_vrf,t_total,sm,pm,error
+True,32,512,1,1,1,512,32,4096,128,,,169.60448288917542,47.21557927131653,216.19859910011292,908.1491134166718,1386.1683521270752,gen_model/mgeners/llama3_default_dp1_pp1_tp1_nm1_gbs512_ly32_h32_hi4096_sq128.pkl,gen_model/mgeners/llama3_default_dp512_pp1_tp1_nm1_gbs512_ly32_h32_hi4096_sq128.pkl,[]

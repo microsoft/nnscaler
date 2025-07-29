@@ -1,0 +1,3 @@
+The original bug mis-assign the _EXPERT_MODEL_PARALLEL_GROUP. This group is used in _gather_along_first_dim_expert_parallel (an all-gather nccl) during distributed training.
+
+As injection, we directly inject at AllGatherSplitPrim to have an expanded group ranks, which simulate the same effect as the original bug.

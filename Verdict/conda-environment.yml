@@ -1,6 +1,9 @@
 name: verdict
 channels:
   - defaults
+  - conda-forge
+  - https://repo.anaconda.com/pkgs/main
+  - https://repo.anaconda.com/pkgs/r
 dependencies:
   - _libgcc_mutex=0.1=main
   - _openmp_mutex=5.1=1_gnu
@@ -23,7 +26,6 @@ dependencies:
   - setuptools=78.1.1=py310h06a4308_0
   - sqlite=3.45.3=h5eee18b_0
   - tk=8.6.14=h993c535_1
-  - tzdata=2025b=h04d1e81_0
   - wheel=0.45.1=py310h06a4308_0
   - xorg-libx11=1.8.12=h9b100fa_1
   - xorg-libxau=1.0.12=h9b100fa_0
@@ -67,12 +69,14 @@ dependencies:
       - nvidia-nvjitlink-cu12==12.6.85
       - nvidia-nvtx-cu12==12.1.105
       - packaging==25.0
+      - pandas==2.3.1
       - pillow==11.2.1
       - psutil==7.0.0
       - pulp==3.2.1
       - pybind11==2.13.6
       - pyparsing==3.2.3
       - python-dateutil==2.9.0.post0
+      - pytz==2025.2
       - pyyaml==6.0.2
       - regex==2024.11.6
       - requests==2.32.4
@@ -83,6 +87,7 @@ dependencies:
       - tqdm==4.67.1
       - triton==3.0.0
       - typing-extensions==4.14.0
+      - tzdata==2025.2
       - urllib3==2.4.0
       - z3-solver==4.15.1.0
-prefix: /home/srguser/miniconda3/envs/verdict
+prefix: /home/azureuser/miniconda3/envs/verdict

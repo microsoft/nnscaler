@@ -1,7 +1,7 @@
 # [markdown]
 #  Input
 
-FILE = "stats.csv"
+FILE = "../Verdict/data/stats/stats.csv"
 TRENDS_VARIABLES = [
     ("num_mb", 5),
     ("num_tp", 4),

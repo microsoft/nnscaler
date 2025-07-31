@@ -185,28 +185,38 @@ Total execution time of 14 cases should finish within 3 minumtes. Manual examina
    ```
 
 ### 👀 Expected Output
-Inspect `nnscaler/ae/br[bug_id].log`. The following document guides you how to interpret the error logs case by case.
+Inspect `nnscaler/ae/br[bug_id].log`. The following document guides you how to interpret the error logs case by case. We use `Gs` and `Gp` to refer to single-device graph and multi-device graph; `Ts` and `Tp` for their tensors.
 
 #### Bug 1
 The log would contain the following lines.
 ```
 ❌ ERROR: 🚨 Stage 53 solver result: sat
+
 Node(wtype='p', rank=4, mb=1, cid=5991, irname='IdentityAllreducePrim')
 ...
+
+🔗 OUTPUT LINEAGES
 👉 Tensor(wtype='s', rank=0, mb=0, tid=7000, v=1)
-[[[-2.]]
- [[ 0.]]
- [[ 0.]]
- [[ 0.]]]
+    [[[-2.]]
+    [[ 0.]]
+    [[ 0.]]
+    [[ 0.]]]
 🍕 ((0, 8), (0, 8192), (0, 128)) [[[-2.]]]
-=  ⨁ Tensor(wtype='p', rank=0, mb=0, tid=7000, v=1) [[[-1.]]]
-🚨 ⬆️
-=  ⨁ Tensor(wtype='p', rank=1, mb=0, tid=7000, v=1) [[[-1.]]]
-🚨 ⬆️
+    =  ⨁ Tensor(wtype='p', rank=0, mb=0, tid=7000, v=1) [[[-1.]]]
+    🚨 ⬆️
+    =  ⨁ Tensor(wtype='p', rank=1, mb=0, tid=7000, v=1) [[[-1.]]]
+    🚨 ⬆️
+🍕 ((8, 16), (0, 8192), (0, 128)) [[[0.]]]
 ...
+
 RuntimeError: Stage 53 equivalence fails.
 ...
+
 ❌ FAIL 
 
 ```
-The log indicates that it is satisfiable to find a solution of non-equivalence between Gs and Gp at stage 53.
+The log indicates that it is satisfiable to find a solution of non-equivalence between Gs and Gp at stage 53, followed by verbose nodes list `Node(wtype='p', ...)` in this stage. 
+
+It then provide concrete values for the lineaged tensors. For this example, it shows the output tensor Ts `👉 Tensor(wtype='s', rank=0, mb=0, tid=7000, v=1)` is detected inconsistent with its Tp's. Its subtensor sliced by slc:`🍕 ((0, 8), (0, 8192), (0, 128))` (reprensented in full shape) has value `[[[-2.]]]`, and as specified by lineage, is expected to be equal to both Tp1: `Tensor(wtype='p', rank=0, mb=0, tid=7000, v=1)` and Tp2: `Tensor(wtype='p', rank=1, mb=0, tid=7000, v=1)`; however, both Tp1 and Tp2 have value `[[[-1.]]]`.
+
+Recall that Bug 1 is missing an allreduce operator, which aligns with the concrete values. The output lineage expects Ts[slc] == Tp1 == Tp2 (the state after allreduce), yet the buggy model produces Ts[slc] == Tp1 + Tp2 (the state before allreduce). 

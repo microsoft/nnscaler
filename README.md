@@ -78,7 +78,7 @@ To fully reproduce results, we recommend to run Verdict artifact evaluation on m
 ## 🚀 Evaluate *Real-World Parallelization*
 
 ### 🎯 Goal
-To demonstrate Verdict’s practicality and time cost, we experiment on verifying execution plans for LLaMA3 (8B/70B/405B) and DeepSeek-V3 (16B/236B/671B) models under various real-world parallelization setup. There are total 6 runs. Parallelizaion scheme listed below.
+(Paper §8.1) To demonstrate Verdict’s practicality and time cost, we experiment on verifying execution plans for LLaMA3 (8B/70B/405B) and DeepSeek-V3 (16B/236B/671B) models under various real-world parallelization setup. There are total 6 runs. Parallelizaion scheme listed below.
 
 ### ⏳ Estimated Completion Time
 As these plans corresponds to real-world large scale training, involving up to 8192 GPUs, their verification time can be costly. Estimated time is listed below. (L1-L3 and D1-D2 will use 30 workers for stage-parallel execution. D3 will use 10 workers due to memory constraints.)
@@ -125,11 +125,29 @@ To check the evaluation results conveniently, take a look at the column `t_total
 ## 🚀 Evaluate *Scalability*
 
 ### 🎯 Goal
+(Paper §8.1) This evaluation measures scalability trends of Verdict. According to the design of Verdict, the time complexity should be invariant with respect to actual tensor shapes due to shape reduction, and sub-/linear to parallelization.
 
 ### ⏳ Estimated Completion Time
+There will be 40 runs, taking 6 hours in total.
 
 ### 🛠 How to Run
+> ⚠️ Note: As these experiments take hours to run, we recommend using `screen` or `tmux` in case of ssh disconnection.
 
+1. `cd` to working directory (relative path): `nnscaler/Verdict`
+2. Clean up stale stats. 
+    ```
+    rm data/stats/stats.csv
+    ```
+    > ⚠️ Important. As we will later make plot graph based on this file, requiring the csv only contains results from this evaluation.
+3. Run experiments.
+   ```
+   bash scripts/run_trends_full_8B.sh
+   ```
+4. Plot time complexity trends.
+   ```
+   cd ../ae;
+   python draw.py
+   ```
 ### 👀 Expected Output
 
 

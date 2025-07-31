@@ -23,6 +23,12 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from dataclasses import dataclass
 from typing import List, Dict, Tuple
+import os
+
+figs_dir = "figs"
+if os.path.exists(figs_dir):
+    os.rmdir(figs_dir)
+os.mkdir(figs_dir)
 
 @dataclass
 class PlotConfig:

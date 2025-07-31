@@ -1,16 +1,16 @@
 *SOSP'25 Artifact Evaluation for VERDICT*
 
 # Introduction to Verdict
-**Overview:**
-**Verdict** is a tool to verify parallelization equivalence for distributed model training. It ensures that the original and parallelized models are arithmetically equivalent, effectively eliminating bugs such as wrong tensor transformation, wrong collective communications, etc., that are introduced in the parallelization process.
+**Overview:** Verdict is a tool to verify parallelization equivalence for distributed model training. It ensures that the original and parallelized models are arithmetically equivalent, effectively eliminating bugs such as wrong tensor transformation, wrong collective communications, etc., that are introduced in the parallelization process.
 
-**Workflow:**
-Verdict takes the *execution plans* of both single-device (original) model and multi-device (parallelized) model as inputs enriched with *lineages*, and converts respective execplan into *symbolic SSA DAG* (single-static assignment directed acyclic graph). Verdict then partition dual graphs into small subgraphs to form independent *stages* based on lineages. Once stages are determined, they are executed in parallel. Within each stage, tensor shape reduction is applied, and z3 is used to symbolically verify the output equivalence. Once all stage passes the check, the end-to-end equivalence is guaranteed.
+**Workflow:** Verdict takes the *execution plans* of both single-device (original) model and multi-device (parallelized) model as inputs enriched with *lineages*, and converts respective execplan into *symbolic SSA DAG* (single-static assignment directed acyclic graph). Verdict then partition dual graphs into small subgraphs to form independent *stages* based on lineages. Once stages are determined, they are executed in parallel. Within each stage, tensor shape reduction is applied, and z3 is used to symbolically verify the output equivalence. Once all stage passes the check, the end-to-end equivalence is guaranteed.
 ![DesignOverview](docs/assets/design.png)
 
 **Implementation:** 
 Verdict is implemented with an interface design. Verdict defines a general graph interface and a solver interface, with a list of allowable reigistered operators. The nnScaler backend takes the responsibility to produce SSA DAGs that meet the requirements. A coarse reference to source code is shown in below.
 ![ImplOverview](docs/assets/impl.png)
+
+---
 
 # Artifact Evaluation Guide
 Welcome to artifact evaluation guide for Verdict (SOSP'25). The following document outlines the procedures needed to reproduce our results and guides you through the key experiments presented in the paper.
@@ -18,19 +18,15 @@ Welcome to artifact evaluation guide for Verdict (SOSP'25). The following docume
 
 ### ✅ Checklist with Estimated Time Cost
 1. Access hardware resources. (Azure, clone repo)
-2. Installation. (conda environment, demo runs)
-⏱️ 10 mins
-3. Run *Real-world Parallelization* Evaluation (§8.1)
-⏱️ 24 hours
-4. Run *Scalability* Evaluation (§8.2)
-⏱️ 6 hours
-5. Run *Bug Reproduction* Evaluation (§8.3)
-⏱️ 20 mins
+2. Installation. (conda environment, demo runs) ⏱️ 10 mins
+3. Run *Real-world Parallelization* Evaluation (§8.1) ⏱️ 24 hours
+4. Run *Scalability* Evaluation (§8.2) ⏱️ 6 hours
+5. Run *Bug Reproduction* Evaluation (§8.3) ⏱️ 20 mins
 
 > ⚠️ **Note:** Due to refined design, optimizations and code refactoring, the current evaluation results are improved thus different from statistics in the submitted paper. Please refer to each section for expected outputs. 
 
 ### 💻 Hardware Requirements
-To fully reproduce results, we recommend to run Verdict artifact evaluation on machines with at least 32 CPU (virtual) cores and 1TB memory. For SOSP'25 AE reviewers, please contact authors for Azure virtual machine instances.
+To fully reproduce results, we recommend to run Verdict artifact evaluation on a machine with at least 32 CPU (virtual) cores and 1TB memory. For SOSP'25 AE reviewers, please contact authors for Azure virtual machine instances.
 
 ### 🎭 Recommended Evaluation Strategy
 - Evaluation of §8.1 and §8.2 are about Verdict's performance, thus having to be run on capable machines, such as Azure VM instances. These experiments are estimated to take total 30 hours and do not require much reviewer engagement except for inspection of final dumped statistics, due to acknowledged correctness of input models.
@@ -156,9 +152,37 @@ Inspect output plots in `nnscaler/ae/figs`. The trends should ressemble the foll
 ## 🚀 Evaluate *Bug Reproduction*
 
 ### 🎯 Goal
+(Paper §8.3) This evaluation demonstrates Verdict can detect real-world parallelization bugs. We will use Verdict to verify 14 buggy execution plans crafted from real-world buggy models. We will see how Verdict detect them, and output useful information for diagnosis. All execution plans are crafted on the base model of llama3-8B with 2-way DP, 2-way TP, 2-way PP and 2 microbatches.
 
 ### ⏳ Estimated Completion Time
+Total execution time of 14 cases should finish within 3 minumtes. Manual examination of results takes around 15 minutes.
+
+### 📋 Table of Bugs
+| Bug ID | Type            | Description                                                         |
+| ------ | --------------- | ------------------------------------------------------------------- |
+| 1      | communication   | Missing `allreduce` operation without breaking dataflow             |
+| 2      | communication   | Missing `allreduce` operation with broken dataflow                  |
+| 3      | communication   | `allreduce` primitive replaced by `allgather`                       |
+| 4      | communication   | `allgather` primitive replaced by `allreduce`                       |
+| 5      | communication   | Missing reduce operation in backward fused operator                 |
+| 6      | rank assignment | Wrong rank assignment of tensor movement between pipeline stages    |
+| 7      | computation     | Single-rank mutant on fw ADD op, adding inconsistent constants      |
+| 8      | computation     | Single-rank mutant on fw POW op, powering inconsistent constants    |
+| 9      | computation     | Multi-rank mutant on fw ADD op, adding inconsistent constants       |
+| 10     | computation     | Single-rank mutant on bw MULTIREF op, consuming wrong input tensors |
+| 11     | computation     | Single-rank mutant on bw APPLY_ROTARY_EMB, reversing output tensors |
+| 12     | scaling         | Inconsistent scaling of tensors                                     |
+| 13     | scaling         | Inconsistent scaling of tensors                                     |
+| 14     | scheduling      | Missing the last op in the second microbatch                        |
+
 
 ### 🛠 How to Run
+1. `cd` to working directory (relative path): `nnscaler/Verdict`
+2. Run experiments. Also log outputs to `nnscaler/ae/br*.log` for examination convenience.
+   ```
+   rm nnscaler/ae/br*.log;
+   bash scripts/run_br.sh
+   ```
 
 ### 👀 Expected Output
+Inspect `tmp.txt`, where each run starts with `🚀🚀🚀 BR[bug_id]`. The following document guides you how to interpret the error log case by case.

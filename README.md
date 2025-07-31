@@ -120,12 +120,12 @@ Each experiment is expected to print the following message or similar at the end
 PID: ... - ✅ SUCCESS 
 Stats(success=True, ... )
 ```
-To check the evaluation results conveniently, take a look at the column `t_total` in `data/stats/stats.csv` and compare with either estimated time in the Table of Experiments above, or our updated evaluation results (to be appear in camera-ready) in `data/4_stats_large_final.csv`. The measured time should be close.
+To check the evaluation results conveniently, take a look at the column `t_total` in `data/stats/stats.csv` and compare with either estimated time in the Table of Experiments above, or our updated evaluation results (to be appear in camera-ready) in `data/4_stats_large_final.csv`. The measured time should be close. Compared with Table 3 in paper §8.1, the improved verification time takes only the half.
 
 ## 🚀 Evaluate *Scalability*
 
 ### 🎯 Goal
-(Paper §8.1) This evaluation measures scalability trends of Verdict. According to the design of Verdict, the time complexity should be invariant with respect to actual tensor shapes due to shape reduction, and sub-/linear to parallelization.
+(Paper §8.2) This evaluation measures scalability trends of Verdict. According to the design of Verdict, the time complexity should be invariant with respect to actual tensor shapes due to shape reduction, and sub-/linear to parallelization.
 
 ### ⏳ Estimated Completion Time
 There will be 40 runs, taking 6 hours in total.
@@ -149,6 +149,8 @@ There will be 40 runs, taking 6 hours in total.
    python draw.py
    ```
 ### 👀 Expected Output
+Inspect output plots in `nnscaler/ae/figs`. The trends should ressemble the following plots. The complexity trends are also expected to be consistent with Figure 6 in paper §8.2, though the breakdown time components and absolute time may differ.
+![DesignOverview](docs/assets/new_trends.png)
 
 
 ## 🚀 Evaluate *Bug Reproduction*

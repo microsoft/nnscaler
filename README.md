@@ -187,8 +187,8 @@ Total execution time of 14 cases should finish within 3 minumtes. Manual examina
 ### 👀 Expected Output
 Inspect `nnscaler/ae/br[bug_id].log`. The following document guides you how to interpret the error logs case by case. We use `Gs` and `Gp` to refer to single-device graph and multi-device graph; `Ts` and `Tp` for their tensors.
 
-#### Bug 1
-The log would contain the following lines.
+#### 🔖 Bug 1
+The log should contain the following lines.
 ```
 ❌ ERROR: 🚨 Stage 53 solver result: sat
 
@@ -211,12 +211,115 @@ Node(wtype='p', rank=4, mb=1, cid=5991, irname='IdentityAllreducePrim')
 
 RuntimeError: Stage 53 equivalence fails.
 ...
-
-❌ FAIL 
-
 ```
 The log indicates that it is satisfiable to find a solution of non-equivalence between Gs and Gp at stage 53, followed by verbose nodes list `Node(wtype='p', ...)` in this stage. 
 
 It then provide concrete values for the lineaged tensors. For this example, it shows the output tensor Ts `👉 Tensor(wtype='s', rank=0, mb=0, tid=7000, v=1)` is detected inconsistent with its Tp's. Its subtensor sliced by slc:`🍕 ((0, 8), (0, 8192), (0, 128))` (reprensented in full shape) has value `[[[-2.]]]`, and as specified by lineage, is expected to be equal to both Tp1: `Tensor(wtype='p', rank=0, mb=0, tid=7000, v=1)` and Tp2: `Tensor(wtype='p', rank=1, mb=0, tid=7000, v=1)`; however, both Tp1 and Tp2 have value `[[[-1.]]]`.
 
 Recall that Bug 1 is missing an allreduce operator, which aligns with the concrete values. The output lineage expects Ts[slc] == Tp1 == Tp2 (the state after allreduce), yet the buggy model produces Ts[slc] == Tp1 + Tp2 (the state before allreduce). 
+
+#### 🔖 Bug 2
+The log should contain the following lines.
+```
+❌ ERROR: Target Tp is not reachable from any source Tp bound to Ts's lineage. 
+target_Tp: Tensor(wtype='p', rank=0, mb=0, tid=7000, v=0),
+Ts: Tensor(wtype='s', rank=0, mb=0, tid=7000, v=1),
+...
+```
+The log indicates a runtime error occured when breaking down the full Gs and Gp into stages. The target Tp `Tensor(wtype='p', rank=0, mb=0, tid=7000, v=0)` is serving as an output tensor of the new stage (refer to the following illustration). A stage is ideally determined by finding Ts and Tp's (which are tensors in already verified lineages), and extract  the nodes between Tp's and target Tp (as well as nodes between Ts and target Ts). Verdict will sanity check that target Tp is reachable from *any* of tensor in candidate Tp's. The error log shows that this reachability is not met, and graph slicing is aborted.
+
+![DesignOverview](docs/assets/slc.png)
+Recall that in Bug 2, the missing operator breaks the dataflow. Such bugs are early detected before executing symbolic verification.
+
+#### 🔖 Bug 3
+The log should contain the following lines.
+```
+❌ ERROR: Tensor shape mismatch. 
+Expect: [np.int64(1), np.int64(1), np.int64(1)], Result: [2, 1, 1], 
+Node: Node(wtype='p', rank=0, mb=0, cid=5991, irname='AllGatherPrim')
+``` 
+The log shows that the output tensor of the node should have shape [1,1,1], but we get [2,1,1].
+
+Recall that the cause of Bug 3 is `allreduce` replaced by `allgather`, causing a shape mismatch.
+
+#### 🔖 Bug 4
+The log should contain the following lines.
+```
+❌ ERROR: Stage worker raised an exception. Stage: 871, ...
+File "/mnt/nnscaler/Verdict/verdict/stage/rxshape.py", line 102, in minimize
+    assert sat == z3.sat, sat
+AssertionError: unsat
+``` 
+The assertion error is raise by the process of shape reduction of stage 871. The solver reports the shape optimization problem is unsatisfiable.
+
+Recall that the cause of Bug 4 is `allgather` replaced by `allreduce`, the output shape inconsistency is reflected by the solver.
+
+#### 🔖 Bug 5
+The log should contain the following lines.
+```
+❌ ERROR: 🚨 Stage 987 solver result: sat
+
+Node(wtype='s', rank=0, mb=0, cid=3167, irname='multiref')
+...
+Node(wtype='p', rank=6, mb=1, cid=12736, irname='AllReduceIdentityPrim')
+...
+Node(wtype='p', rank=6, mb=1, cid=1, irname='local_grad_accumulation')
+...
+Node(wtype='p', rank=6, mb=1, cid=11700, irname='multiref')
+...
+
+🔗 OUTPUT LINEAGES
+👉 Tensor(wtype='s', rank=0, mb=0, tid=12441, v=1)
+    [[[2.]]
+    [[3.]]
+    [[4.]]
+    [[5.]]]
+🍕 ((0, 8), (0, 8192), (0, 128)) [[[2.]]]
+    =  ⨁ Tensor(wtype='p', rank=2, mb=0, tid=18484, v=1) [[[6.]]]
+    🚨 ⬆️
+    =  ⨁ Tensor(wtype='p', rank=3, mb=0, tid=18496, v=1) [[[6.]]]
+    🚨 ⬆️
+...
+
+👉 Tensor(wtype='s', rank=0, mb=0, tid=12445, v=1)
+    [[[2.]]
+    [[3.]]
+    [[4.]]
+    [[5.]]]
+🍕 ((0, 8), (0, 8192), (0, 128)) [[[2.]]]
+    =  ⨁ Tensor(wtype='p', rank=2, mb=0, tid=18488, v=1) [[[6.]]]
+    🚨 ⬆️
+    =  ⨁ Tensor(wtype='p', rank=3, mb=0, tid=18500, v=1) [[[6.]]]
+    🚨 ⬆️
+...
+
+RuntimeError: Stage 987 equivalence fails.
+...
+``` 
+The way of interpretation is similar to Bug 1.
+
+Recall that Bug 5 is caused by the fused communication operator in the backward pass misses an `allreduce` operation, being replaced by `identity` operation. As this stage involves multiple injected nodes (bw multiref, AllreduceIdentityPrim, and gradient accumulation across microbatches), the root cause (missing `allreduce`) cannot be easily eyeballed from concrete values, and requires manual diagnosis.
+
+#### 🔖 Bug 6
+The log should contain the following lines.
+```
+❌ ERROR: Target Tp is not reachable from any source Tp bound to Ts's lineage.
+target_Tp: Tensor(wtype='p', rank=2, mb=0, tid=10953, v=1),
+Ts: Tensor(wtype='s', rank=0, mb=0, tid=7841, v=1),
+...
+``` 
+The way of interpretation is similar to Bug 2.
+
+The cause of Bug 6 is the wrong assignment of MovePrim's src and dst ranks, which moves tensors across GPUs belonging to different pipeline parallelism stages. The bug causes broken dependency between predecessor and successor lineages.
+
+
+
+<!-- 
+#### 🔖 Bug
+The log should contain the following lines.
+```
+
+
+
+``` 
+-->

@@ -182,7 +182,6 @@ Total execution time of 14 cases should finish within 3 minumtes. Manual examina
 1. `cd` to working directory (relative path w.r.t repo root): `nnscaler/Verdict`
 2. Run experiments. Also log outputs to `nnscaler/ae/br*.log` for examination convenience.
    ```
-   rm ../ae/br*.log;
    bash scripts/run_br.sh
    ```
 

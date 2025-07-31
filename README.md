@@ -36,7 +36,7 @@ To fully reproduce results, we recommend to run Verdict artifact evaluation on a
 
 
 ## 🚀 Installation
-1. Create conda environment.
+1. Create [conda](https://www.anaconda.com/download/success) environment.
     ```
     cd Verdict
     conda env create -f conda-environment.yml
@@ -44,6 +44,7 @@ To fully reproduce results, we recommend to run Verdict artifact evaluation on a
     ```
 2. Run demo verification for 2-layer llama3 model parallelization.
     ```
+    mkdir data/logs;
     bash scripts/demo_llama3.sh 
     ```
     The `scripts/demo_llama3.sh` essentially runs the following command:
@@ -70,6 +71,7 @@ To fully reproduce results, we recommend to run Verdict artifact evaluation on a
     ```
     > A failed run would print `PID: ... - ❌ FAIL`.
 3. Once the demo runs successfully, we can move on to reproduce evaluations.
+> ⚠️ **Note:** In all following evaluations, we directly provide execution plans (*.pkl files) of models in stead of building graphs from model code due to time and GPU constraints, as nnScaler parallelizes models through expensive profiling and graph tracing.
 
 ## 🚀 Evaluate *Real-World Parallelization*
 
@@ -173,7 +175,7 @@ Total execution time of 14 cases should finish within 3 minumtes. Manual examina
 | 11     | computation     | Single-rank mutant on bw APPLY_ROTARY_EMB, reversing output tensors |
 | 12     | scaling         | Inconsistent scaling of tensors                                     |
 | 13     | scaling         | Inconsistent scaling of tensors                                     |
-| 14     | scheduling      | Missing the last op in the second microbatch                        |
+| 14     | scheduling      | Lauching reducer before the last operator of the second microbatch  |
 
 
 ### 🛠 How to Run
@@ -238,7 +240,7 @@ The log should contain the following lines.
 Expect: [np.int64(1), np.int64(1), np.int64(1)], Result: [2, 1, 1], 
 Node: Node(wtype='p', rank=0, mb=0, cid=5991, irname='AllGatherPrim')
 ``` 
-The log shows that the output tensor of the node should have shape [1,1,1], but we get [2,1,1].
+The log shows that the output tensor of the node should have shape `[1,1,1]`, but we get `[2,1,1]`.
 
 Recall that the cause of Bug 3 is `allreduce` replaced by `allgather`, causing a shape mismatch.
 
@@ -312,14 +314,189 @@ The way of interpretation is similar to Bug 2.
 
 The cause of Bug 6 is the wrong assignment of MovePrim's src and dst ranks, which moves tensors across GPUs belonging to different pipeline parallelism stages. The bug causes broken dependency between predecessor and successor lineages.
 
-
-
-<!-- 
-#### 🔖 Bug
+#### 🔖 Bug 7
 The log should contain the following lines.
 ```
+❌ ERROR: 🚨 Stage 8 solver result: sat
 
+Node(wtype='s', rank=0, mb=0, cid=6, irname='add')
+...
 
+🔗 OUTPUT LINEAGES
+👉 Tensor(wtype='s', rank=0, mb=0, tid=6949, v=1)
+    [[[2.00001]]
+    [[3.00001]]
+    [[4.00001]]
+    [[5.00001]]]
+🍕 ((0, 8), (0, 8192), (0, 1)) [[[2.00001]]]
+    =  ⨁ Tensor(wtype='p', rank=0, mb=0, tid=6949, v=1) [[[4.]]]
+    🚨 ⬆️
+    =  ⨁ Tensor(wtype='p', rank=1, mb=0, tid=6949, v=1) [[[2.00001]]]
+🍕 ((8, 16), (0, 8192), (0, 1)) [[[3.00001]]]
+    =  ⨁ Tensor(wtype='p', rank=0, mb=1, tid=6949, v=1) [[[5.]]]
+    🚨 ⬆️
+    =  ⨁ Tensor(wtype='p', rank=1, mb=1, tid=6949, v=1) [[[3.00001]]]
+...
 
+RuntimeError: Stage 8 equivalence fails.
+...
 ``` 
--->
+The log shows that the `add` operator on rank 0 produces inconsistent results. For example, flagged by `🚨`, the Tp with tid=6949 from microbatche mb=0 has concrete value `[[[4.]]]`, while `[[[2.00001]]]` is expected. The bug is cause by the rank 0 `add` operator being mutated on its constant epsilon.
+
+#### 🔖 Bug 8
+The log should contain the following lines.
+```
+❌ ERROR: 🚨 Stage 40 solver result: sat
+
+Node(wtype='s', rank=0, mb=0, cid=36, irname='pow')
+...
+
+🔗 OUTPUT LINEAGES
+👉 Tensor(wtype='s', rank=0, mb=0, tid=6985, v=1)
+    [[[ 1.]]
+    [[ 9.]]
+    [[16.]]
+    [[25.]]]
+🍕 ((0, 8), (0, 8192), (0, 128)) [[[1.]]]
+    =  ⨁ Tensor(wtype='p', rank=0, mb=0, tid=6985, v=1) [[[-1.]]]
+    🚨 ⬆️
+    =  ⨁ Tensor(wtype='p', rank=1, mb=0, tid=6985, v=1) [[[1.]]]
+🍕 ((8, 16), (0, 8192), (0, 128)) [[[9.]]]
+    =  ⨁ Tensor(wtype='p', rank=0, mb=1, tid=6985, v=1) [[[3.]]]
+    🚨 ⬆️
+    =  ⨁ Tensor(wtype='p', rank=1, mb=1, tid=6985, v=1) [[[9.]]]
+...
+
+RuntimeError: Stage 40 equivalence fails.
+...
+``` 
+The interpretation and root cause is similar to Bug 7, except for the rank 0 `pow` operator is mutated, with `pow(x,2)` modified as `pow(x,1)`.
+
+#### 🔖 Bug 9
+The log should contain the following lines.
+```
+❌ ERROR: 🚨 Stage 840 solver result: sat
+
+Node(wtype='s', rank=0, mb=0, cid=742, irname='add')
+...
+
+👉 Tensor(wtype='s', rank=0, mb=0, tid=7845, v=1)
+    [[[2.00001]]
+    [[3.00001]]
+    [[4.00001]]
+    [[5.00001]]]
+🍕 ((0, 8), (0, 8192), (0, 1)) [[[2.00001]]]
+    =  ⨁ Tensor(wtype='p', rank=0, mb=0, tid=7845, v=1) [[[4.]]]
+    🚨 ⬆️
+    =  ⨁ Tensor(wtype='p', rank=1, mb=0, tid=7845, v=1) [[[4.]]]
+    🚨 ⬆️
+🍕 ((8, 16), (0, 8192), (0, 1)) [[[3.00001]]]
+    =  ⨁ Tensor(wtype='p', rank=0, mb=1, tid=7845, v=1) [[[5.]]]
+    🚨 ⬆️
+    =  ⨁ Tensor(wtype='p', rank=1, mb=1, tid=7845, v=1) [[[5.]]]
+    🚨 ⬆️
+...
+
+RuntimeError: Stage 840 equivalence fails.
+...
+``` 
+The interpretation and root cause is similar to Bug 7, yet multiple ranks are mutated. Compared with Bug 7 where only rank 0's output tensors are flagged by `🚨`, Bug 9 flags both rank 0's and rank 1's outputs as inconsistent.
+
+#### 🔖 Bug 10
+The log should contain the following lines.
+```
+❌ ERROR: 🚨 Stage 2499 solver result: sat
+
+Node(wtype='s', rank=0, mb=0, cid=3138, irname='BW.multiref')
+...
+
+🔗 OUTPUT LINEAGES
+👉 Tensor(wtype='s', rank=0, mb=0, tid=9855, v=1)
+    [[[18.]]
+    [[21.]]
+    [[24.]]
+    [[27.]]]
+🍕 ((0, 8), (0, 8192), (0, 128)) [[[18.]]]
+    =  ⨁ Tensor(wtype='p', rank=2, mb=0, tid=9855, v=1) [[[28.]]]
+    🚨 ⬆️
+    =  ⨁ Tensor(wtype='p', rank=3, mb=0, tid=9855, v=1) [[[18.]]]
+...
+
+RuntimeError: Stage 2499 equivalence fails.
+...
+``` 
+The backward propagation of the `multiref` operator consumes wrong gradients as input, causing wrong output gradient.
+
+#### 🔖 Bug 11
+The log should contain the following lines.
+```
+❌ ERROR: Target Tp is not reachable from any source Tp bound to Ts's lineage.
+target_Tp: Tensor(wtype='p', rank=2, mb=0, tid=9869, v=1),
+Ts: Tensor(wtype='s', rank=0, mb=0, tid=9868, v=1),
+...
+``` 
+The backward propagation of `apply_rotary_emb` produces two gradient tensors as outputs. However, they are mistakenly exchanged. The later stage that consumes these tensors as inputs detects the broken dependency and throws the error.
+
+#### 🔖 Bug 12
+The log should contain the following lines.
+```
+❌ ERROR: 🚨 Stage 130 solver result: sat
+
+Node(wtype='s', rank=0, mb=0, cid=116, irname='div')
+...
+
+🔗 OUTPUT LINEAGES
+👉 Tensor(wtype='s', rank=0, mb=0, tid=7084, v=1)
+    [[[[1. ]]]
+    [[[1.5]]]
+    [[[2. ]]]
+    [[[2.5]]]]
+🍕 ((0, 8), (0, 32), (0, 8192), (0, 8192)) [[[[1.]]]]
+    =  ⨁ Tensor(wtype='p', rank=0, mb=0, tid=7084, v=1) [[[[0.5]]]]
+    🚨 ⬆️
+    =  ⨁ Tensor(wtype='p', rank=1, mb=0, tid=7084, v=1) [[[[1.]]]]
+🍕 ((8, 16), (0, 32), (0, 8192), (0, 8192)) [[[[1.5]]]]
+...
+
+RuntimeError: Stage 130 equivalence fails.
+...
+``` 
+The log indicates inconsistent scaling of tensors on rank 0.
+
+#### 🔖 Bug 13
+The log should contain the following lines.
+```
+❌ ERROR: 🚨 Stage 130 solver result: sat
+
+Node(wtype='s', rank=0, mb=0, cid=116, irname='div')
+...
+
+🔗 OUTPUT LINEAGES
+
+👉 Tensor(wtype='s', rank=0, mb=0, tid=7084, v=1)
+    [[[[1. ]]]
+    [[[1.5]]]
+    [[[2. ]]]
+    [[[2.5]]]]
+🍕 ((0, 8), (0, 32), (0, 8192), (0, 8192)) [[[[1.]]]]
+    =  ⨁ Tensor(wtype='p', rank=0, mb=0, tid=7084, v=1) [[[[0.5]]]]
+    🚨 ⬆️
+    =  ⨁ Tensor(wtype='p', rank=1, mb=0, tid=7084, v=1) [[[[0.5]]]]
+    🚨 ⬆️
+🍕 ((8, 16), (0, 32), (0, 8192), (0, 8192)) [[[[1.5]]]]
+...
+
+RuntimeError: Stage 130 equivalence fails.
+...
+``` 
+The log indicates inconsistent scaling of tensors on both rank 0 and rank 1.
+
+#### 🔖 Bug 14
+The log should contain the following lines.
+```
+❌ ERROR: (0, 0, 0, 1, False) traceback: ...
+  File "/mnt/nnscaler/Verdict/nnscaler_backend/build_lineage.py", line 79, in _reorganize_Gp_nodes
+    target.extend(indexed_nodes[(dp, tp, pp, mb, False)])
+KeyError: (0, 0, 0, 1, False)
+``` 
+Bug 14 issues cross-dp gradient synchronization before the second microbatch completes all its operations, leaving alone the last backward operator. The log indicates that symmetry among microbatches is violated, and Verdict is unable to align and infer lineages. 

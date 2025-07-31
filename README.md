@@ -93,7 +93,7 @@ As these plans corresponds to real-world large scale training, involving up to 8
 ### 🛠 How to Run
 > ⚠️ Note: As these experiments take hours to run, we recommend using `screen` or `tmux` in case of ssh disconnection.
 
-1. `cd` to working directory (relative path): `nnscaler/Verdict`
+1. `cd` to working directory (relative path w.r.t repo root): `nnscaler/Verdict`
 2. Clean up stale stats.
     ```
     rm data/stats/stats.csv
@@ -129,7 +129,7 @@ There will be 40 runs, taking 6 hours in total.
 ### 🛠 How to Run
 > ⚠️ Note: As these experiments take hours to run, we recommend using `screen` or `tmux` in case of ssh disconnection.
 
-1. `cd` to working directory (relative path): `nnscaler/Verdict`
+1. `cd` to working directory (relative path w.r.t repo root): `nnscaler/Verdict`
 2. Clean up stale stats. 
     ```
     rm data/stats/stats.csv
@@ -177,12 +177,36 @@ Total execution time of 14 cases should finish within 3 minumtes. Manual examina
 
 
 ### 🛠 How to Run
-1. `cd` to working directory (relative path): `nnscaler/Verdict`
+1. `cd` to working directory (relative path w.r.t repo root): `nnscaler/Verdict`
 2. Run experiments. Also log outputs to `nnscaler/ae/br*.log` for examination convenience.
    ```
-   rm nnscaler/ae/br*.log;
+   rm ../ae/br*.log;
    bash scripts/run_br.sh
    ```
 
 ### 👀 Expected Output
-Inspect `tmp.txt`, where each run starts with `🚀🚀🚀 BR[bug_id]`. The following document guides you how to interpret the error log case by case.
+Inspect `nnscaler/ae/br[bug_id].log`. The following document guides you how to interpret the error logs case by case.
+
+#### Bug 1
+The log would contain the following lines.
+```
+❌ ERROR: 🚨 Stage 53 solver result: sat
+Node(wtype='p', rank=4, mb=1, cid=5991, irname='IdentityAllreducePrim')
+...
+👉 Tensor(wtype='s', rank=0, mb=0, tid=7000, v=1)
+[[[-2.]]
+ [[ 0.]]
+ [[ 0.]]
+ [[ 0.]]]
+🍕 ((0, 8), (0, 8192), (0, 128)) [[[-2.]]]
+=  ⨁ Tensor(wtype='p', rank=0, mb=0, tid=7000, v=1) [[[-1.]]]
+🚨 ⬆️
+=  ⨁ Tensor(wtype='p', rank=1, mb=0, tid=7000, v=1) [[[-1.]]]
+🚨 ⬆️
+...
+RuntimeError: Stage 53 equivalence fails.
+...
+❌ FAIL 
+
+```
+The log indicates that it is satisfiable to find a solution of non-equivalence between Gs and Gp at stage 53.

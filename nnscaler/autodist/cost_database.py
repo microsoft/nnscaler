@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 from typing import List, Tuple, Union, Callable, Dict
 import json
 import os

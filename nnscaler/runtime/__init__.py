@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 from nnscaler.runtime import executor
 from nnscaler.runtime import device
 from nnscaler.runtime import adapter

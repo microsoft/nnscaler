@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 from typing import List, Dict, Tuple, Optional, TYPE_CHECKING
 from dataclasses import dataclass
 from collections import defaultdict

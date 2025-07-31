@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 from enum import Enum
 
 """If an operator is injected (not an aligned operator), and is uni-directonal (can only appear in either forward or backward pass), then set `None` for the isfw field."""

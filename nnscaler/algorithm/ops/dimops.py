@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 from typing import List, Optional, Any, Dict, Union, Tuple
 import numpy as np
 import logging

@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 from typing import List, Union, Set
 import logging
 from nnscaler.graph.graph import IRSegment

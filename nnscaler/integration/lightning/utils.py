@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 import torch
 from torch.optim.lbfgs import LBFGS
 

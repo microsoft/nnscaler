@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 from contextlib import contextmanager
 from typing import Dict, Union, List, Optional, Set, Tuple, Any, Callable
 import numpy as np

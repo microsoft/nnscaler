@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 from .descs import NodePartitionDesc
 from nnscaler.graph import IRGraph
 from nnscaler.ir.operator import IRFwOperation

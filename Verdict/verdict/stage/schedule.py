@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 import networkx as nx
 from tqdm import tqdm
 from typing import List, Dict, Set, Hashable

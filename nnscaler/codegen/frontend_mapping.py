@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 # Some operators should be specially handled during codegen to the frontend code,
 # here we define the customized rule for code emisson.
 

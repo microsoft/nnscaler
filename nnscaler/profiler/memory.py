@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 from typing import Any, List
 import logging
 from nnscaler.utils import print_each_rank

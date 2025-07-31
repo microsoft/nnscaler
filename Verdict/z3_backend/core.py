@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 from typing import List, Tuple, Dict, Any
 from typing import Dict
 import z3

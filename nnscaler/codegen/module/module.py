@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 from typing import List, Optional, Tuple, Dict, Any
 import more_itertools
 import logging

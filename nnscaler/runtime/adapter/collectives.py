@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 """
 This module offers the wrap of communication primitives
 based on `torch.distributed`. The use of these primitives standalone is typically

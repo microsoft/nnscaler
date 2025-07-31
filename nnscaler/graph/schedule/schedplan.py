@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 from typing import Dict, List,  Optional, Tuple, Set
 
 from nnscaler.ir.cten import IRCell

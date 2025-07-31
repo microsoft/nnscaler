@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 from typing import List, Dict, Tuple, Set, Hashable, Any
 from collections import defaultdict
 from copy import copy

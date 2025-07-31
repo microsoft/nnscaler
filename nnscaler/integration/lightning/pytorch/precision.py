@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 from typing import TYPE_CHECKING, Any, Callable, ContextManager, Dict, Literal, Optional, Union
 
 import torch

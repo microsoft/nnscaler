@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 from typing import List, Dict, Tuple, Any, Callable, Optional, Set
 from functools import partial
 import logging

@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 """
 PYTHONPATH=.:$PYTHONPATH OMP_NUM_THREADS=4 torchrun  \
     --nproc_per_node=1  \

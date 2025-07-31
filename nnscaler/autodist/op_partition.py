@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 from nnscaler.autodist.cube_operator import CubeOperator
 from nnscaler.graph.function.dimops import DimAnno, IRDimops
 

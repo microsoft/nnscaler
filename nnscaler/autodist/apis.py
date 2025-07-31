@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 from .spmd_solver import calc_optimal_spmd_plan, analysis_pretty_printer
 from .pipeline_solver import calc_optimal_pp_plan
 from .autodist_config import AutoDistConfig

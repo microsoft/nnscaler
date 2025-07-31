@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 r"""
 IRCell:
     a graph node component serving for different purpose,

@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 """
 This module offers autograd functions for communication
 primitives. This is typically used in the training with tensor 

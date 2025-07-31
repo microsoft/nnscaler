@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 from .model_graph import ModelGraph, collect_depth2scope_nodes
 from .cube_operator import CubeOperator
 from .descs import *

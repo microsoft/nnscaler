@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 from typing import Callable, Dict, List, Tuple, Optional, Set, Union
 from functools import partial
 import numpy as np

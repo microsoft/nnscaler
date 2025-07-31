@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 """
 Usage:
     python -m nnscaler.profiler.database --export ./profile.dat.json

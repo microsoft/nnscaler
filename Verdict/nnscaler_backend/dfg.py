@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 from typing import Dict, List, final, Set, Tuple, Hashable
 from collections import namedtuple
 from pathlib import Path

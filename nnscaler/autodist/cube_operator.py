@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 from typing import List, Tuple, Dict, Set, Optional
 from nnscaler.ir import IRTensor, IRFwOperation, IRSubTensor
 from nnscaler.graph.function.dimops import DimAnno, IRDimops

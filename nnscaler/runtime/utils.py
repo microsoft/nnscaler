@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 r"""Runtime Utilities"""
 
 from typing import Any, List

@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 from .model_graph import ModelGraph, estimate_mem_lower_bound, IntervalInfo
 from .spmd_solver import SPMDSolver
 from .descs import *

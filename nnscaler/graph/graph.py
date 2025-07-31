@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 """
 IRGraph:
     a graph that is composed by node (IRFwOperation) and edge (IRTensor).

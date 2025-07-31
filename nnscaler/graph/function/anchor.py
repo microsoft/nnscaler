@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 
 from nnscaler.ir.operator import IRFwOperation
 from nnscaler.ir.cten import IRObject

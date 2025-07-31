@@ -1,3 +1,6 @@
+#  Copyright (c) Microsoft Corporation.
+#  Licensed under the MIT License.
+
 from typing import Tuple
 
 from nnscaler.ir.operator import IRFwOperation

@@ -1,223 +1,508 @@
-<img src="docs/source/images/nnScaler-c-1.png" alt="drawing" width="100" align="left"/>  
+*SOSP'25 Artifact Evaluation for Paper#501 VERDICT*
 
-nnScaler: Compiling DNN models for Parallel Training over Multiple Devices
-==============
+# Introduction to VERDICT
+**Overview:** VERDICT is a verification tool for ensuring *parallelization equivalence* in distributed model training. It guarantees that the parallelized model is arithmetically equivalent to its original single-device version, thereby eliminating errors such as incorrect tensor transformations or faulty collective communication introduced during parallelization.
 
+**Workflow:** 
+VERDICT takes the *execution plans* (execplans) of both the original (single-device) and parallelized (multi-device) models, each enriched with *lineages*. It then transforms these into *symbolic SSA DAGs* (single-static assignment directed acyclic graphs). The dual graphs are partitioned into independent *stages* using lineage information. Each stage undergoes parallel execution, where shape reduction is applied, followed by symbolic verification using Z3. If all stages pass, VERDICT guarantees end-to-end equivalence.
 
-# What is nnScaler?
+![DesignOverview](docs/assets/design.png)
 
----------
-nnScaler is a parallelization engine that compiles a Deep neural network (DNN) model that designed for single-GPU execution into a program that capable of running in parallel across multiple GPUs.
+**Implementation:** 
+VERDICT is implemented with modular interfaces. It defines a general graph interface and a solver interface, supporting a registry of allowable operators. The [*nnScaler*](https://github.com/microsoft/nnscaler) backend constructs SSA DAGs that conform to VERDICT’s requirements. A high-level view of the implementation is shown below:
 
-<img src="docs/source/images/nnScaler_flow.png" alt="drawing" width="600"/>
+![ImplOverview](docs/assets/impl.png)
 
-# Latest News
-nnScaler (also known as CUBE as code name) has been adopted by multiple product and research projects, this section includes some of the latest news from the team and partner projects.
-* **2025-02-12** nnScaler 0.7 released: https://github.com/microsoft/nnscaler/releases/tag/0.7
-* **2024-10-07** Diff-Transformer utilizes nnScaler for differential attention mechanism: [DIFFERENTIAL TRANSFORMER](https://arxiv.org/abs/2410.05258)
-* **2024-05-09** YOCO utilizes nnScaler for long-sequence training: [(YOCO)You only cache once: Decoder-decoder architectures for language models](https://arxiv.org/abs/2405.05254)
-* **2024-04-22** Post training for the long context version of [Phi-3 series](https://arxiv.org/abs/2404.14219)
-* **2024-02-21** LongRoPE utilizes nnScaler to reduce both the training and inference costs: [LongRoPE: Extending LLM context window beyond 2 million tokens](https://arxiv.org/abs/2402.13753)
+ 
 
-### System Highlights:
+---
 
-* Ease of Use: Only a few lines of code need to be changed to enable automated parallelization.
-* Pythonic: The parallelization output is in PyTorch code, making it easy for users to understand and convenient for further development or customization.
-* Extensibility: nnScaler exposes an API to support new operators for emerging models.
-* Reliability: Verified through various end-to-end training sessions, nnScaler is a dependable system.
-* Performance: By exploring a large parallelization space, nnScaler can significantly enhance parallel training performance.
-
-For **_DNN scientists_**, they can concentrate on model design with PyTorch on single GPU, while leaving parallelization complexities to nnScaler. It introduces innovative parallelism techniques that surpass existing methods in performance. Additionally, nnScaler supports the extension of DNN modules with new structures or execution patterns, enabling users to parallelize their custom DNN models.
-
-For **_DNN system experts_**, they can leverage nnScaler to explore new DNN parallelization mechanisms and policies for emerging models. By providing user-defined functions for new operators not recognized by nnScaler, it ensures seamless parallelization of novel DNN models. For example, to facilitate long sequence support in LLMs.
+# Artifact Evaluation Guide
+Welcome to artifact evaluation guide for VERDICT (SOSP'25). The following document outlines the procedures needed to reproduce our results and guides you through the key experiments presented in the paper.
 
 
-# Quick start
+### ✅ Checklist with Estimated Time Cost
+1. Access hardware resources. (Azure, clone repo)
+2. Installation. (conda environment, demo runs) ⏱️ 10 mins
+3. Run *Real-world Parallelization* Evaluation (§8.1) ⏱️ 24 hours
+4. Run *Scalability* Evaluation (§8.2) ⏱️ 6 hours
+5. Run *Bug Reproduction* Evaluation (§8.3) ⏱️ 20 mins
 
----------
+> ⚠️ **Note:** Due to refined design, optimizations and code refactoring, the current evaluation results are improved thus different from statistics in the submitted paper. Please refer to each section for expected outputs. 
 
-## Installation
+### 💻 Hardware Requirements
+To fully reproduce results, we recommend to run VERDICT artifact evaluation on a machine with at least 32 CPU (virtual) cores and 1TB memory. For SOSP'25 AE reviewers, please contact authors for Azure virtual machine instances.
 
-### Prerequisite
-
-Install the following packages before the installation of nnScaler:
-
-    Python >= 3.9, < 3.11 (3.10 is recommanded)
-
-    PyTorch >= 2.0, < 2.4 (2.2.0 is recommanded)
-
-### Install nnScaler from source
-Execute below commands in nnScaler directory: 
-
-    pip install -r requirements.txt
-    pip install -e .
-
-Besides, to avoid *cppimport* error, it also needs to include nnScaler directory in environment variable **PYTHONPATH**:
-
-    export NNSCALER_HOME=$(pwd)
-    export PYTHONPATH=${NNSCALER_HOME}:$PYTHONPATH
-
-[//]: # (Reference output: Successfully installed MarkupSafe-2.1.5 contourpy-1.3.0 cppimport-22.8.2 cycler-0.12.1 dill-0.3.8 filelock-3.15.4 fonttools-4.53.1 fsspec-2024.6.1 importlib-resources-6.4.4 jinja2-3.1.4 kiwisolver-1.4.5 mako-1.3.5 matplotlib-3.9.2 more-itertools-10.4.0 mpmath-1.3.0 networkx-3.3 numpy-2.1.0 nvidia-cublas-cu12-12.1.3.1 nvidia-cuda-cupti-cu12-12.1.105 nvidia-cuda-nvrtc-cu12-12.1.105 nvidia-cuda-runtime-cu12-12.1.105 nvidia-cudnn-cu12-9.1.0.70 nvidia-cufft-cu12-11.0.2.54 nvidia-curand-cu12-10.3.2.106 nvidia-cusolver-cu12-11.4.5.107 nvidia-cusparse-cu12-12.1.0.106 nvidia-nccl-cu12-2.20.5 nvidia-nvjitlink-cu12-12.6.68 nvidia-nvtx-cu12-12.1.105 packaging-24.1 pillow-10.4.0 psutil-6.0.0 pulp-2.9.0 pybind11-2.13.5 pyparsing-3.1.4 python-dateutil-2.9.0.post0 pyyaml-6.0.2 six-1.16.0 sympy-1.13.2 torch-2.4.0 tqdm-4.66.5 triton-3.0.0 typing-extensions-4.12.2)
+### 🎭 Recommended Evaluation Strategy
+- Evaluation of §8.1 and §8.2 are about VERDICT's performance, thus having to be run on capable machines, such as Azure VM instances. These experiments are estimated to take total 30 hours and do not require much reviewer engagement except for inspection of final dumped statistics, due to acknowledged correctness of input models.
+- Evaluation of §8.3 bug reproduction can be more interesting. VERDICT will verify 14 buggy parallelized models, detect their violations, and print out information helpful for bug diagnosis. These experiments are lightweight, and *can be run on personal devices*.
 
 
-## Example Llama-3
 
-### Prerequisite for Llama-3
 
-Install packages required to run Llama-3. Besides, a certain version of CUDA library is needed during flash-attn installation. For example, [CUDA V11.8](https://developer.nvidia.com/cuda-11-8-0-download-archive) is needed if using PyTorch 2.20. 
-
-    python -m pip install transformers==4.40.0 flash-attn==2.5.5 tensorboard
-
-### Model Access
-
-Obtain access of Llama-3 model from [HuggingFace](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct), where you will receive an access token which should be set as an environment variable: 
-
-    export HF_TOKEN=<HUGGINGFACE_ACCESS_TOKEN>
-
-### Code Changes for Parallelization
-
-You can find all the example code at `examples/llama`. As shown below, a user needs to:
-* Wrap the Model: Include loss computation and other necessary components.
-* Configure Components: Set up the model, optimizer, and dataloader.
-* Initialize and Start: In the main function, create an nnScaler trainer with the above configurations and start the training process.
-
-```python
-# import the nnScaler build-in parallelization-capable trainer
-from nnscaler.cli.trainer import Trainer
-
-# wrap model to include loss computing, etc.
-class WrapperModel(torch.nn.Module):
-    def __init__(self, model_id):
-        super().__init__()
-        self.model = AutoModelForCausalLM.from_pretrained(model_id, attn_implementation='flash_attention_2')
-
-    def forward(self, samples):
-        outputs = self.model.model(
-            input_ids=samples['net_input']['src_tokens'],
-            use_cache=False,
-            return_dict=False,
-        )
-        loss = torch.sum(chunk_linear_cross_entropy(outputs[0], self.model.lm_head.weight, samples['target'], ...))
-        return loss, samples['ntokens'], samples['nsentences']
-
-def main(args):
-    # data config
-    dataloader_config = ...
+## 🚀 Installation
+1. Create [conda](https://www.anaconda.com/download/success) environment.
+    ```
+    cd Verdict
+    conda env create -f conda-environment.yml
+    conda activate verdict
+    ```
+2. Run demo verification for 2-layer llama3 model parallelization.
+    ```
+    mkdir data/logs;
+    bash scripts/demo_llama3.sh 
+    ```
+    The `scripts/demo_llama3.sh` essentially runs the following command:
+    ```
+    python main.py \
+        --sm gen_model/mgeners/llama3_default_dp1_pp1_tp1_nm1_gbs32_ly32_h32_hi128_sq8192.pkl \
+        --pm gen_model/mgeners/llama3_default_dp2_pp2_tp2_nm2_gbs32_ly32_h32_hi128_sq8192.pkl \
+        --seed 0 \
+        --time  \
+        --max_ser_proc 30 \
+        --max_vrf_proc 30 \
+        --loglevel INFO \
+        --no_cache_nodes \
+        --no_cache_stages \
+        |& tee -a data/logs/llama3_default_dp2_pp2_tp2_nm2_gbs32_ly32_h32_hi128_sq8192.txt
+    ```
+    > Command interpretation: `main.py` is the entry of Verdict. `--sm` and `--pm` sepcify the paths of single-device model's and parallelized model's execution plan respectively. `--seed` sets z3 random seed. `--time` activates timer. `--max_ser_proc` and `--max_vrf_proc` set the multiprocessing pool size for building SSA DAGs, and parallel stage execution respectively. `--loglevel` sets logger level. `--no_cache_nodes` and `--no_cache_stages` ignore any cached data and run verification from scratch. `|& tee -a ...` writes logs to a file for inspection convenience.
     
-    # model config
-    model_config = ModelConfig(
-        type=WrapperModel,
-        args={
-            'model_id': args.model_id,
-        },
-    )
-    # optimizer hyperparameters 
-    optimizer_config = OptimizerConfig(
-        type=MixedPrecisionAdamW,
-        args={'lr': 2e-5, 'betas': (0.9, 0.95), 'weight_decay': 0.0, 'fused': True},
-        #...
-    )
-    #...
-    
-    # setup trainer with configs of dataloader/model/optimizer, etc. 
-    trainer = Trainer(train_args=TrainerArgs(
-            #...
-            model=model_config,
-            optimizer=optimizer_config,
-            dataloader=dataloader_config,
-            #...
-        ))
-    trainer.run()
+    **👀 Expected Output:** The program should print the following message or similar at the bottom of the output. Indicating successful execution of all stages, as well as the verified end-to-end equivalence.
+    ```
+    parallel verifying stages: 100%|██████████| 3909/3909 [00:05<00:00, 676.09it/s] 
+    PID: ... - ✅ SUCCESS 
+    Stats(success=True, ... )
+    ```
+    > A failed run would print `PID: ... - ❌ FAIL`.
+3. Once the demo runs successfully, we can move on to reproduce evaluations.
+> ⚠️ **Note:** In all following evaluations, we directly provide execution plans (*.pkl files) of models in stead of building graphs from model code due to time and GPU constraints, as nnScaler parallelizes models through expensive profiling and graph tracing.
 
+## 🚀 Evaluate *Real-World Parallelization*
+
+### 🎯 Goal
+(Paper §8.1) To demonstrate VERDICT practicality and time cost, we experiment on verifying execution plans for LLaMA3 (8B/70B/405B) and DeepSeek-V3 (16B/236B/671B) models under various real-world parallelization setup. There are total 6 runs. Parallelizaion scheme listed below.
+
+### ⏳ Estimated Completion Time
+As these plans corresponds to real-world large scale training, involving up to 8192 GPUs, their verification time can be costly. Estimated time is listed below. (L1-L3 and D1-D2 will use 30 workers for stage-parallel execution. D3 will use 10 workers due to memory constraints.)
+
+### 📋 Table of Experiments
+| Exp. ID | Model       | DP  | TP  | PP  | NM  | Est. Time |
+| ------- | ----------- | --- | --- | --- | --- | --------- |
+| L1      | llama3-8B   | 512 | 1   | 1   | 1   | 5 mins    |
+| L2      | llama3-70B  | 16  | 8   | 4   | 32  | 2.5 hours |
+| L3      | llama3-405B | 64  | 8   | 16  | 16  | 8 hours   |
+| D1      | DSV3-16B    | 16  | 4   | 2   | 16  | 30 mins   |
+| D2      | DSV3-236B   | 16  | 8   | 4   | 16  | 2.5 hours |
+| D3      | DSV3-671B   | 32  | 8   | 8   | 16  | 9 hours   |
+
+
+
+### 🛠 How to Run
+> ⚠️ Note: As these experiments take hours to run, we recommend using `screen` or `tmux` in case of ssh disconnection.
+
+1. `cd` to working directory (relative path w.r.t repo root): `nnscaler/Verdict`
+2. Clean up stale stats.
+    ```
+    rm data/stats/stats.csv
+    ```
+3. Run each experiment.
+   ```
+   bash scripts/run_large_llama3_8B.sh;
+   bash scripts/run_large_llama3_70B.sh;
+   bash scripts/run_large_llama3_405B.sh;
+   bash scripts/run_large_moe_16B.sh;
+   bash scripts/run_large_moe_236B.sh;
+   bash scripts/run_large_moe_671B.sh;
+   ```
+    Each script contains a command similar to the demo's in installation guide. Feel free to take a look.
+
+
+### 👀 Expected Output
+
+Each experiment is expected to print the following message or similar at the end of their respective log, indicating success of verification. The `Stats` will contain the time of execution, which will also be dumped to `data/stats/stats.csv`.
 ```
-
-### Run the example Llama-3 training
-
-Then we can start the example, and all the parallelization tasks will be finished by nnScaler automatically. 
-
-```shell
-cd examples/llama
-
-# prepare training data:
-python bookcorpus.py --data_path_or_name bookcorpus/bookcorpus --tokenizer_path_or_name meta-llama/Meta-Llama-3-8B-Instruct --save_path ./bookcorpus_llama3_4K --sequence_length 4096
-
-# build the mini model
-python create_mini_model.py --model_id meta-llama/Meta-Llama-3-8B-Instruct --output_id ./llama3_mini
-
-#compile and run using data parallelism + zero1
-torchrun --nproc_per_node=2 train.py --plan_ngpus 1 --runtime_ngpus 2 --name llama3_debug --model_id ./llama3_mini --dataset_path ./bookcorpus_llama3_4K
-
+PID: ... - ✅ SUCCESS 
+Stats(success=True, ... )
 ```
+To check the evaluation results conveniently, take a look at the column `t_total` in `data/stats/stats.csv` and compare with either estimated time in the Table of Experiments above, or our updated evaluation results (to be appear in camera-ready) in `data/4_stats_large_final.csv`. The measured time should be close. Compared with Table 3 in paper §8.1, the improved verification time takes only the half.
 
-## Example nanoGPT
+## 🚀 Evaluate *Scalability*
 
-We also provide an example to demonstrate how to parallelize a model through a [PyTorch Lightning](https://lightning.ai/docs/pytorch/stable/)-compatible interface in nnScaler.
+### 🎯 Goal
+(Paper §8.2) This evaluation measures scalability trends of VERDICT. According to the design of VERDICT, the time complexity should be invariant with respect to actual tensor shapes due to shape reduction, and sub-/linear to parallelization.
 
-* Find the [nanoGPT](https://github.com/karpathy/nanoGPT) example in nnScaler repo:
-```shell
-    cd examples/nanogpt
+### ⏳ Estimated Completion Time
+There will be 40 runs, taking 6 hours in total.
+
+### 🛠 How to Run
+> ⚠️ Note: As these experiments take hours to run, we recommend using `screen` or `tmux` in case of ssh disconnection.
+
+1. `cd` to working directory (relative path w.r.t repo root): `nnscaler/Verdict`
+2. Clean up stale stats. 
+    ```
+    rm data/stats/stats.csv
+    ```
+    > ⚠️ Important. As we will later make plot graph based on this file, requiring the csv only contains results from this evaluation.
+3. Run experiments.
+   ```
+   bash scripts/run_trends_full_8B.sh
+   ```
+4. Plot time complexity trends.
+   ```
+   cd ../ae;
+   python draw.py
+   ```
+### 👀 Expected Output
+Inspect output plots in `nnscaler/ae/figs`. The trends should ressemble the following plots. The complexity trends are also expected to be consistent with Figure 6 in paper §8.2, though the breakdown time components and absolute time may differ.
+![DesignOverview](docs/assets/new_trends.png)
+
+
+## 🚀 Evaluate *Bug Reproduction*
+
+### 🎯 Goal
+(Paper §8.3) This evaluation demonstrates VERDICT can detect real-world parallelization bugs. We will use VERDICT to verify 14 buggy execution plans crafted from real-world buggy models. We will see how VERDICT detect them, and output useful information for diagnosis. All execution plans are crafted on the base model of llama3-8B with 2-way DP, 2-way TP, 2-way PP and 2 microbatches.
+
+### ⏳ Estimated Completion Time
+Total execution time of 14 cases should finish within 3 minumtes. Manual examination of results takes around 15 minutes.
+
+### 📋 Table of Bugs
+| Bug ID | Type            | Description                                                         |
+| ------ | --------------- | ------------------------------------------------------------------- |
+| 1      | communication   | Missing `allreduce` operation without breaking dataflow             |
+| 2      | communication   | Missing `allreduce` operation with broken dataflow                  |
+| 3      | communication   | `allreduce` primitive replaced by `allgather`                       |
+| 4      | communication   | `allgather` primitive replaced by `allreduce`                       |
+| 5      | communication   | Missing reduce operation in backward fused operator                 |
+| 6      | rank assignment | Wrong rank assignment of tensor movement between pipeline stages    |
+| 7      | computation     | Single-rank mutant on fw ADD op, adding inconsistent constants      |
+| 8      | computation     | Single-rank mutant on fw POW op, powering inconsistent constants    |
+| 9      | computation     | Multi-rank mutant on fw ADD op, adding inconsistent constants       |
+| 10     | computation     | Single-rank mutant on bw MULTIREF op, consuming wrong input tensors |
+| 11     | computation     | Single-rank mutant on bw APPLY_ROTARY_EMB, reversing output tensors |
+| 12     | scaling         | Inconsistent scaling of tensors                                     |
+| 13     | scaling         | Inconsistent scaling of tensors                                     |
+| 14     | scheduling      | Lauching reducer before the last operator of the second microbatch  |
+
+
+### 🛠 How to Run
+1. `cd` to working directory (relative path w.r.t repo root): `nnscaler/Verdict`
+2. Run experiments. Also log outputs to `nnscaler/ae/br*.log` for examination convenience.
+   ```
+   bash scripts/run_br.sh
+   ```
+
+### 👀 Expected Output
+Inspect `nnscaler/ae/br[bug_id].log`. The following document guides you how to interpret the error logs case by case. We use `Gs` and `Gp` to refer to single-device graph and multi-device graph; `Ts` and `Tp` for their tensors.
+
+#### 🔖 Bug 1
+The log should contain the following lines.
 ```
-* Install nanoGPT's dependencies:
-```shell
-    pip install -r requirements.txt
+❌ ERROR: 🚨 Stage 53 solver result: sat
+
+Node(wtype='p', rank=4, mb=1, cid=5991, irname='IdentityAllreducePrim')
+...
+
+🔗 OUTPUT LINEAGES
+👉 Tensor(wtype='s', rank=0, mb=0, tid=7000, v=1)
+    [[[-2.]]
+    [[ 0.]]
+    [[ 0.]]
+    [[ 0.]]]
+🍕 ((0, 8), (0, 8192), (0, 128)) [[[-2.]]]
+    =  ⨁ Tensor(wtype='p', rank=0, mb=0, tid=7000, v=1) [[[-1.]]]
+    🚨 ⬆️
+    =  ⨁ Tensor(wtype='p', rank=1, mb=0, tid=7000, v=1) [[[-1.]]]
+    🚨 ⬆️
+🍕 ((8, 16), (0, 8192), (0, 128)) [[[0.]]]
+...
+
+RuntimeError: Stage 53 equivalence fails.
+...
 ```
-* Prepare dataset:
-```shell
-    python nanoGPT/data/shakespeare_char/prepare.py
+The log indicates that it is satisfiable to find a solution of non-equivalence between Gs and Gp at stage 53, followed by verbose nodes list `Node(wtype='p', ...)` in this stage. 
+
+It then provide concrete values for the lineaged tensors. For this example, it shows the output tensor Ts `👉 Tensor(wtype='s', rank=0, mb=0, tid=7000, v=1)` is detected inconsistent with its Tp's. Its subtensor sliced by slc:`🍕 ((0, 8), (0, 8192), (0, 128))` (reprensented in full shape) has value `[[[-2.]]]`, and as specified by lineage, is expected to be equal to both Tp1: `Tensor(wtype='p', rank=0, mb=0, tid=7000, v=1)` and Tp2: `Tensor(wtype='p', rank=1, mb=0, tid=7000, v=1)`; however, both Tp1 and Tp2 have value `[[[-1.]]]`.
+
+Recall that Bug 1 is missing an allreduce operator, which aligns with the concrete values. The output lineage expects Ts[slc] == Tp1 == Tp2 (the state after allreduce), yet the buggy model produces Ts[slc] == Tp1 + Tp2 (the state before allreduce). 
+
+#### 🔖 Bug 2
+The log should contain the following lines.
 ```
-* Test with Single GPU
+❌ ERROR: Target Tp is not reachable from any source Tp bound to Ts's lineage. 
+target_Tp: Tensor(wtype='p', rank=0, mb=0, tid=7000, v=0),
+Ts: Tensor(wtype='s', rank=0, mb=0, tid=7000, v=1),
+...
+```
+The log indicates a runtime error occured when breaking down the full Gs and Gp into stages. The target Tp `Tensor(wtype='p', rank=0, mb=0, tid=7000, v=0)` is serving as an output tensor of the new stage (refer to the following illustration). A stage is ideally determined by finding Ts and Tp's (which are tensors in already verified lineages), and extract  the nodes between Tp's and target Tp (as well as nodes between Ts and target Ts). VERDICT will sanity check that target Tp is reachable from *any* of tensor in candidate Tp's. The error log shows that this reachability is not met, and graph slicing is aborted.
 
-Now you can run ``train_nnscaler.py`` with `torchrun <https://pytorch.org/docs/stable/elastic/run.html>`:
+![DesignOverview](docs/assets/slc.png)
+Recall that in Bug 2, the missing operator breaks the dataflow. Such bugs are early detected before executing symbolic verification.
 
-    torchrun --nproc_per_node=1 train_nnscaler.py nanoGPT/config/train_shakespeare_char.py
+#### 🔖 Bug 3
+The log should contain the following lines.
+```
+❌ ERROR: Tensor shape mismatch. 
+Expect: [np.int64(1), np.int64(1), np.int64(1)], Result: [2, 1, 1], 
+Node: Node(wtype='p', rank=0, mb=0, cid=5991, irname='AllGatherPrim')
+``` 
+The log shows that the output tensor of the node should have shape `[1,1,1]`, but we get `[2,1,1]`.
 
-This will train a baby GPT model on a single GPU.
-It will take several minutes and the best validation loss will be around 1.47.
+Recall that the cause of Bug 3 is `allreduce` replaced by `allgather`, causing a shape mismatch.
 
-* Test with Multi-GPU
+#### 🔖 Bug 4
+The log should contain the following lines.
+```
+❌ ERROR: Stage worker raised an exception. Stage: 871, ...
+File "/mnt/nnscaler/Verdict/verdict/stage/rxshape.py", line 102, in minimize
+    assert sat == z3.sat, sat
+AssertionError: unsat
+``` 
+The assertion error is raise by the process of shape reduction of stage 871. The solver reports the shape optimization problem is unsatisfiable.
 
-By default, nnScaler parallelizes a model over GPUs with _data parallelism_.
-If you have 4 GPUs on one node:
+Recall that the cause of Bug 4 is `allgather` replaced by `allreduce`, the output shape inconsistency is reflected by the solver.
 
-    torchrun --nproc_per_node=4 train_nnscaler.py nanoGPT/config/train_shakespeare_char.py
+#### 🔖 Bug 5
+The log should contain the following lines.
+```
+❌ ERROR: 🚨 Stage 987 solver result: sat
 
-Or if you have multiple nodes, for example 2 nodes with 4 GPUs each:
+Node(wtype='s', rank=0, mb=0, cid=3167, irname='multiref')
+...
+Node(wtype='p', rank=6, mb=1, cid=12736, irname='AllReduceIdentityPrim')
+...
+Node(wtype='p', rank=6, mb=1, cid=1, irname='local_grad_accumulation')
+...
+Node(wtype='p', rank=6, mb=1, cid=11700, irname='multiref')
+...
 
-    # on each node
-    torchrun --nnodes=2 --nproc_per_node=4 --rdzv-id=NNSCALER_NANOGPT --rdzv-backend=c10d --rdzv-endpoint=<IP> \
-        train_nnscaler.py nanoGPT/config/train_shakespeare_char.py
+🔗 OUTPUT LINEAGES
+👉 Tensor(wtype='s', rank=0, mb=0, tid=12441, v=1)
+    [[[2.]]
+    [[3.]]
+    [[4.]]
+    [[5.]]]
+🍕 ((0, 8), (0, 8192), (0, 128)) [[[2.]]]
+    =  ⨁ Tensor(wtype='p', rank=2, mb=0, tid=18484, v=1) [[[6.]]]
+    🚨 ⬆️
+    =  ⨁ Tensor(wtype='p', rank=3, mb=0, tid=18496, v=1) [[[6.]]]
+    🚨 ⬆️
+...
 
-NOTE: The local batch size is fixed by default, so using more workers will result in a larger global batch size.
+👉 Tensor(wtype='s', rank=0, mb=0, tid=12445, v=1)
+    [[[2.]]
+    [[3.]]
+    [[4.]]
+    [[5.]]]
+🍕 ((0, 8), (0, 8192), (0, 128)) [[[2.]]]
+    =  ⨁ Tensor(wtype='p', rank=2, mb=0, tid=18488, v=1) [[[6.]]]
+    🚨 ⬆️
+    =  ⨁ Tensor(wtype='p', rank=3, mb=0, tid=18500, v=1) [[[6.]]]
+    🚨 ⬆️
+...
 
-💡 For advanced usages, please stay tuned for our future release.
+RuntimeError: Stage 987 equivalence fails.
+...
+``` 
+The way of interpretation is similar to Bug 1.
 
-# Reference
+Recall that Bug 5 is caused by the fused communication operator in the backward pass misses an `allreduce` operation, being replaced by `identity` operation. As this stage involves multiple injected nodes (bw multiref, AllreduceIdentityPrim, and gradient accumulation across microbatches), the root cause (missing `allreduce`) cannot be easily eyeballed from concrete values, and requires manual diagnosis.
 
----------
-You may find the Artifact Evaluation for OSDI'24 with the guidance [here](https://github.com/microsoft/nnscaler/tree/osdi24ae). 
-Please cite nnScaler in your publications if it helps your research:
+#### 🔖 Bug 6
+The log should contain the following lines.
+```
+❌ ERROR: Target Tp is not reachable from any source Tp bound to Ts's lineage.
+target_Tp: Tensor(wtype='p', rank=2, mb=0, tid=10953, v=1),
+Ts: Tensor(wtype='s', rank=0, mb=0, tid=7841, v=1),
+...
+``` 
+The way of interpretation is similar to Bug 2.
 
-    @inproceedings{lin2024nnscaler,
-    title = {nnScaler: Constraint-Guided Parallelization Plan Generation for Deep Learning Training},
-    author={Lin, Zhiqi and Miao, Youshan and Zhang, Quanlu and Yang, Fan and Zhu, Yi and Li, Cheng and Maleki, Saeed and Cao, Xu and Shang, Ning and Yang, Yilei and Xu, Weijiang and Yang, Mao and Zhang, Lintao and Zhou, Lidong},
-    booktitle={18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24)},
-    pages={347--363},
-    year={2024}
-    }
+The cause of Bug 6 is the wrong assignment of MovePrim's src and dst ranks, which moves tensors across GPUs belonging to different pipeline parallelism stages. The bug causes broken dependency between predecessor and successor lineages.
 
-## Contributing
+#### 🔖 Bug 7
+The log should contain the following lines.
+```
+❌ ERROR: 🚨 Stage 8 solver result: sat
 
-This project welcomes contributions and suggestions. Most contributions require you to agree to a Contributor License Agreement (CLA) declaring that you have the right to, and actually do, grant us the rights to use your contribution. For details, visit https://cla.opensource.microsoft.com.
+Node(wtype='s', rank=0, mb=0, cid=6, irname='add')
+...
 
-When you submit a pull request, a CLA bot will automatically determine whether you need to provide a CLA and decorate the PR appropriately (e.g., status check, comment). Simply follow the instructions provided by the bot. You will only need to do this once across all repos using our CLA.
+🔗 OUTPUT LINEAGES
+👉 Tensor(wtype='s', rank=0, mb=0, tid=6949, v=1)
+    [[[2.00001]]
+    [[3.00001]]
+    [[4.00001]]
+    [[5.00001]]]
+🍕 ((0, 8), (0, 8192), (0, 1)) [[[2.00001]]]
+    =  ⨁ Tensor(wtype='p', rank=0, mb=0, tid=6949, v=1) [[[4.]]]
+    🚨 ⬆️
+    =  ⨁ Tensor(wtype='p', rank=1, mb=0, tid=6949, v=1) [[[2.00001]]]
+🍕 ((8, 16), (0, 8192), (0, 1)) [[[3.00001]]]
+    =  ⨁ Tensor(wtype='p', rank=0, mb=1, tid=6949, v=1) [[[5.]]]
+    🚨 ⬆️
+    =  ⨁ Tensor(wtype='p', rank=1, mb=1, tid=6949, v=1) [[[3.00001]]]
+...
 
-This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/). For more information, see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
+RuntimeError: Stage 8 equivalence fails.
+...
+``` 
+The log shows that the `add` operator on rank 0 produces inconsistent results. For example, flagged by `🚨`, the Tp with tid=6949 from microbatche mb=0 has concrete value `[[[4.]]]`, while `[[[2.00001]]]` is expected. The bug is cause by the rank 0 `add` operator being mutated on its constant epsilon.
 
-## Trademarks
+#### 🔖 Bug 8
+The log should contain the following lines.
+```
+❌ ERROR: 🚨 Stage 40 solver result: sat
 
-This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft trademarks or logos is subject to and must follow [Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general). Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship. Any use of third-party trademarks or logos is subject to those third-party's policies.
+Node(wtype='s', rank=0, mb=0, cid=36, irname='pow')
+...
 
-## Contact
+🔗 OUTPUT LINEAGES
+👉 Tensor(wtype='s', rank=0, mb=0, tid=6985, v=1)
+    [[[ 1.]]
+    [[ 9.]]
+    [[16.]]
+    [[25.]]]
+🍕 ((0, 8), (0, 8192), (0, 128)) [[[1.]]]
+    =  ⨁ Tensor(wtype='p', rank=0, mb=0, tid=6985, v=1) [[[-1.]]]
+    🚨 ⬆️
+    =  ⨁ Tensor(wtype='p', rank=1, mb=0, tid=6985, v=1) [[[1.]]]
+🍕 ((8, 16), (0, 8192), (0, 128)) [[[9.]]]
+    =  ⨁ Tensor(wtype='p', rank=0, mb=1, tid=6985, v=1) [[[3.]]]
+    🚨 ⬆️
+    =  ⨁ Tensor(wtype='p', rank=1, mb=1, tid=6985, v=1) [[[9.]]]
+...
 
-You may find our public repo from <https://github.com/microsoft/nnscaler> or microsoft internal repo <https://aka.ms/ms-nnscaler>.
-For any questions or inquiries, please contact us at [nnscaler@service.microsoft.com](mailto:nnscaler@service.microsoft.com).
+RuntimeError: Stage 40 equivalence fails.
+...
+``` 
+The interpretation and root cause is similar to Bug 7, except for the rank 0 `pow` operator is mutated, with `pow(x,2)` modified as `pow(x,1)`.
+
+#### 🔖 Bug 9
+The log should contain the following lines.
+```
+❌ ERROR: 🚨 Stage 840 solver result: sat
+
+Node(wtype='s', rank=0, mb=0, cid=742, irname='add')
+...
+
+👉 Tensor(wtype='s', rank=0, mb=0, tid=7845, v=1)
+    [[[2.00001]]
+    [[3.00001]]
+    [[4.00001]]
+    [[5.00001]]]
+🍕 ((0, 8), (0, 8192), (0, 1)) [[[2.00001]]]
+    =  ⨁ Tensor(wtype='p', rank=0, mb=0, tid=7845, v=1) [[[4.]]]
+    🚨 ⬆️
+    =  ⨁ Tensor(wtype='p', rank=1, mb=0, tid=7845, v=1) [[[4.]]]
+    🚨 ⬆️
+🍕 ((8, 16), (0, 8192), (0, 1)) [[[3.00001]]]
+    =  ⨁ Tensor(wtype='p', rank=0, mb=1, tid=7845, v=1) [[[5.]]]
+    🚨 ⬆️
+    =  ⨁ Tensor(wtype='p', rank=1, mb=1, tid=7845, v=1) [[[5.]]]
+    🚨 ⬆️
+...
+
+RuntimeError: Stage 840 equivalence fails.
+...
+``` 
+The interpretation and root cause is similar to Bug 7, yet multiple ranks are mutated. Compared with Bug 7 where only rank 0's output tensors are flagged by `🚨`, Bug 9 flags both rank 0's and rank 1's outputs as inconsistent.
+
+#### 🔖 Bug 10
+The log should contain the following lines.
+```
+❌ ERROR: 🚨 Stage 2499 solver result: sat
+
+Node(wtype='s', rank=0, mb=0, cid=3138, irname='BW.multiref')
+...
+
+🔗 OUTPUT LINEAGES
+👉 Tensor(wtype='s', rank=0, mb=0, tid=9855, v=1)
+    [[[18.]]
+    [[21.]]
+    [[24.]]
+    [[27.]]]
+🍕 ((0, 8), (0, 8192), (0, 128)) [[[18.]]]
+    =  ⨁ Tensor(wtype='p', rank=2, mb=0, tid=9855, v=1) [[[28.]]]
+    🚨 ⬆️
+    =  ⨁ Tensor(wtype='p', rank=3, mb=0, tid=9855, v=1) [[[18.]]]
+...
+
+RuntimeError: Stage 2499 equivalence fails.
+...
+``` 
+The backward propagation of the `multiref` operator consumes wrong gradients as input, causing wrong output gradient.
+
+#### 🔖 Bug 11
+The log should contain the following lines.
+```
+❌ ERROR: Target Tp is not reachable from any source Tp bound to Ts's lineage.
+target_Tp: Tensor(wtype='p', rank=2, mb=0, tid=9869, v=1),
+Ts: Tensor(wtype='s', rank=0, mb=0, tid=9868, v=1),
+...
+``` 
+The backward propagation of `apply_rotary_emb` produces two gradient tensors as outputs. However, they are mistakenly exchanged. The later stage that consumes these tensors as inputs detects the broken dependency and throws the error.
+
+#### 🔖 Bug 12
+The log should contain the following lines.
+```
+❌ ERROR: 🚨 Stage 130 solver result: sat
+
+Node(wtype='s', rank=0, mb=0, cid=116, irname='div')
+...
+
+🔗 OUTPUT LINEAGES
+👉 Tensor(wtype='s', rank=0, mb=0, tid=7084, v=1)
+    [[[[1. ]]]
+    [[[1.5]]]
+    [[[2. ]]]
+    [[[2.5]]]]
+🍕 ((0, 8), (0, 32), (0, 8192), (0, 8192)) [[[[1.]]]]
+    =  ⨁ Tensor(wtype='p', rank=0, mb=0, tid=7084, v=1) [[[[0.5]]]]
+    🚨 ⬆️
+    =  ⨁ Tensor(wtype='p', rank=1, mb=0, tid=7084, v=1) [[[[1.]]]]
+🍕 ((8, 16), (0, 32), (0, 8192), (0, 8192)) [[[[1.5]]]]
+...
+
+RuntimeError: Stage 130 equivalence fails.
+...
+``` 
+The log indicates inconsistent scaling of tensors on rank 0.
+
+#### 🔖 Bug 13
+The log should contain the following lines.
+```
+❌ ERROR: 🚨 Stage 130 solver result: sat
+
+Node(wtype='s', rank=0, mb=0, cid=116, irname='div')
+...
+
+🔗 OUTPUT LINEAGES
+
+👉 Tensor(wtype='s', rank=0, mb=0, tid=7084, v=1)
+    [[[[1. ]]]
+    [[[1.5]]]
+    [[[2. ]]]
+    [[[2.5]]]]
+🍕 ((0, 8), (0, 32), (0, 8192), (0, 8192)) [[[[1.]]]]
+    =  ⨁ Tensor(wtype='p', rank=0, mb=0, tid=7084, v=1) [[[[0.5]]]]
+    🚨 ⬆️
+    =  ⨁ Tensor(wtype='p', rank=1, mb=0, tid=7084, v=1) [[[[0.5]]]]
+    🚨 ⬆️
+🍕 ((8, 16), (0, 32), (0, 8192), (0, 8192)) [[[[1.5]]]]
+...
+
+RuntimeError: Stage 130 equivalence fails.
+...
+``` 
+The log indicates inconsistent scaling of tensors on both rank 0 and rank 1.
+
+#### 🔖 Bug 14
+The log should contain the following lines.
+```
+❌ ERROR: (0, 0, 0, 1, False) traceback: ...
+  File "/mnt/nnscaler/Verdict/nnscaler_backend/build_lineage.py", line 79, in _reorganize_Gp_nodes
+    target.extend(indexed_nodes[(dp, tp, pp, mb, False)])
+KeyError: (0, 0, 0, 1, False)
+``` 
+Bug 14 issues cross-dp gradient synchronization before the second microbatch completes all its operations, leaving alone the last backward operator. The log indicates that symmetry among microbatches is violated, and VERDICT is unable to align and infer lineages. 

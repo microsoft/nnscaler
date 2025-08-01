@@ -88,31 +88,23 @@ class AutoDistConfig:
         Whether to print verbose information.
     - re_profile (`bool`, *optional*, defaults to `False`):
         If set to `True`, the computation profiling results will be overridden.
+    - pipeline (`bool`, *optional*, defaults to `False`):
+        Whether to use pipeline parallelism or tensor parallelism.
     - pipeline_pivots (`str`, *optional*, defaults to `''`):
         The module names to pivot the pipeline, separated by `,`. For example, if `module1,module2`
         is specified, stages searched by pipeline solver only start from either `module1` or `module2`.
-    - pipeline_nstages(`int | Literal['auto']`, *optional*, defaults to `'auto'`):
-        When `pipeline_pivots` is not empty, this specify the number of stages in pipeline parallelism. `1` means not to use pipelines.
-    - pipeline_scheduler (`str`, *optional*, defaults to `'1f1b'`):
-        The pipeline scheduler to use. Currently only support `'1f1b'`.
-    - max_pipeline_bubble_ratio (`float`, *optional*, defaults to `0.2`):
+    - pipeline_nstages(`int`, *optional*, defaults to `1`):
+        The number of stages in pipeline parallelism. This option is only used when pipeline is True.
+    - max_pipeline_bubble_ratio (`float`, *optional*, defaults to `0.4`):
         The maximum bubble ratio in pipeline parallelism. The higher the ratio, the more bubbles will be allowed,
         the larger search space will be explored.
     - max_pipeline_unbalance_ratio (`float`, *optional*, defaults to `0.5`):
-        The maximum unbalance ratio in pipeline parallelism. This is a metric control min_pipeline_stage_time / max_pipeline_stage_time.
-        The higher the ratio, the more balance is required, the smaller search space will be explored.
+        The maximum unbalance ratio in pipeline parallelism. The higher the ratio, the more unbalance is required,
+        the smaller search space will be explored.
     - solver (`str`, *optional*, defaults to `'dp'`):
         The solver to use in spmd parallelism. Currently only support
         `'dp'` (dynamic programming)
         `'ilp'` (integer linear programming).
-    - parallel_profile (`bool`, *optional*, defaults to `True`):
-        Whether to profile on multiple device in parallel. If set to `False`, the profiling will be done in a
-        single device sequentially.
-    - transient_mem_coef (`float`, *optional*, defaults to `2`):
-        In autodist, a heuristic is used to estimate the transient memory size:
-        `transient_mem_size = opt_transient_coef * (1st_largest_infer_mem + 2nd_largest_infer_mem)`. This formula
-        is useful in many cases, but it may be too strict when some operators consume or generate a large tensor
-        (>= 4GB). In this case, you can set `transient_mem_coef` to a smaller value to relax the constraint.
     """
 
     def __init__(self,
@@ -140,14 +132,12 @@ class AutoDistConfig:
                  ignore_small_tensor_threshold=1,
                  verbose=False,
                  re_profile=False,
+                 pipeline=False,
                  pipeline_pivots='',
-                 pipeline_nstages='auto',
-                 pipeline_scheduler='1f1b',
-                 max_pipeline_bubble_ratio=0.2,
+                 pipeline_nstages=1,
+                 max_pipeline_bubble_ratio=0.4,
                  max_pipeline_unbalance_ratio=0.5,
-                 solver='dp',
-                 parallel_profile=True,
-                 transient_mem_coef=2,
+                 solver='ilp',
                  **kwargs):
         self.pc_path = partition_constraints_path
         self.profile_dir = profile_dir
@@ -163,6 +153,7 @@ class AutoDistConfig:
         self.opt_transient_coef = opt_transient_coef
         self.is_train = is_train
         self.mesh_desc = MeshDesc(mesh_row, mesh_col)
+        self.ngpus = self.mesh_desc.row * self.mesh_desc.col
         self.recompute_modules = recompute_modules
         # from GB to Byte
         self.memory_constraint = int(memory_constraint * 1024 * 1024 * 1024)
@@ -175,21 +166,12 @@ class AutoDistConfig:
         self.ignore_small_tensor_threshold = ignore_small_tensor_threshold
         self.verbose = verbose
         self.re_profile = re_profile
+        self.pipeline = pipeline
         self.pipeline_pivots = pipeline_pivots
         self.pipeline_nstages = pipeline_nstages
-        self.pipeline_scheduler = pipeline_scheduler
-        if self.pipeline_scheduler != '1f1b':
-            raise ValueError(f'pipeline scheduler {self.pipeline_scheduler} must be 1f1b')
         self.max_pipeline_bubble_ratio = max_pipeline_bubble_ratio
         self.max_pipeline_unbalance_ratio = max_pipeline_unbalance_ratio
         self.solver = solver
-        if self.pipeline_enabled and solver != 'dp':
-            _logger.warning(
-                f'pipeline is enabled, but solver is not dp, set solver to dp'
-            )
-            self.solver = 'dp'
-        self.parallel_profile = parallel_profile
-        self.transient_mem_coef = transient_mem_coef
 
         ignored_keys = list(kwargs.keys())
         if ignored_keys:
@@ -206,7 +188,7 @@ class AutoDistConfig:
             _logger.info(f'create folder: {self.profile_dir}')
             Path(self.profile_dir).mkdir(parents=True, exist_ok=True)
 
-        if self.pipeline_enabled:
+        if self.pipeline:
             if self.max_pipeline_bubble_ratio <= 0 or self.max_pipeline_bubble_ratio >= 1:
                 raise ValueError(
                     f'max pipeline bubble ratio {self.max_pipeline_bubble_ratio} must be in (0, 1)'
@@ -253,15 +235,3 @@ class AutoDistConfig:
 
     def __repr__(self):
         return f'{self.__class__.__name__} {self.__dict__}'
-
-    @property
-    def ngpus(self):
-        return self.mesh_desc.ngpus
-
-    @property
-    def pipeline_enabled(self) -> bool:
-        # whether to explore pipeline
-        # "auto" is considered as enabled although the exploration result might be not to use pipeline
-        if not self.pipeline_pivots:
-            return False
-        return self.pipeline_nstages == 'auto' or self.pipeline_nstages > 1

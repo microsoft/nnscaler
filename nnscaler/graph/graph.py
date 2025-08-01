@@ -76,7 +76,7 @@ class IRGraph(IRSegment):
         """
         if not all(isinstance(arg, IRObject) for arg in args):
             raise TypeError("Expected input arguments to be IRObject")
-
+        
         # align graph with input tensors
         iobjs: Tuple[IRObject, ...] = self.inputs()
         if len(args) != len(iobjs):
@@ -105,15 +105,10 @@ class IRGraph(IRSegment):
             # reset output
             self.replace_output(iobj, arg)
 
-        # set global graph, so @compile can access it.
-        # @compile needs a global graph to work
-        from nnscaler.program import Program, is_global_graph_enabled
-        if is_global_graph_enabled():
-            Program().add_nodes(self.nodes())
+        from nnscaler.program import Program
+        Program().add_nodes(self.nodes())
 
-        # return the output of the graph
-        # the return value simulates the output of the model `forward`
-        # e.g. If there is only one output, return the output tensor directly instead of a tuple
+        # return
         if len(self.outputs()) == 1:
             return self.output(0)
         else:
@@ -132,15 +127,10 @@ class IRGraph(IRSegment):
         For operators that doesn't need backward, all gradients of their
         input/output tensors will make to None (despite require_grad is True)
 
-        Note grad of input tensors of a IRPyFunc will be None and we will not
-        generate a backward node for IRPyFunc.
-
-        Args:
-            loss (IRSubTensor): the loss tensor, must be in the output
+        @param loss IRSubTensor: the loss tensor, must be in the output
             of current graph. The loss shape should be (1,)
 
-        Returns:
-            self (IRGraph): updated graph with backward operators
+        @return self IRGraph: None
         """
         # set mirror as self
         self._mirror = self
@@ -148,18 +138,6 @@ class IRGraph(IRSegment):
         if loss is not None:  # optimize graph with loss
             # set loss gradient
             loss.parent.to_loss()
-
-        # update input gradient
-        # Please note `infer_grad` will not set the grad of input tensors.
-        for t in IRGraph.get_objects_from_complex(self.inputs()):
-            if isinstance(t, IRSubTensor) and t.requires_grad:
-                t.grad = t.parent.grad.tosub()
-
-        # update output gradient
-        # Please note `infer_grad` will not set the grad of output tensors.
-        for t in IRGraph.get_objects_from_complex(self.outputs()):
-            if isinstance(t, IRSubTensor) and t.requires_grad:
-                t.grad = t.parent.grad.tosub()
 
         # infer gradient
         for ftensor in self.full_tensors():
@@ -196,30 +174,6 @@ class IRGraph(IRSegment):
         Returns:
             IRGraph: the graph with each tensor is IRSubTensor.
         """
-        # currently fx graph always has only one output
-        assert len(outputs) == 1, "Single output graph is expected"
-        if isinstance(outputs[0], tuple):
-            # fx graph will always wrap the graph output with a tuple of outputs
-            # case 1: the return value of graph looks like `return x, y, z`
-            #    here `outputs` will be `[(x,y,z)]`
-            #    we will remove the outer tuple to make graph outputs[0]/[1]/[2] as x/y/z respectively
-            # case 2: the return value of graph is a single value `return [[x]]`
-            #    here `outputs` will be `[[[x]]]`
-            #    just meet our requirement, no need to change
-            #    the graph outputs[0] is `[[x]]``
-            # case 3: the return value of graph is a single value `return x`
-            #    here `outputs` will be `[x]`
-            #    just meet our requirement, no need to change
-            #    the graph outputs[0] is `x`
-            # Please note that
-            # 1. we treat `return x, y, z` and `return tuple(x, y, z)` as the same
-            # 2. we treat `return (x,)` and `return x` as the same
-            # Case 2 can lead to problem because it changes the return of `module.forward`,
-            #    so we will raise error for this case for now.
-            outputs = outputs[0]
-            if isinstance(outputs, tuple) and len(outputs) == 1:
-                raise RuntimeError("Single tuple outputs (like `return (x,)`) is not supported")
-
         modifier = lambda t: t.tosub() if isinstance(t, IRFullTensor) else t
         # input / output
         inputs = [IRCell.modify_objects_of_complex(t, modifier) for t in inputs]
@@ -232,10 +186,7 @@ class IRGraph(IRSegment):
             for idx, ftensor in enumerate(node.outputs()):
                 subtensor = IRCell.modify_objects_of_complex(ftensor, modifier)
                 node.set_output(idx, subtensor)
-            for key in node.kwargs.keys():
-                subtensor = IRCell.modify_objects_of_complex(node.kwargs[key], modifier)
-                node.set_kwarg(key, subtensor)
-
+            node.kwargs.update(IRCell.modify_objects_of_complex(node.kwargs, modifier))
         graph = IRGraph(nodes, inputs, outputs, module_name)
 
         # check IRPyFunc
@@ -245,7 +196,7 @@ class IRGraph(IRSegment):
             if any(isinstance(t, IRSubTensor) and t.requires_grad for t in node.outputs()):
                 requires_grad_pyfunc.append(node)
         if len(requires_grad_pyfunc) > 0:
-            dscp = (f'nnScaler does not support to compute gradients for IRPyFunc.\n'
+            dscp = (f'Cube does not support to compute gradients for IRPyFunc.\n'
                     f'Following nodes require gradients, this may trigger error in backward:\n')
             for node in requires_grad_pyfunc:
                 dscp += f'\t{node.signature}, cid: {node.cid}\n'
@@ -278,30 +229,6 @@ class IRGraph(IRSegment):
             _logger.warning(dscp)
 
         return graph
-
-    def use_dataloader_input(self):
-        """
-        connect the graph with dataloader input.
-        """
-        # replace graph inputs with dataloader
-        # the IRObject representing the `dataloader` instance, which is only used by the
-        # IRDataOperation. Since we already know the output of the dataloader,
-        # we don't need to set the value for it.
-        ir_root_obj = IRObject(name='dataloader', value=None, is_constant=False)
-        data_op = IRDataOperation(ir_root_obj, self.inputs())
-        # add the data operation to the graph, which will use `next` to get data.
-        self.insert(data_op, 0)
-        self.reset_inputs(1)
-        self.set_input(0, ir_root_obj)
-
-    def no_backward(self):
-        """
-        Set all tensors with requires_grad=False to simulate no backward scenario (inference only).
-        """
-        if any(isinstance(node, IRBpOperation) for node in self.nodes()):
-            raise RuntimeError("Cannot set no_backward for a graph with backward operators")
-        for ftensor in self.full_tensors():
-            ftensor.requires_grad = False
 
     ##### Transformation Primitives #####
 
@@ -340,7 +267,12 @@ class IRGraph(IRSegment):
                     rtensor.grad = copy.copy(itensor.grad)
         # insert forward
         for fnode in fnodes:
-            self.copy_node_meta_info(node, fnode)
+            if isinstance(node, IRFwOperation):
+                fnode.recompute = node.recompute
+            if isinstance(node.comment, str):
+                fnode.comment = node.comment
+            fnode.module_stack = node.module_stack
+            fnode.device = node.device
         fsegment.replace(node, fnodes)
         # insert backward
         bsegment: IRSegment = fsegment.mirror
@@ -391,13 +323,17 @@ class IRGraph(IRSegment):
 
         # get partitioned sub-nodes
         fnodes = algo.instantiate(**config)
-        if not fnodes:
-            raise ValueError(f"Fail to partition node: {node}. Please check your config: {config}.")
+        assert fnodes is not None, f"Fail to partition node: {node} use algorithm and config: {config}"
 
         # insert forward node
         fsegment: IRSegment = self.segment(node)
         for fnode in fnodes:
-            self.copy_node_meta_info(node, fnode)
+            if isinstance(node, IRFwOperation):
+                fnode.recompute = node.recompute
+            if isinstance(node.comment, str):
+                fnode.comment = node.comment
+            fnode.module_stack = node.module_stack
+            fnode.device = node.device
         fsegment.replace(node, fnodes)
 
         if node.mirror is None: return fnodes
@@ -627,7 +563,7 @@ class IRGraph(IRSegment):
 
     def sequential(self, prev_nodes: Tuple[IRFwOperation], succ_nodes: Tuple[IRFwOperation]):
         """Schedule primitive: schedule prev_nodes right before the succ_nodes
-
+        
         The position of `succ_nodes` will keep unchanged in the sequence
         while the `prev_nodes` will be scheduled right before the `succ_nodes`.
         Corresponding backward operators will also be re-ordered.
@@ -662,7 +598,7 @@ class IRGraph(IRSegment):
         if len(set(prev_indices).intersection(set(succ_indices))) != 0:
             raise ValueError(f'find duplicated node in both succ_nodes and prev_nodes')
         # TODO: check dependency
-
+        
         seq = list(self._nodes)
         # cut out prev_nodes
         fstart, fend = min(prev_indices), max(prev_indices) + 1
@@ -702,7 +638,7 @@ class IRGraph(IRSegment):
 
         Note this function only checks direct data dependency that whether
         the outputs in `prev_node` and inputs in `post_node` have data dependency.
-
+        
         The function cannot detect data dependency in graph like:
             pre_node -> (some nodes) ... -> post_node
 
@@ -816,7 +752,7 @@ class IRGraph(IRSegment):
 
         Args:
             nodes Tuple[IRFwOperations]: the start forward node of each stage.
-
+        
         Returns:
             None
         """
@@ -866,7 +802,7 @@ class IRGraph(IRSegment):
             assert all(isinstance(node, IRFwOperation) for node in fnodes), \
                 f"find at least one nodes are not of IRFwOperation in the stage {sid}. They should be moved to the front"
             fstages.append(fnodes)
-
+        
         # grouping into segment
         for sid in range(len(fstages)):
             self.group(fstages[sid])
@@ -910,8 +846,8 @@ class IRGraph(IRSegment):
         Returns:
             None
         """
-        for node in nodes:
-            assert isinstance(node, IRFwOperation), f"Expected node to be IRFwOperation, but got {node}"
+        assert all(isinstance(node, IRFwOperation) for node in nodes), \
+            f"Find node is not IRFwOperation or IRDataOperation: {node}"
         assert all(node in self._nodes for node in nodes), \
             f"Exist node is not in graph nodes"
         starts = list(self._nodes.index(node) for node in nodes)
@@ -1182,7 +1118,7 @@ class IRGraph(IRSegment):
 
     def checksum(self, strict: bool = True) -> str:
         """Get the MD5 checksum of the graph.
-
+        
         This is used to guarantee the consistency of the graph between
         multiple nodes.
 
@@ -1190,7 +1126,7 @@ class IRGraph(IRSegment):
             The checksum considers the IDGenerator status. If the user modifies
             the IDGenerator status (i.e., creating tensors or nodes), it will
             have a different checksum.
-
+        
         Args:
             strict (bool): If True (by default), get the checksum of the whole graph status,
                 including tensor shapes, tensor ids and node ids;
@@ -1209,18 +1145,3 @@ class IRGraph(IRSegment):
             states = str((max_tensor_id, max_cell_id, self.extra_repr()))
             checksum = hashlib.md5(states.encode()).hexdigest()
         return checksum
-
-    @staticmethod
-    def copy_node_meta_info(src_node: Union[IRFwOperation, IRDataOperation], dest_node: Union[IRFwOperation, IRDataOperation]):
-        """
-        Copy meta information from src_node to dest_node.
-        Current copy fields: ['recompute', 'comment', 'op_context', 'module_stack', 'device']
-        """
-        if isinstance(src_node, IRFwOperation):
-            dest_node.recompute = src_node.recompute
-        if isinstance(src_node.comment, str):
-            dest_node.comment = src_node.comment
-        if src_node.op_context is not None:
-            dest_node.op_context = src_node.op_context
-        dest_node.module_stack = src_node.module_stack
-        dest_node.device = src_node.device

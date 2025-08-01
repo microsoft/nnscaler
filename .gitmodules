@@ -1,3 +1,0 @@
-[submodule "examples/nanogpt/nanoGPT"]
-	path = examples/nanogpt/nanoGPT
-	url = https://github.com/karpathy/nanoGPT.git

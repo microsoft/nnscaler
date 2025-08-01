@@ -1,8 +1,6 @@
 #  Copyright (c) Microsoft Corporation.
 #  Licensed under the MIT License.
 
-# CREDITS: This implementation is inspired by Fairseq https://github.com/facebookresearch/fairseq/blob/main/fairseq/utils.py
-
 from typing import List, Dict, Tuple, Optional, TYPE_CHECKING
 from dataclasses import dataclass
 from collections import defaultdict
@@ -142,9 +140,8 @@ def prepare_for_grad_clip(cube_model: 'CubeModule', is_zero: bool) -> Dict[int, 
     for seq, params_info in enumerate(params_info_for_gnorm):
         # params_info is ParamsInfo, which is defined in this file
         assert isinstance(params_info.ranks, tuple), f'ranks {params_info.ranks} should be tuple'
-        for param in params_info.params:
+        for name, param in zip(params_info.param_names, params_info.params):
             assert param.requires_grad
-        for name in params_info.param_names:
             tid = cube_model.tid_of_param_name(name)
             tid2ranks[tid] = params_info.ranks
             tid2info_list_seq[tid] = seq
@@ -244,9 +241,6 @@ def calcuate_gnorm(params: List[torch.Tensor], device: Optional[torch.device] = 
         if multi_tensor_l2norm_available:
             total_norm = _multi_tensor_total_norm(grads).to(device)
         else:
-            # torch.nn.utils.clip_grad_norm_ way to calculate the norm
-            # norms = torch._foreach_norm(grads, 2.0)
-            # total_norm = torch.linalg.vector_norm(torch.stack([norm.to(device) for norm in norms]), 2.0)
             total_norm = torch.norm(
                 torch.stack(
                     [torch.norm(g, p=2, dtype=torch.float32).to(device) for g in grads]

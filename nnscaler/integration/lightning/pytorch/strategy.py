@@ -1,12 +1,11 @@
 #  Copyright (c) Microsoft Corporation.
 #  Licensed under the MIT License.
 
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from functools import partial
 import logging
 from pathlib import Path
 import os
-import types
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -26,11 +25,9 @@ from typing import (
 
 import torch
 from torch import Tensor
-import torch.distributed
 from torch.nn import Module
 from torch.optim import Optimizer
 from typing_extensions import TypeGuard, override
-from torch.utils.data import DataLoader
 
 import lightning.pytorch as pl
 from lightning.pytorch.accelerators import Accelerator, CUDAAccelerator
@@ -61,8 +58,6 @@ from lightning.pytorch.utilities import GradClipAlgorithmType
 
 import nnscaler
 from nnscaler.integration.lightning.utils import inplace_optimizer_fn
-from nnscaler.runtime.device import DeviceGroup
-from nnscaler.utils import enforce_zero_num_worker
 from .precision import NnScalerPrecision
 
 
@@ -84,12 +79,6 @@ class NnScalerStrategy(ParallelStrategy):
     """
     strategy_name = "nnscaler"
     _registered_strategies: List[str] = []
-    _nnscaler_extra_state_key = 'nnscaler-extra-state'
-    _state_dict_type_key = 'state-dict-type'
-    _pl_module_name_key = 'pl_state_dict'  # save some extra pl module states
-    _pmodule_attr_name = 'nnscaler_pmodule'
-    _module_name_key = 'state_dict'
-    _opt_name_key = 'optimizer_states'
 
     def __init__(
         self,
@@ -125,6 +114,12 @@ class NnScalerStrategy(ParallelStrategy):
             raise ValueError("The `pas_policy` must be provided to the `NnScalerStrategy`.")
 
         self._state_dict_type = state_dict_type
+        self._nnscaler_extra_state_key = 'nnscaler-extra-state'
+        self._state_dict_type_key = 'state-dict-type'
+        self._pl_module_name_key = 'pl_state_dict'  # save some extra pl module states
+        self._pmodule_attr_name = 'nnscaler_pmodule'
+        self._module_name_key = 'state_dict'
+        self._opt_name_key = 'optimizer_states'
 
     @override
     def setup_environment(self) -> None:
@@ -204,38 +199,14 @@ class NnScalerStrategy(ParallelStrategy):
         if self.lightning_module.trainer.gradient_clip_algorithm == GradClipAlgorithmType.VALUE:
             raise MisconfigurationException("nnscaler does not support clipping gradients by value.")
 
-    def _get_dummy_forward_args(self, model: pl.LightningModule) -> Dict[str, Any]:
-        # two options to set the dummy forward arguments
-
-        if hasattr(model, 'dummy_forward_args'):
-            if not isinstance(model.dummy_forward_args, dict):
-                raise ValueError("The `dummy_forward_args` must be a dictionary with forward arguments names as keys.")
-            return model.dummy_forward_args
-
-        if hasattr(model, 'dummy_forward_args_fn'):
-            dummy_forward_args_fn = getattr(model, 'dummy_forward_args_fn')
-            if not callable(dummy_forward_args_fn):
-                raise ValueError("The `dummy_forward_args_fn` must be a callable function.")
-            trainer = model._trainer
-            data_source = trainer.fit_loop._data_source
-            assert data_source is not None, "The `data_source` must be defined in the trainer."
-            assert data_source.instance is not None, "The `instance` must be defined in the data source."
-            with enforce_zero_num_worker(DataLoader):
-                dataloader = data_source.dataloader()
-                assert dataloader.num_workers == 0, "The dataloader must have `num_workers=0`."
-                data = next(iter(dataloader))
-                dummy_forward_args = dummy_forward_args_fn(data)
-                if not isinstance(dummy_forward_args, dict):
-                    raise ValueError("The return value of `dummy_forward_args_fn` must be a dictionary with forward arguments names as keys.")
-                return dummy_forward_args
-
-        raise ValueError("The `dummy_forward_args` or `dummy_forward_args_fn` must be defined in the module.")
-
     @override
     def _setup_model(self, model: Module) -> Module:
         """Set up a module for inference (no optimizers).
         """
-        dummy_forward_args = self._get_dummy_forward_args(model)
+        if getattr(model, 'dummy_input', None) is None:
+            raise ValueError("The `dummy_input` must be defined as a property in the module.")
+        if not isinstance(model.dummy_input, dict):
+            raise ValueError("The `dummy_input` must be a dictionary with forward arguments names as keys.")
 
         old_training_flag = model.training
         if not old_training_flag:
@@ -243,7 +214,7 @@ class NnScalerStrategy(ParallelStrategy):
         model.train()  # always use the model in training mode
         pmodule = nnscaler.parallelize(
             model,
-            self.precision_plugin.convert_input(dummy_forward_args),
+            self.precision_plugin.convert_input(model.dummy_input),
             self.pas_policy,
             self.compute_config,
             gen_savedir=self.gen_savedir,
@@ -271,16 +242,6 @@ class NnScalerStrategy(ParallelStrategy):
         model.to(self.root_device)
         # rewrite model forward to parallelized model forward
         model.forward = pmodule.forward
-
-        # patch log function to add sync_dist_group
-        _, sync_group = self.compute_config.get_sync_group()
-
-        _old_log = model.log
-        def _new_log(self, *args, **kwargs) -> None:
-            kwargs['sync_dist_group'] = sync_group
-            _old_log(*args, **kwargs)
-        model.log = types.MethodType(_new_log, model)
-        model._old__log = _old_log
 
         return model
 
@@ -380,15 +341,13 @@ class NnScalerStrategy(ParallelStrategy):
     def barrier(self, name: Optional[str] = None) -> None:
         if not _distributed_is_initialized():
             return
-        assert torch.distributed.get_backend() == "nccl", "nnscaler only supports nccl backend"
-        # https://github.com/pytorch/pytorch/issues/53658
-        # It would be better to provide device_ids=[self.root_device.index]
-        torch.distributed.barrier(device_ids=[self.root_device.index])
+        if torch.distributed.get_backend() == "nccl":
+            torch.distributed.barrier(device_ids=[self.root_device.index])
+        else:
+            torch.distributed.barrier()
 
     @override
     def broadcast(self, obj: TBroadcast, src: int = 0) -> TBroadcast:
-        assert torch.distributed.get_backend() == "nccl", "nnscaler only supports nccl backend"
-
         if not _distributed_is_initialized():
             return obj
 
@@ -415,19 +374,8 @@ class NnScalerStrategy(ParallelStrategy):
             reduced value, except when the input was not a tensor the output remains is unchanged
 
         """
-        assert torch.distributed.get_backend() == "nccl", "nnscaler only supports nccl backend"
-
-        if not _distributed_is_initialized() or not isinstance(tensor, Tensor):
-            return tensor
-
-        op: Optional[ReduceOp]
-        if isinstance(reduce_op, str):
-            reduce_op = "avg" if reduce_op == "mean" else reduce_op
-            op = getattr(ReduceOp, reduce_op.upper())
-        else:
-            op = reduce_op
-
-        torch.distributed.all_reduce(tensor, op=op, group=group, async_op=False)
+        if isinstance(tensor, Tensor):
+            return _sync_ddp_if_available(tensor, group, reduce_op=reduce_op)
         return tensor
 
     @override
@@ -510,13 +458,7 @@ class NnScalerStrategy(ParallelStrategy):
         assert self.model is not None
         assert self.lightning_module is not None
 
-        if not path.exists():
-            raise FileNotFoundError(f"Checkpoint file {path} not found.")
-
-        if path.is_dir():
-            state_dict: dict = torch.load(path / f'{self.global_rank}.pt')
-        else:
-            state_dict: dict = torch.load(path)
+        state_dict: dict = torch.load(path / f'{self.global_rank}.pt')
         nnscaler_extra_state = state_dict.pop(self._nnscaler_extra_state_key)
         # load the extra states of the pl module
         self._lightning_module.load_state_dict(nnscaler_extra_state[self._pl_module_name_key], strict=False)
@@ -533,42 +475,14 @@ class NnScalerStrategy(ParallelStrategy):
         module = getattr(self._lightning_module, self._pmodule_attr_name)
         optimizer = self.optimizers[0] if self.optimizers else None
 
-        if state_dict_type == 'merged':
-            nnscaler.load_merged_state_dict(module, module_dict, optimizer, optimizer_dict)
-        elif state_dict_type == "deduped":
+        if state_dict_type == "deduped":
             nnscaler.load_deduped_state_dict(module, module_dict, optimizer, optimizer_dict)
-        else:  # sharded
-            nnscaler.load_sharded_state_dict(module, module_dict, optimizer, optimizer_dict)
+        else:
+            module.load_state_dict(module_dict)
+            if optimizer_dict is not None:
+                optimizer.load_state_dict(optimizer_dict)
 
         return state_dict
-
-    @classmethod
-    def merge_checkpoint(cls, checkpoint_files: List[str], output_file: str) -> None:
-        """
-        Merge the checkpoint files into a single checkpoint file.
-
-        Args:
-            checkpoint_files: The list of checkpoint files to merge.
-            output_file: The output file path.
-        """
-        state_dicts = [torch.load(f, map_location='cpu') for f in checkpoint_files]
-
-        module_state_dicts = [s[cls._module_name_key] for s in state_dicts]
-        opt_state_dicts = None
-        if cls._opt_name_key in state_dicts[0]:
-            opt_state_dicts = [s[cls._opt_name_key][0] for s in state_dicts]
-
-        merged_module_state_dict, merged_opt_state_dict = nnscaler.merge_state_dicts(
-            module_state_dicts,
-            opt_state_dicts
-        )
-        merged_state_dict = state_dicts[0]
-        # reuse all states from the first checkpoint except the module and optimizer states
-        merged_state_dict[cls._module_name_key] = merged_module_state_dict
-        merged_state_dict[cls._opt_name_key] = [merged_opt_state_dict]
-        merged_state_dict[cls._nnscaler_extra_state_key][cls._state_dict_type_key] = 'merged'
-
-        torch.save(merged_state_dict, output_file)
 
     @classmethod
     @override

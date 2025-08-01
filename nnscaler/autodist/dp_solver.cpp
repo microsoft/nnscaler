@@ -1,15 +1,53 @@
 // cppimport
-
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- */
-
-#include "dp_solver.h"
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
 namespace py = pybind11;
+
+#include <algorithm>
+#include <atomic>
+#include <cassert>
+#include <chrono>
+#include <condition_variable>
+#include <cstdio>
+#include <ctime>
+#include <exception>
+#include <fstream>
+#include <functional>
+#include <iostream>
+#include <iterator>
+#include <limits>
+#include <map>
+#include <mutex>
+#include <queue>
+#include <random>
+#include <thread>
+#include <tuple>
+#include <unordered_map>
+#include <vector>
+
+class ThreadPool {
+public:
+  ThreadPool(unsigned int n = std::thread::hardware_concurrency());
+
+  template <class F> void enqueue(F &&f);
+  void waitFinished();
+  ~ThreadPool();
+
+  unsigned int getProcessed() const { return processed; }
+
+private:
+  std::vector<std::thread> workers;
+  std::deque<std::function<void()>> tasks;
+  std::mutex queue_mutex;
+  std::condition_variable cv_task;
+  std::condition_variable cv_finished;
+  std::atomic_uint processed;
+  unsigned int busy;
+  bool stop;
+
+  void thread_proc();
+};
 
 ThreadPool::ThreadPool(unsigned int n) : busy(), processed(), stop() {
   for (unsigned int i = 0; i < n; ++i)
@@ -72,13 +110,13 @@ void ThreadPool::waitFinished() {
 const int MAX_CONCURRENCY = std::thread::hardware_concurrency();
 ThreadPool pool(MAX_CONCURRENCY);
 
-std::vector<std::pair<int, int>> split_work(int num, int base) {
+std::vector<std::pair<int, int>> split_work(int num) {
   std::vector<int> work;
-  if (num < base) {
+  if (num < MAX_CONCURRENCY) {
     work = std::vector<int>(num, 1);
   } else {
-    work = std::vector<int>(base, num / base);
-    for (int i = 0; i < num % base; ++i) {
+    work = std::vector<int>(MAX_CONCURRENCY, num / MAX_CONCURRENCY);
+    for (int i = 0; i < num % MAX_CONCURRENCY; ++i) {
       work[i] += 1;
     }
   }
@@ -91,10 +129,102 @@ std::vector<std::pair<int, int>> split_work(int num, int base) {
   return ret;
 }
 
+struct DPNode;
+
+struct Node {
+  int id;
+  int father_id;
+
+  int cut_len;
+  std::vector<Node *> cut_nodes;
+
+  int p_num;
+  std::vector<double> p_time;
+  std::vector<int> p_comp_mem;
+  std::vector<int> p_buf_mem;
+  std::vector<int> p_act_mem;
+  std::vector<int> p_opt_mem;
+  std::vector<int> p_father;
+
+  int producer_num;
+  std::vector<Node *> producers;
+  std::vector<std::vector<double>> comm_costs;
+
+  // assume the number of combinations is less than 2e9
+  int dp_num;
+  std::vector<DPNode *> dp_nodes;
+};
+
+struct DPNode {
+  Node *graph_node;
+  int pg_id;
+  std::vector<int> ir;
+  std::vector<std::pair<DPNode *, double>> in_edges;
+  // mem, time, activation_mem, optimzer_mem
+  std::vector<std::tuple<int, double, DPNode *, int, int>> state;
+};
+
 void resetNode(Node *node) {
   for (DPNode *dp_node : node->dp_nodes) {
     dp_node->state.clear();
   }
+}
+
+void printNode(Node *node) {
+  std::cout << "id: " << node->id << std::endl;
+  std::cout << "father_id: " << node->father_id << std::endl;
+  std::cout << "cut_len: " << node->cut_len << std::endl;
+  std::cout << "cut_nodes: ";
+  for (auto cut_node : node->cut_nodes) {
+    std::cout << cut_node->id << " ";
+  }
+  std::cout << std::endl;
+  std::cout << "p_num: " << node->p_num << std::endl;
+  std::cout << "p_time: ";
+  for (auto p_time : node->p_time) {
+    std::cout << p_time << " ";
+  }
+  std::cout << std::endl;
+  std::cout << "p_comp_mem: ";
+  for (auto p_comp_mem : node->p_comp_mem) {
+    std::cout << p_comp_mem << " ";
+  }
+  std::cout << std::endl;
+  std::cout << "p_buf_mem: ";
+  for (auto p_buf_mem : node->p_buf_mem) {
+    std::cout << p_buf_mem << " ";
+  }
+  std::cout << std::endl;
+  std::cout << "p_act_mem: ";
+  for (auto p_act_mem : node->p_act_mem) {
+    std::cout << p_act_mem << " ";
+  }
+  std::cout << std::endl;
+  std::cout << "p_opt_mem: ";
+  for (auto p_opt_mem : node->p_opt_mem) {
+    std::cout << p_opt_mem << " ";
+  }
+  std::cout << std::endl;
+  std::cout << "producer_num: " << node->producer_num << std::endl;
+  std::cout << "producers: ";
+  for (auto producer : node->producers) {
+    std::cout << producer->id << " ";
+  }
+  std::cout << std::endl;
+  std::cout << "p_father: ";
+  for (auto p_father : node->p_father) {
+    std::cout << p_father << " ";
+  }
+  std::cout << std::endl;
+  std::cout << "comm_costs: " << std::endl;
+  for (auto comm_cost : node->comm_costs) {
+    for (auto cost : comm_cost) {
+      std::cout << cost << " ";
+    }
+    std::cout << std::endl;
+  }
+  std::cout << "dp_num: " << node->dp_num << std::endl;
+  std::cout << std::endl;
 }
 
 // lazy decode
@@ -113,10 +243,21 @@ void decodePGID(DPNode *dp_node) {
   std::reverse(dp_node->ir.begin(), dp_node->ir.end());
 }
 
+struct SearchPlan {
+  double all_time;
+  double inner_time;
+  int memory;
+  std::vector<std::pair<int, int>> path;
+
+  bool operator<(const SearchPlan &other) const {
+    return all_time < other.all_time;
+  }
+};
+
 class DPSolver {
 public:
-  DPSolver(bool verbose, int mem_bound, int topk)
-      : verbose(verbose), mem_bound(mem_bound), topk(topk) {
+  DPSolver(bool verbose, int mode, int mem_bound, int mem_div, int topk) : verbose(verbose), mode(mode), mem_bound(mem_bound), mem_div(mem_div), topk(topk)
+                {
     queries.clear();
     id2node.clear();
     search_results.clear();
@@ -131,8 +272,7 @@ public:
   }
 
   void add_node(int id, int father_id, std::vector<int> cut_ids,
-                std::vector<int> producers, int p_num, bool is_recompute,
-                bool is_recompute_in, bool is_recompute_last) {
+                std::vector<int> producers, int p_num) {
     if (verbose) {
       std::cout << "id: " << id << ", father_id: " << father_id
                 << ", cut_ids: ";
@@ -149,13 +289,9 @@ public:
     id2node[id] = node;
     node->id = id;
     node->p_num = p_num;
-    node->is_recompute = is_recompute;
-    node->is_recompute_in = is_recompute_in;
-    node->is_recompute_last = is_recompute_last;
     node->p_father.resize(p_num);
     node->p_time.resize(p_num);
     node->p_comp_mem.resize(p_num);
-    node->p_in_mem.resize(p_num);
     node->p_buf_mem.resize(p_num);
     node->p_act_mem.resize(p_num);
     node->p_opt_mem.resize(p_num);
@@ -176,15 +312,14 @@ public:
   }
 
   void add_partition(int node_id, int p_idx, double p_time, int p_comp_mem,
-                     int p_in_mem, int p_buf_mem, int p_act_mem, int p_opt_mem,
-                     int p_father,
+                     int p_buf_mem, int p_act_mem, int p_opt_mem, int p_father,
                      std::vector<std::vector<double>> comm_costs) {
     if (verbose) {
       std::cout << "node_id: " << node_id << ", p_idx: " << p_idx
                 << ", p_time: " << p_time << ", p_comp_mem: " << p_comp_mem
-                << ", p_in_mem: " << p_in_mem << ", p_buf_mem: " << p_buf_mem
-                << ", p_act_mem: " << p_act_mem << ", p_opt_mem: " << p_opt_mem
-                << ", p_father: " << p_father << std::endl;
+                << ", p_buf_mem: " << p_buf_mem << ", p_act_mem: " << p_act_mem
+                << ", p_opt_mem: " << p_opt_mem << ", p_father: " << p_father
+                << std::endl;
       std::cout << "comm_costs: " << std::endl;
       for (std::size_t i = 0; i < comm_costs.size(); ++i) {
         for (std::size_t j = 0; j < comm_costs[i].size(); ++j) {
@@ -196,7 +331,6 @@ public:
     Node *node = id2node[node_id];
     node->p_time[p_idx] = p_time;
     node->p_comp_mem[p_idx] = p_comp_mem;
-    node->p_in_mem[p_idx] = p_in_mem;
     node->p_buf_mem[p_idx] = p_buf_mem;
     node->p_act_mem[p_idx] = p_act_mem;
     node->p_opt_mem[p_idx] = p_opt_mem;
@@ -273,9 +407,8 @@ public:
     for (int idx = 0; idx < producer_comb_num; ++idx) {
       bool is_legal = true;
       int val = idx;
-      // decode the producer partition combination
-      // continue if the partition states of producers are illegal
       std::vector<int> producer_ps(node->producer_num);
+      // decode the producer partition combination
       for (int j = 0; j < node->producer_num; ++j) {
         int k = node->producer_num - 1 - j;
         producer_ps[k] = val % node->producers[k]->p_num;
@@ -298,7 +431,6 @@ public:
       if (!is_legal) {
         continue;
       }
-      // build the representation of the predecessor dp node
       // <cut_node_id, cut_node_partition_id>
       std::vector<std::pair<int, int>> cur_ir(node->cut_len - 1);
       bool has_found_follow = false;
@@ -331,11 +463,14 @@ public:
                 find_existing_follow = true;
                 // update
                 if (tmp->id < producer->id) {
-                  if (tmp->p_father[cur_ir[i].second] !=
-                      producer->p_father[producer_p]) {
-                    is_legal = false;
-                  } else {
-                    cur_ir[i] = std::make_pair(producer_id, producer_p);
+                  for (int _ = 0; _ < producer->p_num; ++_) {
+                    if (producer->p_father[_] ==
+                        tmp->p_father[cur_ir[i].second]) {
+                      // replace to align with the filter logic in python
+                      // only the newest node in the follow chain is kept
+                      cur_ir[i] = std::make_pair(producer->id, _);
+                      break;
+                    }
                   }
                 }
                 break;
@@ -369,9 +504,7 @@ public:
           // do nothing, means the pre_node's output is not used
           // we select the 1st partition of the pre_node
           // need to be careful when the graph has multiple outputs
-          if (!has_found_follow && !follow_candidates.empty()) {
-            cur_ir.push_back(*follow_candidates.rbegin());
-          }
+          // shall we constrain that the output of the graph is replicated?
         } else if (pre_node->father_id == pre_node->id) {
           assert(follow_candidates.rbegin()->first == pre_node->id);
           cur_ir.push_back(*follow_candidates.rbegin());
@@ -409,64 +542,83 @@ public:
   void update(DPNode *dp_node, int start_level) {
     Node *node = dp_node->graph_node;
     decodePGID(dp_node);
-    int cur_p = *(dp_node->ir.rbegin());
+    int cur_p_idx = *(dp_node->ir.rbegin());
     if (node->id == start_level) {
-      // each dp node maintains a list of UnitDPState
-      dp_node->state.push_back(UnitDPState(node, cur_p, nullptr, 0));
+      // each dp node maintains a list of states, each state is a tuple
+      // (mem, time, pred_dp_node, activation_mem, optimizer_mem)
+      dp_node->state.push_back(std::make_tuple(
+          node->p_comp_mem[cur_p_idx], node->p_time[cur_p_idx], nullptr,
+          node->p_act_mem[cur_p_idx], node->p_opt_mem[cur_p_idx]));
       return;
     }
 
     // storing edges takes space, so we build edges when needed
     buildInEdges(dp_node);
+    int cur_p = *(dp_node->ir.rbegin());
     if (dp_node->in_edges.empty()) {
-      // no in edges, means the node is not used
-      UnitDPState state =
-          UnitDPState(0, 0, 0, 0, 0, 0, 0,
-                      std::numeric_limits<double>::infinity(), nullptr, 0);
-      dp_node->state.push_back(state);
+      dp_node->state.push_back(std::make_tuple(
+          0, std::numeric_limits<double>::infinity(), nullptr, 0, 0));
       return;
     }
 
-    // use a priority queue to maintain the best state like merge sort
-    std::priority_queue<std::tuple<UnitDPState, int>> pq;
+    // use a priority queue to maintain the best state, similar to the merge
+    // sort
+    double cur_p_time = node->p_time[cur_p];
+    int cur_p_comp_mem = node->p_comp_mem[cur_p];
+    int cur_p_act_mem = node->p_act_mem[cur_p];
+    int cur_p_opt_mem = node->p_opt_mem[cur_p];
+    std::priority_queue<std::tuple<int, double, int, int, int>> pq;
     for (std::size_t i = 0; i < dp_node->in_edges.size(); ++i) {
       DPNode *pred = dp_node->in_edges[i].first;
-      if (pred->state.empty()) {
-        continue;
-      }
-      UnitDPState pred_state = pred->state[0];
-      double transition_cost = dp_node->in_edges[i].second;
-      UnitDPState new_state =
-          pred_state.generate_new_state(node, cur_p, transition_cost, pred, 0);
-      pq.push(std::make_tuple(new_state, i));
+      int mem = cur_p_comp_mem + std::get<0>(pred->state[0]);
+      double cost = cur_p_time + dp_node->in_edges[i].second +
+                    std::get<1>(pred->state[0]);
+      int act_mem = cur_p_act_mem + std::get<3>(pred->state[0]);
+      int opt_mem = cur_p_opt_mem + std::get<4>(pred->state[0]);
+      pq.push(std::make_tuple(-mem, -cost, i, -act_mem, -opt_mem));
     }
 
-    std::vector<std::size_t> lows(dp_node->in_edges.size(), 1);
+    std::vector<int> lows(dp_node->in_edges.size(), 1);
 
+    int cur_mem;
+    double cur_cost;
     int pred_idx;
-    UnitDPState cur_state;
+    int cur_act_mem;
+    int cur_opt_mem;
     while (!pq.empty()) {
-      std::tie(cur_state, pred_idx) = pq.top();
-      DPNode *pred = dp_node->in_edges[pred_idx].first;
+      std::tie(cur_mem, cur_cost, pred_idx, cur_act_mem, cur_opt_mem) =
+          pq.top();
+      cur_mem = -cur_mem;
+      cur_cost = -cur_cost;
+      cur_act_mem = -cur_act_mem;
+      cur_opt_mem = -cur_opt_mem;
       pq.pop();
       if (lows[pred_idx] < dp_node->in_edges[pred_idx].first->state.size()) {
-        UnitDPState pred_state = pred->state[lows[pred_idx]];
-        double transition_cost = dp_node->in_edges[pred_idx].second;
-        UnitDPState new_state = pred_state.generate_new_state(
-            node, cur_p, transition_cost, pred, lows[pred_idx]);
-        pq.push(std::make_tuple(new_state, pred_idx));
+        DPNode *pred = dp_node->in_edges[pred_idx].first;
+        int mem = cur_p_comp_mem + std::get<0>(pred->state[lows[pred_idx]]);
+        double cost = cur_p_time + dp_node->in_edges[pred_idx].second +
+                      std::get<1>(pred->state[lows[pred_idx]]);
+        int act_mem = cur_p_act_mem + std::get<3>(pred->state[lows[pred_idx]]);
+        int opt_mem = cur_p_opt_mem + std::get<4>(pred->state[lows[pred_idx]]);
+        pq.push(std::make_tuple(-mem, -cost, pred_idx, -act_mem, -opt_mem));
         ++lows[pred_idx];
       }
-      if (dp_node->state.empty() && cur_state.total_mem <= mem_bound) {
-        dp_node->state.push_back(cur_state);
+      if (dp_node->state.empty()) {
+        dp_node->state.push_back(std::make_tuple(
+            cur_mem, cur_cost, dp_node->in_edges[pred_idx].first, cur_act_mem,
+            cur_opt_mem));
       } else {
-        UnitDPState pre_state = dp_node->state[dp_node->state.size() - 1];
-        int pre_mem = pre_state.total_mem;
-        double pre_cost = pre_state.time_cost;
-        int cur_mem = cur_state.total_mem;
-        double cur_cost = cur_state.time_cost;
-        if (cur_mem <= mem_bound && cur_mem > pre_mem && cur_cost < pre_cost) {
-          dp_node->state.push_back(cur_state);
+        int pre_mem = std::get<0>(dp_node->state[dp_node->state.size() - 1]);
+        double pre_cost =
+            std::get<1>(dp_node->state[dp_node->state.size() - 1]);
+        // if (cur_mem > pre_mem && cur_cost < pre_cost &&
+        //     cur_mem + cur_opt_mem <= mem_bound) {
+        if (cur_mem > pre_mem && cur_cost < pre_cost &&
+            cur_mem - cur_act_mem + std::max(cur_act_mem, cur_opt_mem) <=
+                mem_bound) {
+          dp_node->state.push_back(std::make_tuple(
+              cur_mem, cur_cost, dp_node->in_edges[pred_idx].first, cur_act_mem,
+              cur_opt_mem));
         }
       }
     }
@@ -490,7 +642,8 @@ public:
                   << ", state num: " << iter->second->dp_nodes.size()
                   << std::endl;
       }
-      std::vector<std::pair<int, int>> split_info = split_work(iter->second->dp_num, MAX_CONCURRENCY);
+      std::vector<std::pair<int, int>> split_info =
+          split_work(iter->second->dp_num);
       for (const auto &item : split_info) {
         pool.enqueue([=] {
           for (int i = 0; i < item.second; ++i) {
@@ -505,31 +658,65 @@ public:
 
   SearchPlan process_state(DPNode *dp_node, int idx) {
     // build the optimal path of each partition of last operator
-    // and return the plan
+    // and return the best path
     std::vector<std::pair<int, int>> path;
     DPNode *cur_dp_node = dp_node;
-    UnitDPState best_state = dp_node->state[idx];
-    UnitDPState cur_state = best_state;
-    DPNode *pred_dp_node = nullptr;
+    int cur_idx = idx;
+    int best_mem = std::get<0>(dp_node->state[idx]);
+    double best_time = std::get<1>(dp_node->state[idx]);
+    int act_mem = std::get<3>(dp_node->state[idx]);
+    int opt_mem = std::get<4>(dp_node->state[idx]);
+    double inner_time = 0;
+    int cur_best_mem = best_mem;
+    std::vector<int> buffers;
     while (true) {
       int cur_p = *(cur_dp_node->ir.rbegin());
       Node *node = cur_dp_node->graph_node;
       path.push_back(std::make_pair(node->id, cur_p));
-      pred_dp_node = cur_state.pred_dp_node;
+      buffers.push_back(node->p_buf_mem[cur_p]);
+      inner_time += node->p_time[cur_p];
+      cur_best_mem -= node->p_comp_mem[cur_p];
+      DPNode *pred_dp_node = std::get<2>(cur_dp_node->state[cur_idx]);
       if (pred_dp_node == nullptr) {
         break;
       } else {
-        cur_state = pred_dp_node->state[cur_state.pred_idx];
         cur_dp_node = pred_dp_node;
+        cur_idx = std::lower_bound(
+                      cur_dp_node->state.begin(), cur_dp_node->state.end(),
+                      std::make_tuple(cur_best_mem, static_cast<double>(-1),
+                                      static_cast<DPNode *>(nullptr), -1, -1)) -
+                  cur_dp_node->state.begin();
       }
     }
     std::reverse(path.begin(), path.end());
-    return SearchPlan{best_state.time_cost,
-                      best_state.total_mem, path};
+    std::sort(buffers.begin(), buffers.end());
+    long long ret_mem = static_cast<long long>(best_mem);
+    if (mode == 0) {
+      ret_mem += buffers[buffers.size() - 1] + buffers[buffers.size() - 2];
+    } else if (mode == 1) {
+      ret_mem += buffers[buffers.size() - 1];
+    }
+    ret_mem = ret_mem - act_mem + std::max(act_mem, opt_mem);
+    if (ret_mem > mem_bound) {
+      return SearchPlan{-1, -1, -1, std::vector<std::pair<int, int>>()};
+    }
+    if (verbose) {
+      std::cout << "best time: " << best_time
+                << ", best mem: " << best_mem / 1024 / 1024 * mem_div << "MB, "
+                << "activation mem: " << act_mem / 1024 / 1024 * mem_div
+                << "MB, "
+                << "optimizer state mem: " << opt_mem / 1024 / 1024 * mem_div
+                << "MB" << std::endl;
+    }
+    return SearchPlan{best_time, inner_time, static_cast<int>(ret_mem), path};
   }
 
   void post_process(int start_level, int end_level, int topk) {
     std::vector<SearchPlan> best_info;
+    double best_time;
+    double inner_time;
+    int best_mem;
+    std::vector<std::pair<int, int>> path;
     for (DPNode *dp_node : id2node[end_level]->dp_nodes) {
       int cnt = 0;
       for (std::size_t i = 0; i < dp_node->state.size(); ++i) {
@@ -551,7 +738,9 @@ public:
     if (verbose) {
       std::cout << "start to solve" << std::endl;
       std::cout << "verbose: " << verbose << std::endl;
+      std::cout << "mode: " << mode << std::endl;
       std::cout << "mem_bound: " << mem_bound << std::endl;
+      std::cout << "mem_div: " << mem_div << std::endl;
       std::cout << "topk: " << topk << std::endl;
     }
     init_dp_info();
@@ -578,6 +767,7 @@ public:
       }
       long long state_cnt = 0;
       for (auto iter = id2node.begin(); iter != id2node.end(); ++iter) {
+        int cur_id = iter->first;
         Node *cur_node = iter->second;
         for (DPNode *dp_node : cur_node->dp_nodes) {
           state_cnt += dp_node->state.size();
@@ -591,10 +781,8 @@ public:
 
     std::chrono::duration<double> elapsed_seconds = end - start;
 
-    if (verbose) {
-      std::cout << "elapsed time: " << elapsed_seconds.count() << " s"
-                << std::endl;
-    }
+    std::cout << "elapsed time: " << elapsed_seconds.count() << " s"
+              << std::endl;
   }
 
   std::vector<SearchPlan> get_results(int start_level, int end_level) {
@@ -602,8 +790,13 @@ public:
   }
 
   bool verbose;
+  // mode = 0: training, use the sum of the two largest buffer sizes
+  // mode = 1: inference, use the largest buffer size
+  int mode;
   // mem_bound: the maximum memory usage, in bytes
   int mem_bound;
+  // mem_div: the memory divisor, to avoid overflow in int32
+  int mem_div;
   int topk;
 
   std::unordered_map<int, Node *> id2node;
@@ -614,11 +807,12 @@ public:
 PYBIND11_MODULE(dp_solver, m) {
   py::class_<SearchPlan>(m, "SearchPlan")
       .def_readonly("all_time", &SearchPlan::all_time)
+      .def_readonly("inner_time", &SearchPlan::inner_time)
       .def_readonly("memory", &SearchPlan::memory)
       .def_readonly("path", &SearchPlan::path);
 
   py::class_<DPSolver>(m, "DPSolver")
-      .def(py::init<bool, int, int>())
+      .def(py::init<bool, int, int, int, int>())
       .def("add_interval", &DPSolver::add_interval)
       .def("add_node", &DPSolver::add_node)
       .def("add_partition", &DPSolver::add_partition)
@@ -631,6 +825,5 @@ setup_pybind11(cfg)
 cfg['extra_compile_args'] = ['-std=c++11']
 cfg['extra_compile_args'] = ['-O3']
 cfg['extra_compile_args'] = ['-pthread']
-cfg['dependencies'] = ['dp_solver.h']
 %>
 */

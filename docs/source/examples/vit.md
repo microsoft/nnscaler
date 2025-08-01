@@ -1,1 +1,0 @@
-../../../examples/vit/README.md

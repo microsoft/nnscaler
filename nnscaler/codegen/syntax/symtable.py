@@ -1,6 +1,8 @@
 #  Copyright (c) Microsoft Corporation.
 #  Licensed under the MIT License.
 
+
+
 class SymbolTable:
     """
     Symbolic table for saving declared variables.

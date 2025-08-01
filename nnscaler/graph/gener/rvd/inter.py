@@ -4,6 +4,8 @@
 from typing import Callable, Dict, List, Tuple, Optional, Set, Union
 from functools import partial
 import numpy as np
+import sys
+import copy
 
 from nnscaler.ir.tensor import IRFullTensor
 
@@ -15,9 +17,7 @@ from nnscaler.ir.adapter.prim import RDGatherPrim, RVGatherPrim
 
 from nnscaler.graph.gener.rvd.layout import RVDLayout
 from nnscaler.graph.gener.rvd.intra import IntraPathFinder
-
-from nnscaler.utils import classproperty
-from nnscaler.flags import CompileFlag
+from nnscaler.graph.gener.utils import tensor_vd_repr
 
 
 TShape = Tuple[int, ...]
@@ -60,7 +60,7 @@ class InterTransition:
         rvd = list(rvd)
         rvd[0] = rvd[0] // chunks
         return rvd, MovePrim
-
+    
     @staticmethod
     def incd(rvd: TRVD, dim: int, chunks: int) -> Tuple[TRVD, Callable]:
         """
@@ -76,7 +76,7 @@ class InterTransition:
         rvd = list(rvd)
         rvd[2+dim] = rvd[2+dim] * chunks
         return rvd, partial(RDScatterPrim, dim=dim)
-
+    
     @staticmethod
     def decd(rvd: TRVD, dim: int, chunks: int) -> Tuple[TRVD, Callable]:
         """
@@ -93,7 +93,7 @@ class InterTransition:
         rvd = list(rvd)
         rvd[2+dim] = rvd[2+dim] // chunks
         return rvd, partial(RDGatherPrim, dim=dim)
-
+    
     @staticmethod
     def incv(rvd: TRVD, chunks: int) -> Tuple[TRVD, Callable]:
         """
@@ -106,9 +106,9 @@ class InterTransition:
         @return prim Callable: primitive class
         """
         rvd = list(rvd)
-        rvd[1] *= chunks
+        rvd[1] *= 2
         return rvd, RVScatterPrim
-
+    
     @staticmethod
     def decv(rvd: TRVD, chunks: int) -> Tuple[TRVD, Callable]:
         """
@@ -124,7 +124,7 @@ class InterTransition:
         rvd = list(rvd)
         rvd[1] = rvd[1] // chunks
         return rvd, RVGatherPrim
-
+    
     @staticmethod
     def transitionable(src_rvd: TRVD, dst_rvd: TRVD) -> Optional[Callable]:
         """
@@ -140,8 +140,6 @@ class InterTransition:
         decd = [dim for dim, (d1, d2) in enumerate(zip(src_rvd, dst_rvd)) if d1 > d2]
         if len(incd) == 0 and len(decd) == 0:
             decd = [0]
-        # only support one dimension change
-        # this only happens when the device number changes
         if len(incd) + len(decd) != 1: return trans_fn
         if len(incd) == 1:
             incd = incd[0]
@@ -159,7 +157,7 @@ class InterTransition:
                 return InterTransition.decv
             else:
                 return partial(InterTransition.decd, dim=decd-2)
-
+            
     @staticmethod
     def transition(src_layout: RVDLayout, dst_rvd: TRVD, placement: Optional[Tuple[int]] = None) -> Tuple[RVDLayout, List[IRAdapterPrim]]:
         """
@@ -170,11 +168,11 @@ class InterTransition:
         @param src_layout RVDLayout: source ilayout
         @param dst_rvd Tuple[int]: destination RVD
         @param placement Tuple[int]: output layout device placement
-
+        
         @return rets Tuple[GridLayout, List[IRAdapterPrim]]:
            pairs of <layout, [prims]> of output
         """
-
+        
         src_rvd = src_layout.vec
         ftensor = src_layout.ftensor
         dst_layout: RVDLayout = RVDLayout.grid(ftensor, r=dst_rvd[0], v=dst_rvd[1], dims=dst_rvd[2:], devices=placement)
@@ -185,7 +183,7 @@ class InterTransition:
         decd = [dim for dim, (d1, d2) in enumerate(zip(src_rvd, dst_rvd)) if d1 > d2]
         if len(incd) == 0 and len(decd) == 0:
             decd = [0]
-
+    
         if len(incd) == 1:
             change_dim = incd[0]
             chunks = dst_rvd[change_dim] // src_rvd[change_dim]
@@ -196,7 +194,7 @@ class InterTransition:
 
         imat = RVDLayout.dim2last(src_layout.mat, change_dim, src_rvd[change_dim])
         omat = RVDLayout.dim2last(dst_layout.mat, change_dim, dst_rvd[change_dim])
-
+        
         prims = []
         if len(incd) == 1:
             for src, dsts in zip(imat.flatten(), omat.reshape(-1, chunks)):
@@ -217,28 +215,11 @@ class InterPathFinder:
     """
     inter-RVD Path finder for generating communication plans for RVDLayout
     """
-    # Key is configuration.
-    # Currently only CompileFlag.disable_reduce_scatter_adapter is considered
-    _config_cached_inter_nodes: Dict[Tuple, Dict[Tuple[TShape, int, int], Tuple[Tuple[InterRVD]]]] = {}
-    _config_cached_inter_edges: Dict[Tuple, Dict[Tuple[TShape, int, int], Tuple[np.ndarray]]] = {}
-    _config_cached_inter_paths: Dict[Tuple, Dict[Tuple[TShape, int, int], Dict[TRVD, List[List[int]]]]] = {}
 
-    @classproperty
-    def _cached_inter_nodes(cls):
-        return cls._config_cached_inter_nodes.setdefault((CompileFlag.disable_reduce_scatter_adapter,), {})
+    _cached_inter_nodes: Dict[Tuple[TShape, int, int], Tuple[Tuple[InterRVD]]] = {}
+    _cached_inter_edges: Dict[Tuple[TShape, int, int], Tuple[np.ndarray]] = {}
+    _cached_inter_paths: Dict[Tuple[TShape, int, int], Dict[TRVD, List[List[int]]]] = {}
 
-    @classproperty
-    def _cached_inter_edges(cls):
-        return cls._config_cached_inter_edges.setdefault((CompileFlag.disable_reduce_scatter_adapter,), {})
-
-    @classproperty
-    def _cached_inter_paths(cls):
-        return cls._config_cached_inter_paths.setdefault((CompileFlag.disable_reduce_scatter_adapter,), {})
-
-    # type annotation because type cannot be inferred from `classproperty`
-    _cached_inter_nodes: Dict[Tuple[TShape, int, int], Tuple[Tuple[InterRVD]]]
-    _cached_inter_edges: Dict[Tuple[TShape, int, int], Tuple[np.ndarray]]
-    _cached_inter_paths: Dict[Tuple[TShape, int, int], Dict[TRVD, List[List[int]]]]
 
     @staticmethod
     def path(ilayout: RVDLayout, olayout: RVDLayout, cost_fn: Optional[Callable] = None) -> List[IRAdapterPrim]:
@@ -255,7 +236,7 @@ class InterPathFinder:
         """
         ftensor: IRFullTensor = ilayout.ftensor
         cost_fn = InterPathFinder.default_cost_fn if cost_fn is None else cost_fn
-
+        
         inter_rvds: List[InterRVD] = InterPathFinder.get_optimal_path(
             ftensor, ilayout.vec, olayout.vec, cost_fn)
 
@@ -299,7 +280,7 @@ class InterPathFinder:
             assert align, "Internal Error: inter-rvd producer side device fails to align"
             break # we only take the first one
         assert producer_out_devs is not None, f"Can't find inter-rvd producer out device placement"
-
+        
         # setup consumer primitives and entry device placement
         consumer_entry_devs = None
         for cdevs in cdev_space:
@@ -314,7 +295,7 @@ class InterPathFinder:
 
         # setup inter-primitive
         _, iprims = InterTransition.transition(playout, crvds[0], consumer_entry_devs)
-
+        
         # merge together
         return pprims + iprims + cprims
 
@@ -322,16 +303,14 @@ class InterPathFinder:
     def get_optimal_path(ftensor, src_rvd: TRVD, dst_rvd: TRVD, cost_fn: Optional[Callable] = None) -> List[InterRVD]:
         """
         Get optimal RVD path from source RVD to destination RVD
-
+        
         @param src_rvd Tuple[int]: source RVD
         @param dst_rvd Tuple[int]: destination RVD
 
         @return path Tuple[InterRVD]:
             The first one is src_rvd. The last one is dst_rvd.
-            Otherwise they are intermediate RVD status
+            Otherwise they are intermediate RVD status 
         """
-        # Please note the following int can be either python int or np.int*
-
         src_ndevs = np.prod(src_rvd)
         src = ('p',) + src_rvd
         dst_ndevs = np.prod(dst_rvd)
@@ -383,10 +362,6 @@ class InterPathFinder:
         path = paths[nodes.index(dst)]
         assert len(path) > 0, f"Un-reachable src RVD {src} -> dst RVD {dst}"
         inter_rvds = tuple(nodes[idx] for idx in path)
-        inter_rvds = tuple(
-            (rvd[0],) + tuple(int(x) for x in rvd[1:])  # make sure all int (not np.int*) for rvd[1:]
-            for rvd in inter_rvds
-        )
         return inter_rvds
 
     @staticmethod
@@ -415,7 +390,7 @@ class InterPathFinder:
             IntraPathFinder._cached_intra_edges[(shape, src_ndevs)] = src_edges
             IntraPathFinder._cached_intra_paths[(shape, src_ndevs)] = {}
 
-        if (shape, dst_ndevs) in IntraPathFinder._cached_intra_nodes:
+        if (shape, dst_ndevs) in InterPathFinder._cached_inter_edges:
             dst_nodes = IntraPathFinder._cached_intra_nodes[(shape, dst_ndevs)]
             dst_edges = IntraPathFinder._cached_intra_edges[(shape, dst_ndevs)]
         else:
@@ -439,7 +414,7 @@ class InterPathFinder:
                 # set for [len(src_nodes) + j, i]
                 edges[len(src_nodes) + j, i] = cost
         return nodes, edges
-
+    
     @staticmethod
     def decode(inter_rvds: Tuple[InterRVD]) -> Tuple[Tuple[TRVD], Tuple[TRVD]]:
         """

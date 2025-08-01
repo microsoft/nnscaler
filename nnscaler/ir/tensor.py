@@ -28,7 +28,6 @@ can be
 """
 
 from typing import List, Optional, Union, Tuple, NewType, Dict, Any
-import torch
 
 from nnscaler.ir.cten import IRTensor
 
@@ -259,58 +258,15 @@ class IRFullTensor(IRTensor):
     the sequentail execution order by its graph.
     """
 
-    def __init__(self, shape=None, name='tensor', requires_grad=False, dtype=None, *,
-        is_attr=False, is_grad=False, persistent=False, is_loss=False
-    ):
-        self._is_loss: bool = False
+    def __init__(self, shape=None, name='tensor', requires_grad=False, dtype=None):
+
+        super().__init__(shape, name, dtype)
+
         # record all created sub_tensors
         self._subtensors : Dict[(ValueMap, IndexMap), int] = dict()
-        self._grad: Optional[IRFullTensor] = None
 
-        super().__init__(shape, name, dtype, requires_grad=requires_grad, is_attr=is_attr, is_grad=is_grad, persistent=persistent)
-        self._update(
-            is_loss=is_loss,
-        )
-
-    def _update(
-            self,
-            shape=None,
-            name=None,
-            dtype=None,
-            is_attr=None,
-            is_grad=None,
-            requires_grad=None,
-            persistent=None,
-            is_loss=None,
-    ):
-        super()._update(
-            shape=shape,
-            name=name,
-            dtype=dtype,
-            is_attr=is_attr,
-            is_grad=is_grad,
-            requires_grad=requires_grad,
-            persistent=persistent,
-        )
-
-        # reset grad
-        if self._requires_grad:
-            if self._grad is None:
-                self._grad = self.like_grad()
-        else:
-            self._grad = None
-
-        if is_loss is not None:
-            self._is_loss = is_loss
-
-        if self._grad is not None:
-            self._grad._update(
-                shape=self.origin_shape,
-                is_attr=self._is_attr,
-                dtype=self._dtype,
-                is_loss=self._is_loss,
-            )
-        return self
+        self.requires_grad = requires_grad
+        self._is_loss = False
 
     def __hash__(self) -> int:
         return self._id
@@ -326,27 +282,14 @@ class IRFullTensor(IRTensor):
 
     def like(self):
         """!
-        Create a IRFullTensor with same name/shape/dtype/requires_grad/is_loss but a different id.
+        Create a IRFullTensor with same meta data but a different id.
 
         @return tensor IRFullTensor: the created tensor
         """
-        tensor = IRFullTensor(
-            self.origin_shape, self.name, self._requires_grad,
-            self._dtype, is_loss=self._is_loss
-        )
+        tensor = IRFullTensor(self.shape, self.name, self.requires_grad, self.dtype)
+        if self.is_loss():
+            tensor.to_loss()
         return tensor
-
-    def like_grad(self):
-        """!
-        Create a gradient IRFullTensor with same shape, dtype and is_attr.
-
-        @return tensor IRFullTensor: the created tensor
-        """
-        grad = IRFullTensor(
-            self.origin_shape, 'g' + self.name,
-            requires_grad=False, dtype=self.dtype
-        ).as_grad(self._is_attr)
-        return grad
 
     @property
     def grad(self) -> Optional[IRTensor]:
@@ -357,17 +300,11 @@ class IRFullTensor(IRTensor):
         """
         Setup gradient for the tensor.
         """
-        assert not self._subtensors, "Grad can only be updated before creating sub-tensors"
         assert val is None or isinstance(val, IRFullTensor)
         if val is not None:
             assert self._requires_grad, f"Cannot assign {val} to no grad-required tensor"
-            assert val.origin_shape == self.origin_shape
+            assert val.shape == self.shape
             assert val.is_attr() == self.is_attr()
-        # TODO: we should check the grad-required here
-        # it is very common in current code that we assign None to grad
-        # so currently it is impossible to check the grad-required here
-        # else:
-        #     assert not self._requires_grad, f"Cannot assign {val} to grad-required tensor"
         self._grad = val
 
     def is_loss(self) -> bool:
@@ -383,54 +320,53 @@ class IRFullTensor(IRTensor):
         Set this tensor as loss tensor. The tensor shape must be [1,]
         """
         assert tuple(self.shape) == (1,), f"Loss tensor can only have shape [1,] but got {self.shape}"
-        self._update(is_loss=True)
+        self._is_loss = True
+        if isinstance(self.grad, IRFullTensor):
+            self.grad._is_loss = True
 
-    @IRTensor.dtype.setter
-    def dtype(self, val: Optional[torch.dtype]):
-        """Set data type"""
-        assert not self._subtensors, "Cannot change dtype after creating sub-tensors"
-        self._update(dtype=val)
+    @property
+    def requires_grad(self):
+        return self._requires_grad
 
-    @IRTensor.requires_grad.setter
+    @requires_grad.setter
     def requires_grad(self, req_grad: bool):
-        self._update(requires_grad=req_grad)
-
-    @IRTensor.shape.setter
-    def shape(self, val: Tuple[int]):
-        assert not self._subtensors, "Cannot change shape after creating sub-tensors"
-        self._update(shape=val)
-
-    def as_attr(self):
-        raise RuntimeError("as_attr is ambiguous for FullTensor, use as_param or as_buffer instead")
+        if req_grad:
+            self._requires_grad = True
+            if self._grad is None:
+                grad = IRFullTensor(
+                    self.shape, 'g' + self.name,
+                    requires_grad=False, dtype=self.dtype
+                ).as_grad(self.is_attr())
+                self._grad = grad
+        else:
+            self._requires_grad = False
+            self._grad = None
 
     def as_param(self):
         """
         Set the tensor as trainable parameter
         """
-        return self._update(
-            requires_grad=True,
-            is_attr=True,
-            is_grad=False,
-            persistent=True,
-        )
+        self.requires_grad = True
+        self._is_attr = True
+        self._is_grad = False
+        self._persistent = True
+        if isinstance(self.grad, IRFullTensor):
+            self.grad._is_attr = True
 
     def as_buffer(self, persistent=True):
         """
         Set the tensor as un-trainable buffer
         """
-        return self._update(
-            requires_grad=False,
-            is_attr=True,
-            is_grad=False,
-            persistent=persistent,
-        )
+        self.requires_grad = False
+        self._is_attr = True
+        self._is_grad = False
+        self._persistent = persistent
 
     def as_grad(self, of_attr: bool = False):
-        return self._update(
-            requires_grad=False,
-            is_attr=of_attr,
-            is_grad=True,
-        )
+        self._attr = True if of_attr else False
+        self.requires_grad = False
+        self._is_grad = True
+        return self
 
     def select(self, indmap: IndexMap, valmap: ValueMap):
         """!
@@ -451,7 +387,6 @@ class IRFullTensor(IRTensor):
         else:
             sub_tensor = IRSubTensor(self, indmap, valmap)
             self._subtensors[keys] = sub_tensor.tid
-
         return sub_tensor
 
     def tosub(self):
@@ -481,13 +416,13 @@ class IRFullTensor(IRTensor):
 
 
 class IRSubTensor(IRTensor):
+
     def __init__(self, ftensor: IRFullTensor,
                  indmap: Union[Tuple[StartEnd], IndexMap],
                  valmap: Union[Tuple[StartEnd], ValueMap],
                  **kwargs):
         """
         Create an IRSubTensor.
-        Please note same sub-tensor (parent+indmap+valmap) will have the same tid
 
         @param ftensor IRFullTensor: the full tensor
         @param indmap IndexMap: index map
@@ -497,29 +432,19 @@ class IRSubTensor(IRTensor):
         assert isinstance(ftensor, IRFullTensor), "Expcted ftensor to be IRFullTensor"
         assert 'dtype' not in kwargs, "IRSubTensor is not allowed to initialize with a dtype"
         super().__init__(shape=indmap.shape, name=ftensor.name, **kwargs)
+        for attr in IRFullTensor._meta:
+            setattr(self, attr, getattr(ftensor, attr))
+        self.cell = None
         # the full tensor
         self._full_tensor = ftensor
-
-        # remove the redundant attributes to avoid misuse.
-        # they will be updated from parent
-        del self._dtype
-        del self._is_attr
-        del self._is_grad
-        del self._requires_grad
-        del self._persistent
-
-        self.cell = None
         # the index from full_tensor
         self._indmap: IndexMap = indmap
         # val map
         self._valmap: ValueMap = valmap
-        self._grad: Optional[IRSubTensor] = None
 
     def __eq__(self, other) -> bool:
         if isinstance(other, IRSubTensor):
             return self._id == other._id
-        else:
-            return False
 
     def __hash__(self) -> int:
         return self._id
@@ -553,8 +478,16 @@ class IRSubTensor(IRTensor):
     def ndims(self) -> int:
         return len(self.shape)
 
-    def as_attr(self):
-        raise RuntimeError("as_attr is not allowed for SubTensor")
+    @property
+    def dtype(self) -> Any:
+        return self.parent.dtype
+
+    @dtype.setter
+    def dtype(self, val):
+        raise RuntimeError(
+            f"IRSubTensor dtype must follow IRFullTensor dtype. "
+            f"Please set it by subtensor.parent.dtype = {val}"
+        )
 
     def splitdims(self) -> Tuple[int]:
         """!
@@ -671,74 +604,15 @@ class IRSubTensor(IRTensor):
         tensor._cell = None
         return tensor
 
-    # forward all property to parent
-    @property
-    def dtype(self) -> Optional[torch.dtype]:
-        """Tensor data type"""
-        return self.parent.dtype
-
-    @IRTensor.shape.setter
-    def shape(self, val: Tuple[int]):
-        # TODO: remove this function
-        # It is not reasonable to set shape for a subtensor.
-        # But there are codes doing that in current repo.
-
-        # Here we check against self.shape instead of self.origin_shape
-        # because the assignment of shape is done after we erase all scalar-tensor
-        assert tuple(val) == tuple(self.shape), 'Cannot modify shape of a sub-tensor.'
-
-    def is_attr(self) -> bool:
-        """Check if the tensor is attribute"""
-        return self.parent.is_attr()
-
-    def is_param(self) -> bool:
-        """!
-        Check if the tensor is parameter
-
-        @return is_param boolean: True if is parameter.
-        """
-        return self.parent.is_param()
-
-    def is_buffer(self) -> bool:
-        """!
-        Check if the tensor is buffer.
-
-        @return is_buffer boolean: True if is buffer.
-        """
-        return self.parent.is_buffer()
-
-    def is_persistent(self) -> bool:
-        """!
-        Check if the tensor is persistent buffer.
-
-        @return is_persistent boolean: True if is persistent.
-        """
-        return self.parent.is_persistent()
-
-    def is_grad(self) -> bool:
-        """!
-        Check if the tensor is gradient
-
-        @return is_grad boolean: True if is gradient
-        """
-        return self.parent.is_grad()
-
-    def is_scalar_tensor(self) -> bool:
-        """!
-        Check if the tensor is scalar tensor
-
-        @return is_scalar_tensor boolean: True if is scalar tensor
-        """
-        return self.parent.is_scalar_tensor()
-
     @property
     def requires_grad(self) -> bool:
+        self._requires_grad = self.parent.requires_grad
         return self.parent.requires_grad
 
     @property
     def grad(self) -> bool:
         """Get the gradient of this tensor.
-
+        
         The gradient is kept aligned with its parent IRFullTensor.
         """
         if not self.requires_grad:
@@ -749,18 +623,12 @@ class IRSubTensor(IRTensor):
     def grad(self, val: Optional[IRTensor]):
         """
         Setup gradient for the tensor.
-        Currently unlike IRFullTensor, IRSubTensor's grad is never created automically
         """
         assert val is None or isinstance(val, IRSubTensor)
         if val is not None:
-            assert self.requires_grad, f"Cannot assign {val} to no grad-required tensor"
+            assert self._requires_grad, f"Cannot assign {val} to no grad-required tensor"
             assert val.shape == self.shape
             assert val.is_attr() == self.is_attr()
-        # TODO: we should check the grad-required here
-        # it is very common in current code that we assign None to grad
-        # so currently it is impossible to check the grad-required here
-        # else:
-        #     assert not self._requires_grad, f"Cannot assign {val} to grad-required tensor"
         self._grad = val
 
     def is_loss(self) -> bool:
@@ -915,33 +783,6 @@ class IRSubTensor(IRTensor):
             )
             return sub_tensor
         return None
-
-    @classmethod
-    def is_dim_continous(cls, tensors: List['IRSubTensor'], dim: int) -> bool:
-        """
-        Check if the tensors are continuous along a dimension
-
-        Args:
-            tensors (List[IRSubTensor]): the tensors to check
-            dim (int): the dimension
-        Returns:
-            bool: True if continuous
-        Raises:
-            ValueError: if `tensors` is empty
-        """
-        if not tensors:
-            raise ValueError("Expected a non-empty tensor list")
-        if dim < 0:
-            dim += len(tensors[0].shape)
-        if dim < 0 or dim >= len(tensors[0].shape):
-            raise ValueError(f"Expected 0 <= dim < {len(tensors[0].shape)}. Got {dim}")
-        indmaps = [t.indmap[dim] for t in tensors]
-        indmaps.sort()
-        # [start, end) should be continuous after sorted
-        for idx in range(1, len(indmaps)):
-            if indmaps[idx][0] != indmaps[idx-1][1]:
-                return False
-        return True
 
     def __repr__(self) -> str:
         anno = 't'

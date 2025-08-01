@@ -1,29 +1,6 @@
 #  Copyright (c) Microsoft Corporation.
 #  Licensed under the MIT License.
 
-"""
-Rules:
-1. `dict`/`list`/`tuple`/`slice` are the only supported container types for IRTensor.
-   `DictValues`/`DictItems` will be converted to tuple to make it compatible with our system.
-   TODO: Set is incompatible with our system, but it is really rare to put tensors in a set.
-   The problem to support set is that hash of IRObject is different with the hash of original value.
-   So set functions (add/discard/etc) can have different behavior.
-   `DictKeys` has the same problem, so we don't support it either.
-2. IRObjects created in functions should be the outputs. Never create new IRObjects as function inputs/kwargs.
-3. `iter` is not compatible with our system, and should be avoided.
-   That's because the values in the iterator have been exausted in tracer
-4. Never nest IRObject, i.e. put another IRObject in IRObject.value.
-   Currently some functions still nest IRObject. Will be fixed in the future.
-5. You can return concrete value in function only when there is no IRObjects in function args/kwargs.
-6. When the tensor shape is unknown, you can annotate with `?`. In this case, the tensor will never be partitioned.
-7. When a function returns multiple tensors, you should return them as tuple/list,
-   and annotate them correctly.
-8. When a function is annotated with no-output (the right side of `->` of annotation is empty),
-   If you don't use its output in source code, this function will be removed in tracer
-   But if you use its output in source code, KeyError will be trigger in parser.
-   So it is a bad idea to annotate a function with no-output.
-"""
-
 from typing import Any, Callable, List, Optional, Tuple, Dict, Union, Iterable
 import string
 import copy
@@ -34,11 +11,11 @@ import math
 import logging
 from collections.abc import Iterable
 
-from nnscaler.ir.cten import IRTensor, IRObject, IR
+from nnscaler.ir.cten import IRTensor, IRObject
 from nnscaler.ir.tensor import IRSubTensor, IRFullTensor
 from nnscaler.graph.function.pyfunc import IRPyFunc
 from nnscaler.graph.function.dimops import DimopSplit, ShapeAnno, OpAnno, IRDimops, TransformRule
-from nnscaler.graph.function.conv import IRPad, IRConv3D
+from nnscaler.graph.function.conv import IRPad, IRConv2D, IRConv3D
 from nnscaler.graph.function.anchor import IRGraphAnchor
 
 _logger = logging.getLogger(__name__)
@@ -103,27 +80,6 @@ def Identity(tensor: IRObject, signature = None):
     eshape = ShapeAnno.create_shape_str(tensor.shape)
     anno = OpAnno.create_op_str([eshape], [eshape])
     return IRDimops(Identity, 'identity', signature, [anno], [tensor])
-
-
-def Ifexpr(cond: Any, true_value: Any, false_value: Any, signature = None) -> IRPyFunc:
-    signature = 'nnscaler.runtime.function.ifexpr'
-    cond_val = cond.value if isinstance(cond, IRObject) else cond
-    result = true_value if cond_val else false_value
-    result_val= result.value if isinstance(result, IRObject) else result
-
-    return IRPyFunc(signature,
-        inputs=[cond, true_value, false_value],
-        outputs=[IRObject(name='ifexpr', value=result_val, is_constant=False)]
-    )
-
-
-def FoldConstant(value: Any, signature = None):
-    if any_ir_object_satisfy(value, lambda x: isinstance(x, IRTensor)):
-        raise ValueError("FoldConstant doesn't support IRTensor")
-
-    # always return a constant
-    # no node will be created
-    return IR.try_unwrap(value)
 
 
 def MultiRef(tensor: IRTensor, times: int, signature = None):
@@ -907,7 +863,7 @@ def Dropout(input, p=0.5, training=True, inplace=False, signature = None):
     """
     annos = ['* -> *']
     return IRDimops(Dropout, 'dropout', signature, annos, [input],
-                    p=p, training=training, inplace=inplace)
+                    p=p, training='self.training', inplace=inplace)
 
 
 def nnDropout(input, p=0.5, inplace=False, signature=None):
@@ -1150,9 +1106,6 @@ def Sum(input, dim=None, keepdim=False, *, dtype=None, signature = None):
             sort_dim.sort()
             for dimidx in sort_dim[::-1]:
                 eoutput.pop(dimidx)
-            # handle the case of scalar tensor output
-            if not eoutput:
-                eoutput = ['1']
         anno = OpAnno.create_op_str([einput], [eoutput])
         return IRDimops(Sum, 'sum', signature, [anno], [input], dim=dim, keepdim=keepdim)
 
@@ -1223,13 +1176,12 @@ def Split(tensor, split_size_or_sections, dim = 0, signature = None):
     """
     torch.functional.split(tensor, split_size_or_sections, dim=0) -> List[Tensor]
     """
-    unwrap_split_size = _unwrap_value(split_size_or_sections)
-    if isinstance(unwrap_split_size, int):
-        sections = [unwrap_split_size for _ in range(tensor.shape[dim] // unwrap_split_size)]
-        if tensor.shape[dim] % unwrap_split_size != 0:
-            sections.append(tensor.shape[dim] % unwrap_split_size)
+    if isinstance(split_size_or_sections, int):
+        sections = [split_size_or_sections for _ in range(tensor.shape[dim] // split_size_or_sections)]
+        if tensor.shape[dim] % split_size_or_sections != 0:
+            sections.append(tensor.shape[dim] % split_size_or_sections)
     else:
-        sections = unwrap_split_size
+        sections = split_size_or_sections
     assert sum(sections) == tensor.shape[dim]
     edim_in = ShapeAnno.create_shape_str(tensor.shape)
     edim_ous = [copy.copy(edim_in) for _ in sections]
@@ -1252,188 +1204,143 @@ def Contiguous(input, memory_format = None, signature = None):
 
 def _reshape_anno(in_shape: List[int], ou_shape: List[int], kwarg_name: str) -> Tuple[str, List[TransformRule]]:
     """
-    The general rule is that aligned dimensions in the input shape and output shape
-    are labeled with partitionable.
-    Here `align` means when we group input and output shapes (see `_group` function),
-    the input dims and output dims in a matched groups have exactly one non-1 dim.
+    reshape / view annotation and transformation rule generator
 
-    For example,
-    input shape: [10, 12, 16, 18]
-    output shape: [10, 2, 3, 32, 18]
-    The first and the last dimension is aligned, so we can partition both dimensions.
+    Args:
+        in_shape List[int]: input shape
+        ou_shape List[int]: output shape
+        kwarg_name str: kwarg name of reshape / view op
 
-    There are two additional rules when we apply inner dimensions:
-    1. When `input_dim % output_dim == 0 or output_dim % input_dim == 0`,
-        we can break the larger dimension to inner dimensions.
-        In above example, we can partition the second dimension, as `12 % 2 == 0`.
-        We first break the second dimension into `(2 6)`, then align the `2` with `2` in output shape.
-        So the final annotation is `a (b 6) 16 c -> a b 3 32 c`
-    2. When a dimension size is `1`, we can skip it and align to the next dimension.
-       For example, input_shape: [2, 16, 32, 32]
-                    output shape: [1, 32, 32, 32]
-       We can align the first dimension of input to the second dimension of output.
-       The final annotation is `a 16 b c -> 1 (a 16) b c`. Please note the first dimension of output is skipped.
-
-    TODO:
-    We assume all dimensions are static.
-    We need to handle dynamic shapes (passed as IRObject) in the future.
+    Returns:
+        str: annotation string
+        List[TransformRule]: transformation rules
     """
+    def nele(shape, nele=1):
+        for dimlen in shape: nele *= dimlen
+        return nele
 
-    if not in_shape or not ou_shape:
-        # scalar tensor, no need to partition
-        return '1 -> 1', []
-
-    from functools import reduce
-    from operator import mul
-
-    nele = reduce(mul, in_shape)
+    # infer -1
+    cnt = nele(in_shape)
     if -1 in ou_shape:
         idx = ou_shape.index(-1)
-        ou_shape[idx] = nele // (-reduce(mul, ou_shape))
-    if nele != reduce(mul, ou_shape):
-        raise ValueError(f"shape mismatch: {in_shape}, {ou_shape}")
+        ou_shape[idx] = cnt // (-nele(ou_shape))
+    assert nele(in_shape) == nele(ou_shape), f"shape mismatch: {in_shape}, {ou_shape}"
 
-    def _group(input_shape, output_shape) -> List[Tuple[List[int], List[int]]]:
-        """
-        Group input and output shape into groups that can be aligned together
-        For example
-        input shape: [10, 12, 16, 18]
-        output shape: [10, 2, 3, 32, 18]
-        We can group them into [
-            ([10], [10]),
-            ([12, 16], [2, 3, 32]),
-            ([18], [18])
-        ]
-        Please note when we group the dimensions,
-        the dimensions with size 1 will be grouped with next dimension if not matched.
-        The only exception is when the 1 dimension is the last dimensions.
-
-        For example
-            [10, 1, 1, 5, 1, 7, 1, 1] and [10, 5, 7]
-        We will group them into
-            ([10], [10])
-            ([1, 1, 5], [5])
-            ([1, 7, 1, 1], [7])
-
-        And
-            [10, 1, 1, 5, 1, 7, 1, 1] and [10, 5, 7, 1]
-        We will group them into
-            ([10], [10])
-            ([1, 1, 5], [5])
-            ([1, 7], [7])
-            ([1, 1], [1])
-        """
-
-        groups = []
-        input_idx = 0
-        output_idx = 0
-
-        while input_idx < len(input_shape) and output_idx < len(output_shape):
-            # find one group in each iteration until all dimensions are aligned
-            input_dim = input_shape[input_idx]
-            output_dim = output_shape[output_idx]
-            group_input = [input_dim]
-            group_output = [output_dim]
-            # we find a group match when input_dim == output_dim
-            while input_dim != output_dim:
-                if input_dim < output_dim:
-                    # add more dimensions from input shape
-                    input_idx += 1
-                    input_dim *= input_shape[input_idx]
-                    group_input.append(input_shape[input_idx])
+    # generate annotation
+    rest_inshape = [dimlen for dimlen in in_shape]
+    rest_oushape = [dimlen for dimlen in ou_shape]
+    chain = []
+    can_bucket = True
+    while len(rest_inshape) != 0 or len(rest_oushape) != 0:
+        if len(rest_inshape) == 0:
+            chain = chain + rest_oushape
+            rest_oushape = []
+        elif len(rest_oushape) == 0:
+            chain = chain + rest_inshape
+            rest_inshape = []
+        else:
+            dimlen = min(rest_inshape[0], rest_oushape[0])
+            if max(rest_inshape[0], rest_oushape[0]) % dimlen == 0:
+                chain.append(dimlen)
+                if dimlen == rest_inshape[0]:
+                    rest_inshape.pop(0)
                 else:
-                    # add more dimensions from output shape
-                    output_idx += 1
-                    output_dim *= output_shape[output_idx]
-                    group_output.append(output_shape[output_idx])
-            groups.append((group_input, group_output))
-            input_idx += 1
-            output_idx += 1
+                    rest_inshape[0] = rest_inshape[0] // dimlen
+                if dimlen == rest_oushape[0]:
+                    rest_oushape.pop(0)
+                else:
+                    rest_oushape[0] = rest_oushape[0] // dimlen
+            else:
+                can_bucket = False
+                break
 
-        # at least one of input_shape and output_shape is exhausted
-        # put all remaining dimensions into the last group
-        for i in range(input_idx, len(input_shape)):
-            assert input_shape[i] == 1
-            groups[-1][0].append(input_shape[i])
-        for i in range(output_idx, len(output_shape)):
-            assert output_shape[i] == 1
-            groups[-1][1].append(output_shape[i])
-
-        return groups
-
-    shape_groups = _group(in_shape, ou_shape)
     letters = iter(string.ascii_lowercase)
-    in_anno = []
-    ou_anno = []
-    # the first letter in each in/out annotation
-    # which will be used to partition the tensor
-    ifirst = []
-    ofirst = []
+    if can_bucket:
+        inchain = ouchain = chain
+        inedims = ouedims = edims = [next(letters) for _ in chain]
+    else:
+        inchain, ouchain = in_shape, ou_shape
+        inedims = [str(dimlen) for dimlen in in_shape]
+        ouedims = [str(dimlen) for dimlen in ou_shape]
+        chain = inchain + ouchain
+        edims = inedims + ouedims
+    shape_map: Dict[str, int] = {edim: eshape for (edim, eshape) in zip(edims, chain)}
 
-    def _append_partitionable(extra_in_anno=None, extra_out_anno=None):
-        """
-        Allocate a letter for the partitionable dimension
-        If we need to break the dimension into inner dimensions,
-        pass the rest of annotation with `extra_in_anno` and `extra_out_anno`
-        """
-        letter = next(letters)
-        in_anno.append(letter if extra_in_anno is None else f'({letter} {extra_in_anno})')
-        ou_anno.append(letter if extra_out_anno is None else f'({letter} {extra_out_anno})')
-        ifirst.append(letter)
-        ofirst.append(letter)
+    # generate input and output shape annotations
+    # greedy fuse suffix number
+    def buckets(shape: List[int], chain: List[int], edims: List[int]) -> List[List[str]]:
+        anno = []
+        dimidx = 0
+        for idx, dimlen in enumerate(shape):
+            elements, bracket = 1, []
+            maxele = len(chain) - dimidx - (len(shape) - 1 - idx)
+            while True:
+                if len(bracket) == maxele:
+                    assert elements == dimlen, f"internal match error1: {bracket}"
+                    break
+                if dimidx >= len(chain) or elements * chain[dimidx] > dimlen:
+                    assert elements == dimlen, f"internal match error2: {bracket}"
+                    break
+                else:
+                    elements *= chain[dimidx]
+                    bracket.append(edims[dimidx])
+                    dimidx += 1
+            # fetch as many 1^ as possible from tail of the previous bracket
+            if len(bracket) == 0:
+                assert dimlen == 1, f"internal match error3: dimlen={dimlen}"
+                back = 0
+                for edim in anno[-1][1:][::-1]:
+                    if chain[edims.index(edim)] != 1:
+                        break
+                    back += 1
+                assert back > 0, f"internal match error4: dimlen={dimlen}"
+                bracket = anno[-1][-back:]
+                anno[-1] = anno[-1][:-back]
+            assert len(bracket) > 0, f"got a dimension with no edim"
+            anno.append(bracket)
+        return anno
 
-    # handle each aligned group
-    for in_group, ou_group in shape_groups:
-        # step 1: remove all leading 1's
-        # find the first non-1 dimension in input
-        for in_group_non_one_idx in range(len(in_group)):
-            if in_group[in_group_non_one_idx] != 1:
-                break
-            in_anno.append(f'1')
-            ifirst.append(None)
-        else:
-            in_group_non_one_idx = len(in_group)
-        in_group = in_group[in_group_non_one_idx:]
+    in_anno = buckets(in_shape, inchain, inedims)
+    ou_anno = buckets(ou_shape, ouchain, ouedims)
 
-        # find the first non-1 dimension in output
-        for ou_group_non_one_idx in range(len(ou_group)):
-            if ou_group[ou_group_non_one_idx] != 1:
-                break
-            ou_anno.append(f'1')
-            ofirst.append(None)
-        else:
-            ou_group_non_one_idx = len(ou_group)
-        ou_group = ou_group[ou_group_non_one_idx:]
+    # postprocess on dimlen == 1
+    shape_map['1'] = 1
+    for bracket in in_anno + ou_anno:
+        for subdim, edim in enumerate(bracket):
+            if shape_map[edim] == 1:
+                bracket[subdim] = str(shape_map[edim])
 
-        if not in_group or not ou_group:
-            # all dimensions are 1, we are done
-            assert len(in_group) == 0 and len(ou_group) == 0
-            continue
+    # find out the axis that can be partitioned
+    ispatial, ifirst = set(), []
+    for bracket in in_anno:
+        sdim = None
+        for hdim in range(len(bracket)):
+            if bracket[hdim] == '1' or shape_map[bracket[hdim]] == 1: continue
+            sdim = bracket[hdim]
+            break
+        if sdim is not None:
+            ispatial.add(sdim)
+        ifirst.append(sdim)
 
-        if len(in_group) == 1 and len(ou_group) == 1: # aligned
-            _append_partitionable()
-        else:
-            # use inner dimention to partition when possible
-            rest_start = 0
+    ospatial, ofirst = set(), []
+    for bracket in ou_anno:
+        sdim = None
+        for hdim in range(len(bracket)):
+            if bracket[hdim] == '1' or shape_map[bracket[hdim]] == 1: continue
+            sdim = bracket[hdim]
+            break
+        if sdim is not None:
+            ospatial.add(sdim)
+        ofirst.append(sdim)
 
-            if in_group[0] == ou_group[0]:  # special case: no need to use inner dimension
-                _append_partitionable()
-                rest_start = 1
-            elif in_group[0] % ou_group[0] == 0:
-                _append_partitionable(extra_in_anno=in_group[0] // ou_group[0])
-                rest_start = 1
-            elif ou_group[0] % in_group[0] == 0:
-                _append_partitionable(extra_out_anno=ou_group[0] // in_group[0])
-                rest_start = 1
+    # intersection for spatial partitioned dimensions
+    spatial = ispatial.intersection(ospatial)
 
-            for _ in in_group[rest_start:]:
-                in_anno.append(f'{in_shape[len(in_anno)]}')
-                ifirst.append(None)
-            for _ in ou_group[rest_start:]:
-                ou_anno.append(f'{ou_shape[len(ou_anno)]}')
-                ofirst.append(None)
-
-    anno = OpAnno.create_op_str([in_anno], [ou_anno])
+    # set dimension cannot be partitioned
+    for bracket in in_anno + ou_anno:
+        for hdim in range(len(bracket)):
+            if bracket[hdim] not in spatial:
+                bracket[hdim] = str(shape_map[bracket[hdim]])
 
     def modifier(kwargs: Dict, idx, dim, num: int, subnode_idx: int) -> Dict:
         kwargs = dict(**kwargs)
@@ -1447,29 +1354,20 @@ def _reshape_anno(in_shape: List[int], ou_shape: List[int], kwarg_name: str) -> 
         if isinstance(size[oidx], IRObject):
             _logger.warning(f'partition dim size in IRObject: {size[oidx]}')
             size[oidx] = size[oidx].value
-        if size[oidx] != -1:
-            size[oidx] = size[oidx] // num
+        size[oidx] = size[oidx] // num
         kwargs[kwarg_name] = tuple(size)
         return kwargs
 
-    non_none_ifirst = [i for i in ifirst if i is not None]
-    non_none_ofirst = [i for i in ofirst if i is not None]
-    # no duplicated identifier
-    assert len(set(non_none_ifirst)) == len(non_none_ifirst)
-    assert len(set(non_none_ofirst)) == len(non_none_ofirst)
-    # all identifier shown in input shape are also shown in output shape
-    assert set(non_none_ifirst) == set(non_none_ofirst)
-
     # special rules: to change output size argument
     rules: TransformRule = []
-    for iidx, identifier in enumerate(ifirst):
-        if identifier is None:
-            continue
+    for identifier in spatial:
+        iidx = ifirst.index(identifier)
         oidx = ofirst.index(identifier)
         rules.append(
             TransformRule([DimopSplit.D(iidx)], [DimopSplit.D(oidx)], modifier)
         )
 
+    anno = OpAnno.create_op_str([in_anno], [ou_anno])
     return anno, rules
 
 
@@ -1653,26 +1551,7 @@ def Pad(input, pad, mode='constant', value=0.0, signature = None):
     """
     torch.nn.functional.pad(input, pad, mode='constant', value=0.0)
     """
-    if mode != 'constant':
-        raise ValueError(f"Currently only support mode='constant' but got {mode}")
-
-    pad_vals, _ = extract_variadic(pad)
-    if len(pad_vals) % 2 != 0:
-        raise ValueError(f"pad should be a list of even length but got {pad}")
-
-    pad_vals = [(pad_l, pad_r) for pad_l, pad_r in zip(pad_vals[::2], pad_vals[1::2])]
-    pad_vals.reverse()
-    pad_dim_num = len(pad_vals)
-
-    gener = iter(string.ascii_lowercase)
-    prefix_anno = ShapeAnno.create_shape_str(input.shape[:-pad_dim_num], iterator=gener)
-    in_pad_dim_anno = [str(dim) for dim in input.shape[-pad_dim_num:]]
-    out_pad_dim_anno = [str(dim + pad_l + pad_r) for dim, (pad_l, pad_r) in zip(input.shape[-pad_dim_num:], pad_vals)]
-    in_anno = prefix_anno + in_pad_dim_anno
-    out_anno = prefix_anno + out_pad_dim_anno
-    anno = OpAnno.create_op_str([in_anno], [out_anno])
-
-    return IRDimops(Pad, 'pad', signature, [anno], [input], pad=pad, mode=mode, value=value)
+    return IRPad(signature, [input], 'pad', pad=pad, mode=mode, value=value)
 
 
 # def Conv2D(signature, inputs):
@@ -1702,6 +1581,19 @@ def Pad(input, pad, mode='constant', value=0.0, signature = None):
 #     stride, padding, dilation, groups = inputs[3:]
 #     return IRDimops(signature, annos, tensors, 'conv2d',
 #                     stride=stride, padding=padding, dilation=dilation, groups=groups)
+
+
+def Conv2D(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1, signature = None):
+    """
+    torch.nn.functional.conv2d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1)
+    """
+    if isinstance(padding, int):
+        padding = [padding] * 4
+    elif len(padding) == 2:
+        padH, padW = padding
+        padding = [padH, padH, padW, padW]
+    return IRConv2D(signature, [input, weight, bias], 'conv2d',
+                    stride=stride, padding=padding, dilation=dilation, groups=groups)
 
 
 def Conv3D(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1, signature = None):
@@ -2004,6 +1896,7 @@ def Repeat(tensor, repeats: _VariadicInt, *arg_repeats, signature = None):
     """
     torch.Tensor.repeat(*sizes)
     """
+    signature = 'torch.ops.aten.repeat'
     if isinstance(repeats, (list, tuple)) or (
         isinstance(repeats, IRObject) and isinstance(repeats.value, (list, tuple))
     ):
@@ -2047,8 +1940,6 @@ def CubeEmbedding(input, weight, padding_idx, signature = None, **kwargs):
         start, stop = weight.indmap[0]
     else:
         start, stop = 0, weight.shape[0]
-    # here we can split the vocab dim with `+`, because we rewrite the embedding logic to ensure the result is right
-    # please review nnscaler.runtime.function.embedding for more information
     annos = ['*, n+ e -> * e']
     return IRDimops(CubeEmbedding, 'embedding', signature, annos, [input, weight],
                     padding_idx=padding_idx, start=start, stop=stop)
@@ -2121,13 +2012,7 @@ def CrossEntropy(input, target, weight=None,
         size_average=None, ignore_index=- 100, reduce=None,
         reduction='mean', label_smoothing=0.0)
     """
-    if reduction == 'none':
-        annos = [
-            'C^, N -> N',
-            'N C^, N -> N',
-            'N C^ *, N * -> N',
-        ]
-    elif reduction == 'sum':
+    if reduction == 'sum':
         annos = [
             'C^, N -> 1',
             'N+ C^, N+ -> 1',
@@ -2300,135 +2185,32 @@ def Dim(tensor, signature=None) -> Union[List[int], IRPyFunc]:
     return len(tensor.shape)
 
 
-def _resolve_overload_args(
-    args: List[Any],
-    kwargs: Dict[str, Any],
-    positional_arg_names: List[List[str]],
-    kwarg_names: List[List[str]],
-    arg_types: Dict[str, Any],
-) -> Dict[str, Any]:
-    """
-    Resolve the arguments of a function with multiple overloads.
-    """
-
-    def _find_first_invalid_arg_name(arg_values, overload_idx):
-        for arg_name in arg_values:
-            if arg_name not in positional_arg_names[overload_idx] \
-                and arg_name not in kwarg_names[overload_idx]:
-                return arg_name
-        return None
-
-    arg_values = dict(kwargs)
-
-    if args:
-        # some parameters are passed as positional arguments
-        # overload matching is done by checking the type of the first positional argument
-        # here we use unwrapped value,
-        # because if it's a wrapped IRObject, it's impossible for us to select the correct overload
-        arg0 = IR.try_unwrap(args[0])
-        for overload_idx in range(len(positional_arg_names)):
-            # if arg[0] is None, use the first overload
-            if arg0 is None or isinstance(arg0, arg_types[positional_arg_names[overload_idx][0]]):
-                if len(args) > len(positional_arg_names[overload_idx]):
-                    raise ValueError('Received too many positional arguments')
-
-                for i, arg in enumerate(args):
-                    arg_name = positional_arg_names[overload_idx][i]
-                    if arg_name in arg_values:
-                        raise ValueError(f'{arg_name} is specified as a keyword argument and as a positional argument')
-                    # TODO: check the type of arg
-                    #       Currently we assume that the type of arg is correct
-                    #       We may need to add type checking in the future
-                    #       when we know 100% how pytorch handles the overloads
-                    arg_values[arg_name] = arg
-
-                if invalid_arg_name := _find_first_invalid_arg_name(arg_values, overload_idx):
-                    raise ValueError(f'{invalid_arg_name} is not a valid argument for this overload')
-
-                break
-        else:
-            raise ValueError('Received an invalid combination of arguments')
-    else:
-        # no positional arguments are passed
-        # In this case, we dont' know which overload to use
-        # Here we will check the arguments and report error if it doesn't match any overloads.
-        invalids = [_find_first_invalid_arg_name(arg_values, i) for i in range(len(positional_arg_names))]
-        if all(invalids): # all overloads have error
-            # just report the invalid argument of first overload
-            raise ValueError(f'{invalids[0]} is not a valid argument')
-
-    return arg_values
-
-
-def To(
-    input: IRTensor,
-    *args,
-    **kwargs,
-):
+def To(tensor: IRTensor, dtype_or_device=None, *, device=None, dtype=None, out=None, signature = None):
     """
     torch.Tensor.to(*args, **kwargs) → Tensor
-    three overloads:
-    ```
-        to(Device device=None, ScalarType dtype=None, bool non_blocking=False, bool copy=False, *, MemoryFormat? memory_format=None)
-        to(ScalarType dtype, bool non_blocking=False, bool copy=False, *, MemoryFormat? memory_format=None)
-        to(Tensor tensor, bool non_blocking=False, bool copy=False, *, MemoryFormat? memory_format=None)
-    ```
-    Pytorch will try to match the overloads from top to bottom.
-    We will mimic the behavior here.
     """
-    assert kwargs.pop('out', None) is None
-    signature = kwargs.pop('signature', 'torch.Tensor.to')
-
-    args_types ={
-        'device': (int, str, torch.device),
-        'dtype': torch.dtype,
-        'tensor': IRTensor,
-        'non_blocking': bool,
-        'copy': bool,
-        'memory_format': torch.memory_format,
-    }
-
-    positional_arg_names = [
-        ('device', 'dtype', 'non_blocking', 'copy'),  # 1st overload
-        ('dtype', 'non_blocking', 'copy'),            # 2nd overload
-        ('tensor', 'non_blocking', 'copy'),           # 3rd overload
-    ]
-
-    kwarg_names = [
-        ('memory_format',),
-        ('memory_format',),
-        ('memory_format',),
-    ]
-
-    arg_values = _resolve_overload_args(
-        args,
-        kwargs,
-        positional_arg_names,
-        kwarg_names,
-        args_types,
-    )
-
-    if arg_values.get('device', None) is not None:
-        warn_msg = 'nnscaler will handle the tensor device placement, the call of torch.Tensor.to(device=...) will be ignore, ' \
+    assert out is None
+    # FIXME: support full version of torch.Tensor.to
+    dtype_or_device = dtype if dtype is not None else dtype_or_device
+    dtype_or_device = device if dtype_or_device is None else dtype_or_device
+    if isinstance(dtype_or_device, torch.device) or isinstance(device, torch.device):
+        warn_msg = 'Cube will handle the tensor device placement, the call of torch.Tensor.to(device=...) will be ignore, ' \
                    'if you really want to put the tensor on cpu to excute some op, please wrap all related ops in an independent function ' \
-                   'and using nnscaler.register_op to register this function.'
+                   'and using nnscaler.graph.parser.register to register this function.'
         _logger.warning(warn_msg)
-
+    # create "to" in cube runtime functions because dtype if not kwarg in torch.Tensor.to
+    signature = 'nnscaler.runtime.function.to'
     annos = ['* -> *']
-    if 'tensor' in arg_values:  # overload 3
-        # Here we keep tensor.dtype,
-        # and discard tensor.device, because we will handle the device placement
-        arg_values['dtype'] = arg_values['tensor'].dtype
-        arg_values.pop('tensor')
-        # TODO: It may be better if we wrap dtype in an IRObject but it will introduce a lot of code.
-        #       (e.g. we need to insert a getattr op in the graph)
-        return IRDimops(To, 'to', signature, annos, [input], **arg_values)
-    elif 'device' not in arg_values and 'dtype' in arg_values:  # overload 2
-        return IRDimops(To, 'to', signature, annos, [input], **arg_values)
-    else:  # overload 1
-        # remove device from kwargs because we will handle the device placement
-        filtered_kwargs = {k: v for k, v in arg_values.items() if k != 'device'}
-        return IRDimops(To, 'to', signature, annos, [input], **filtered_kwargs)
+    if isinstance(dtype_or_device, torch.device):
+        # skip device movement as policy can determine device for the tensor.
+        return Identity(tensor)
+    elif isinstance(dtype_or_device, torch.dtype):
+        return IRDimops(To, 'to', signature, annos, [tensor], dtype_or_device=dtype_or_device)
+    elif isinstance(dtype_or_device, IRTensor):
+        dtype = dtype_or_device.dtype
+        return IRDimops(To, 'to', signature, annos, [tensor], dtype_or_device=dtype)
+    else:
+        raise RuntimeError(f'function.To with unknown arg: {dtype_or_device}')
 
 
 def GetItem(a: Any, b: Any, signature = None) -> Union[Any, IRPyFunc]:
@@ -2463,7 +2245,7 @@ def GetItem(a: Any, b: Any, signature = None) -> Union[Any, IRPyFunc]:
 def SetItem(__a: Any, __b: Any, __c: Any, *additonal, signature = None) -> Union[Any, IRPyFunc]:
     """
     _operator.setitem(__a, __b, __c) / nnscaler.runtime.function.setitem(__a, *__bc)
-
+    
     If __a is a IRTensor and __b is a tuple, __b will be flatten to ensure we can give each element an annotation,
     and the returned value is a IRDimops.
     If __a is a IRObject, the returned value is a IRPyFunc.
@@ -2561,7 +2343,7 @@ def GetAttr(instance: object, field: str, signature = None) -> Union[List[int], 
             return torch.strided
     if isinstance(obj, torch.finfo):
         return getattr(obj, name)
-    return IRPyFunc(signature, [instance, field], [IRObject.missing])
+    return IRPyFunc(signature, [instance, field], [IRObject()])
 
 
 def FInfo(dtype: torch.dtype, signature = None) -> torch.finfo:
@@ -2632,31 +2414,14 @@ def L1Loss(input, target, size_average=None, reduce=None, reduction='mean', sign
 
 
 def MakeTuple(inputs: Iterable, signature=None):
-    """
-    builtins.tuple
-    1. inputs can be an IRObject or a tuple/list of any type(including IRObject)
-    2. If inputs is IRObject, return IRPyFunc op
-       Otherwise, return concrete value.
-    """
-    if not isinstance(inputs, IRObject):
-        return tuple(inputs)
-
-    ir_value = IR.new('tuple', tuple(inputs.value), is_constant=inputs.is_constant)
-    return IRPyFunc(signature, inputs=[inputs], outputs=[ir_value])
+    return tuple(inputs)
 
 
 def MakeList(inputs: Iterable, signature=None):
-    """
-    builtins.list
-    1. inputs can be an IRObject or a tuple/list of any type(including IRObject)
-    2. If inputs is IRObject, return IRPyFunc op
-       Otherwise, return concrete value.
-    """
-    if not isinstance(inputs, IRObject):
+    if isinstance(inputs, Iterable):
         return list(inputs)
-
-    ir_value = IR.new('list', list(inputs.value), is_constant=inputs.is_constant)
-    return IRPyFunc(signature, inputs=[inputs], outputs=[ir_value])
+    else:
+        return IRPyFunc(signature, [inputs], [IRObject(value=list(inputs.value))])
 
 
 def MakeSlice(*inputs: Iterable, signature=None):
@@ -2778,7 +2543,7 @@ def Log(input, *, out=None, signature=None):
 def FullLike(input, fill_value, *, dtype=None, layout=None,
              device=None, requires_grad=False, memory_format=None, signature=None):
     """
-    torch.full_like(input, fill_value, *, dtype=None, layout=torch.strided, device=None, requires_grad=False, memory_format=torch.preserve_format) → Tensor
+    torch.full_like(input, fill_value, \*, dtype=None, layout=torch.strided, device=None, requires_grad=False, memory_format=torch.preserve_format) → Tensor
     """
     creation_function_args_check('torch.full_like', dtype=dtype, layout=layout, memory_format=memory_format)
     kwargs = {'fill_value': fill_value, 'requires_grad': requires_grad,'dtype': dtype}
@@ -2865,7 +2630,7 @@ def Type(tensor: IRTensor, dtype: Optional[Union[str, torch.dtype, IRObject]] = 
         raise ValueError("Expected 'out' to be None")
     annos = ['* -> *']
     original_dtype = dtype
-    dtype = _unwrap_value(dtype)
+    dtype = _unwrap_value(dtype) 
     if dtype is None:
         return IRPyFunc(signature,[tensor], [IRObject(value=str(tensor.dtype))])
     else:
@@ -2904,42 +2669,38 @@ def Conv1D(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1, 
     """
     torch.nn.functional.conv1d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1) → Tensor
     """
-    if len(input.shape) not in [2, 3]:
-        raise ValueError(f"Expected input tensor to have 2 or 3 dimensions, but got {input.shape}")
-    stride_val = IR.try_unwrap(stride)
-    padding_val = IR.try_unwrap(padding)
-    dilation_val = IR.try_unwrap(dilation)
-    groups_val = IR.try_unwrap(groups)
-    if isinstance(stride_val, int):
-        stride_val = (stride_val,)
-    if isinstance(dilation_val, int):
-        dilation_val = (dilation_val,)
-    kW = weight.shape[-1]
-    effective_kernel_size = (kW - 1) * dilation_val[0]
-    if isinstance(padding_val, str):
-        if padding_val == 'same':
+    if isinstance(stride, int): 
+        stride = (stride,)
+    if isinstance(dilation, int): 
+        dilation = (dilation,)
+    if isinstance(padding, str):
+        if padding == 'same':
             # For 'same' padding, calculate padding needed to keep the output shape the same as input shape
             # this mode doesn’t support any stride values other than 1.
-            iW = input.shape[-1]
-            total_padding = (iW - 1) * stride_val[0] + effective_kernel_size + 1 - iW
+            kW = weight.shape[2]
+            iW = input.shape[2]
+            effective_kernel_size = (kW - 1) * dilation[0] + 1
+            total_padding = max(0, (iW - 1) * stride[0] + effective_kernel_size - iW)
             pad_ = total_padding // 2
             # NOTE: While we calculate padding for both sides, conv1d expects a single integer for symmetrical padding.
-            padding_val = (pad_, )
-        elif padding_val == 'valid':
-            padding_val = (0, )
+            padding = (pad_, )
+        elif padding == 'valid':
+            padding = (0, )
         else:
-            raise ValueError("Unsupported padding value: {}. Use 'valid', 'same', or an integer.".format(padding_val))
-    elif isinstance(padding_val, int):
-        padding_val = (padding_val,)
-    elif not isinstance(padding_val, tuple):
+            raise ValueError("Unsupported padding value: {}. Use 'valid', 'same', or an integer.".format(padding))
+    elif isinstance(padding, int):
+        padding = (padding,)
+    elif not isinstance(padding, tuple):
         raise ValueError("Padding must be a string ('valid', 'same'), an integer, or a tuple")
 
-    iC, iW = input.shape[-2:]
-    oC, iCg, kW = weight.shape
-    oW = (iW + 2 * padding_val[0] - effective_kernel_size - 1) // stride_val[0] + 1
-    if iC // groups_val != iCg:
-        raise ValueError(f'Input shape and weight shape are not compatible for the number of groups. input shape: {input.shape}, weight shape: {weight.shape}, groups: {groups_val}')
-    if oC % groups_val != 0:
+    ori_groups = groups
+    if isinstance(groups, IRObject): groups = groups.value
+    _, iW = input.shape[1:3]
+    oC, iC, kW = weight.shape
+    oW = (iW + 2 * padding[0] - dilation[0] * (kW - 1) - 1) // stride[0] + 1
+    if input.shape[1] // groups != weight.shape[1]:
+        raise ValueError(f'Input shape and weight shape are not compatible for the number of groups. input shape: {input.shape}, weight shape: {weight.shape}, groups: {groups}')
+    if weight.shape[0] % groups != 0:
         raise ValueError('The output channels of weight must be divisible by the number of groups.')
     def modifier(kwargs: Dict, idx, dim, num: int, subnode_idx: int) -> Dict:
         # only for partitioning groups
@@ -2950,249 +2711,24 @@ def Conv1D(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1, 
             kw_groups = kw_groups.value
         kwargs['groups'] = kw_groups // num
         return kwargs
-    if len(input.shape) == 2:
-        if bias is None:
-            if groups_val == 1:
-                annos = [f'iC+ {iW}, oC iC+ {kW} -> oC {oW}']
-                rules = None
-            else:
-                rules = [TransformRule([DimopSplit.D(0), DimopSplit.D(0)], [DimopSplit.D(0)], modifier)]
-                annos = [f'(g {iCg}) {iW}, (g {oC // groups_val}) {iCg} {kW} -> (g {oC // groups_val}) {oW}']
+    if bias is None:
+        # NOTE: cannot support partitioning inchannel when groups>1
+        if groups == 1:
+            annos = [f'n iC+ {iW}, oC iC+ {kW} -> n oC {oW}']
+            rules = None
         else:
-            if groups_val == 1:
-                annos = [f'iC^ {iW}, oC iC^ {kW}, oC -> oC {oW}']
-                rules = None
-            else:
-                rules = [TransformRule([DimopSplit.D(1), DimopSplit.D(0), DimopSplit.D(0)], [DimopSplit.D(0)], modifier)]
-                annos = [f'(g {iCg}) {iW}, (g {oC // groups_val}) {iCg} {kW}, (g {oC // groups_val}) -> (g {oC // groups_val}) {oW}']
-    elif len(input.shape) == 3:
-        if bias is None:
-            # NOTE: cannot support partitioning inchannel when groups>1
-            if groups_val == 1:
-                annos = [f'n iC+ {iW}, oC iC+ {kW} -> n oC {oW}']
-                rules = None
-            else:
-                rules = [TransformRule([DimopSplit.D(1), DimopSplit.D(0)], [DimopSplit.D(1)], modifier)]
-                annos = [f'n (g {iCg}) {iW}, (g {oC//groups_val}) {iCg} {kW} -> n (g {oC//groups_val}) {oW}']
+            rules = [TransformRule([DimopSplit.D(1), DimopSplit.D(0)], [DimopSplit.D(1)], modifier)]
+            annos = [f'n (g {iC}) {iW}, (g {oC//groups}) {iC} {kW} -> n (g {oC//groups}) {oW}']
+    else:
+        # NOTE: not supported value partition of bias yet
+        if groups == 1:
+            annos = [f'n iC^ {iW}, oC iC^ {kW}, oC -> n oC {oW}']
+            rules = None
         else:
-            # NOTE: not supported value partition of bias yet
-            if groups_val == 1:
-                annos = [f'n iC^ {iW}, oC iC^ {kW}, oC -> n oC {oW}']
-                rules = None
-            else:
-                rules = [TransformRule([DimopSplit.D(1), DimopSplit.D(0), DimopSplit.D(0)], [DimopSplit.D(1)], modifier)]
-                annos = [f'n (g {iCg}) {iW}, (g {oC//groups_val}) {iCg} {kW}, (g {oC//groups_val}) -> n (g {oC//groups_val}) {oW}']
+            rules = [TransformRule([DimopSplit.D(1), DimopSplit.D(0), DimopSplit.D(0)], [DimopSplit.D(1)], modifier)]
+            annos = [f'n (g {iC}) {iW}, (g {oC//groups}) {iC} {kW}, (g {oC//groups}) -> n (g {oC//groups}) {oW}']
     return IRDimops(Conv1D, 'conv1d', signature, annos, [input, weight, bias] if bias is not None else [input, weight], rules,
-                    stride=stride, padding=padding, dilation=dilation, groups=groups)
-
-
-def ConvTranspose1D(input, weight, bias=None, stride=1, padding=0, output_padding=0, groups=1, dilation=1, signature=None):
-    """
-    torch.nn.functional.conv_transpose1d(input, weight, bias=None, stride=1, padding=0, output_padding=0, groups=1, dilation=1)
-    """
-    if len(input.shape) not in [2, 3]:
-        raise ValueError(f"Expected input tensor to have 2 or 3 dimensions, but got {input.shape}")
-    stride_val = IR.try_unwrap(stride)
-    padding_val = IR.try_unwrap(padding)
-    output_padding_val = IR.try_unwrap(output_padding)
-    dilation_val = IR.try_unwrap(dilation)
-    groups_val = IR.try_unwrap(groups)
-    if isinstance(stride_val, int):
-        stride_val = (stride_val,)
-    if isinstance(padding_val, int):
-        padding_val = (padding_val,)
-    if isinstance(output_padding_val, int):
-        output_padding_val = (output_padding_val,)
-    if isinstance(dilation_val, int):
-        dilation_val = (dilation_val,)
-    if not (len(stride_val) == 1 and len(padding_val) == 1 and len(output_padding_val) == 1 and len(dilation_val) == 1):
-        raise ValueError("stride, padding, output_padding, and dilation must have a length of 1")
-    if weight.shape[1] % groups_val != 0:
-        raise ValueError(f'Weight output channels must be divisible by groups. weight output channels: {weight.shape[1]}, groups: {groups_val}')
-    if input.shape[-2] != weight.shape[0]:
-        raise ValueError(f'Input channels and weight input channels must be the same. input channels: {input.shape[-2]}, weight input channels: {weight.shape[0]}')
-    if input.shape[-2] % groups_val != 0 or weight.shape[0] % groups_val != 0:
-        raise ValueError(f'Input shape and groups are not compatible. input shape: {input.shape}, weight shape: {weight.shape}, groups: {groups_val}')
-    iW = input.shape[-1]
-    kW = weight.shape[2]
-    oW = (iW - 1) * stride_val[0] - 2 * padding_val[0] + dilation_val[0] * (kW - 1) + output_padding_val[0] + 1
-    # iC+ represents the merging of input channels
-    # Example: If the input is (batch_size, 3, 32), with three input channels
-    # Partition: The 3 input channels can be logically divided into 3 subsets (each subset contains 1 channel).
-    # In the convolution calculation, these three subsets are combined into a whole for processing, and the output result is a new feature graph.
-    if len(input.shape) == 2:
-        if bias is None:
-            annos = [f'iC+ {iW}, iC+ oC {kW} -> oC {oW}'] if groups_val == 1 else \
-                    [f'(groups group_size^) {iW}, (groups group_size^) oC {kW} -> (groups oC) {oW}']
-            return IRDimops(ConvTranspose1D, 'conv_transpose1d', signature, annos, [input, weight],
-                            bias=None, stride=stride, padding=padding, output_padding=output_padding, groups=groups, dilation=dilation)
-        else:
-            annos = [f'iC+ {iW}, iC+ oC {kW}, oC -> oC {oW}'] if groups_val == 1 else \
-                    [f'(groups group_size^) {iW}, (groups group_size^) oC {kW}, oC -> (groups oC) {oW}']
-            return IRDimops(ConvTranspose1D, 'conv_transpose1d', signature, annos, [input, weight, bias],
-                        stride=stride, padding=padding, output_padding=output_padding, groups=groups, dilation=dilation)
-    if len(input.shape) == 3:
-        if bias is None:
-            annos = [f'n iC+ {iW}, iC+ oC {kW} -> n oC {oW}'] if groups_val == 1 else \
-                    [f'n (groups group_size^) {iW}, (groups group_size^) oC {kW} -> n (groups oC) {oW}']
-            return IRDimops(ConvTranspose1D, 'conv_transpose1d', signature, annos, [input, weight],
-                            bias=None, stride=stride, padding=padding, output_padding=output_padding, groups=groups, dilation=dilation)
-        else:
-            annos = [f'n iC+ {iW}, iC+ oC {kW}, oC -> n oC {oW}'] if groups_val == 1 else \
-                    [f'n (groups group_size^) {iW}, (groups group_size^) oC {kW}, oC -> n (groups oC) {oW}']
-            return IRDimops(ConvTranspose1D, 'conv_transpose1d', signature, annos, [input, weight, bias],
-                        stride=stride, padding=padding, output_padding=output_padding, groups=groups, dilation=dilation)
-
-
-def Conv2D(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1, signature=None):
-    """
-    torch.nn.functional.conv2d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1)
-
-    NOTE: the helo-exchange partitioning is supported in IRConv2D
-    TODO: partitioning groups or iC+ is possible, but need full fledged implementation of the annotation
-    """
-    if len(input.shape) not in [3, 4]:
-        raise ValueError(f"Expected input tensor to have 3 or 4 dimensions, but got {input.shape}")
-    stride_val = IR.try_unwrap(stride)
-    padding_val = IR.try_unwrap(padding)
-    dilation_val = IR.try_unwrap(dilation)
-    groups_val = IR.try_unwrap(groups)
-    if isinstance(stride_val, int):
-        stride_val = (stride_val, stride_val)
-    if isinstance(dilation_val, int):
-        dilation_val = (dilation_val, dilation_val)
-    if isinstance(padding_val, str):
-        if padding_val == 'same':
-            kH, kW = weight.shape[2:4]
-            iH, iW = input.shape[-2:]
-            effective_kernel_size_h = (kH - 1) * dilation_val[0] + 1
-            effective_kernel_size_w = (kW - 1) * dilation_val[1] + 1
-            total_padding_h = (iH - 1) * stride_val[0] + effective_kernel_size_h - iH
-            total_padding_w = (iW - 1) * stride_val[1] + effective_kernel_size_w - iW
-            pad_h = total_padding_h // 2
-            pad_w = total_padding_w // 2
-            padding_val = (pad_h, pad_w)
-        elif padding_val == 'valid':
-            padding_val = (0, 0)
-        else:
-            raise ValueError("Unsupported padding value: {}. Use 'valid', 'same', or an integer.".format(padding_val))
-    elif isinstance(padding_val, int):
-        padding_val = (padding_val, padding_val)
-    elif not isinstance(padding_val, tuple):
-        raise ValueError("Padding must be a string ('valid', 'same'), an integer, or a tuple")
-    iC, iH, iW = input.shape[-3:]
-    oC, iCg, kH, kW = weight.shape
-    oH = (iH + 2 * padding_val[0] - dilation_val[0] * (kH - 1) - 1) // stride_val[0] + 1
-    oW = (iW + 2 * padding_val[1] - dilation_val[1] * (kW - 1) - 1) // stride_val[1] + 1
-
-    if iC // groups_val != iCg:
-        raise ValueError(f'Input shape and weight shape are not compatible for the number of groups. input shape: {input.shape}, weight shape: {weight.shape}, groups: {groups_val}')
-    if oC % groups_val != 0:
-        raise ValueError('The output channels of weight must be divisible by the number of groups.')
-
-    def modifier(kwargs: dict, idx, dim, num: int, subnode_idx: int) -> dict:
-        # only for partitioning groups
-        kwargs = dict(**kwargs)
-        kw_groups = kwargs['groups']
-        if isinstance(kw_groups, IRObject):
-            kw_groups = kw_groups.value
-        kwargs['groups'] = kw_groups // num
-        return kwargs
-
-    if len(input.shape) == 3:
-        if bias is None:
-            if groups_val == 1:
-                annos = [f'iC+ {iH} {iW}, oC iC+ {kH} {kW} -> oC {oH} {oW}']
-                rules = None
-            else:
-                # NOTE: g can be partitioned only when rules are provided
-                annos = [f'(g {iCg}) {iH} {iW}, (g {oC // groups_val}) {iCg} {kH} {kW} -> (g {oC // groups_val}) {oH} {oW}']
-                rules = [TransformRule([DimopSplit.D(0), DimopSplit.D(0)], [DimopSplit.D(0)], modifier)]
-        else:
-            # NOTE: not supported value partition of bias yet
-            if groups_val == 1:
-                annos = [f'iC^ {iH} {iW}, oC iC^ {kH} {kW}, oC -> oC {oH} {oW}']
-                rules = None
-            else:
-                annos = [f'(g {iCg}) {iH} {iW}, (g {oC // groups_val}) {iCg} {kH} {kW}, (g {oC // groups_val}) -> (g {oC // groups_val}) {oH} {oW}']
-                rules = [TransformRule([DimopSplit.D(0), DimopSplit.D(0), DimopSplit.D(0)], [DimopSplit.D(0)], modifier)]
-    elif len(input.shape) == 4:
-        if bias is None:
-            if groups_val == 1:
-                annos = [f'n iC+ {iH} {iW}, oC iC+ {kH} {kW} -> n oC {oH} {oW}']
-                rules = None
-            else:
-                # NOTE: g can be partitioned only when rules are provided
-                annos = [f'n (g {iCg}) {iH} {iW}, (g {oC // groups_val}) {iCg} {kH} {kW} -> n (g {oC // groups_val}) {oH} {oW}']
-                rules = [TransformRule([DimopSplit.D(1), DimopSplit.D(0)], [DimopSplit.D(1)], modifier)]
-        else:
-            # NOTE: not supported value partition of bias yet
-            if groups_val == 1:
-                annos = [f'n iC^ {iH} {iW}, oC iC^ {kH} {kW}, oC -> n oC {oH} {oW}']
-                rules = None
-            else:
-                annos = [f'n (g {iCg}) {iH} {iW}, (g {oC // groups_val}) {iCg} {kH} {kW}, (g {oC // groups_val}) -> n (g {oC // groups_val}) {oH} {oW}']
-                rules = [TransformRule([DimopSplit.D(1), DimopSplit.D(0), DimopSplit.D(0)], [DimopSplit.D(1)], modifier)]
-
-    return IRDimops(Conv2D, 'conv2d', signature, annos, [input, weight, bias] if bias is not None else [input, weight], rules,
-                    stride=stride, padding=padding, dilation=dilation, groups=groups)
-
-
-def ConvTranspose2D(input, weight, bias=None, stride=1, padding=0, output_padding=0, groups=1, dilation=1, signature = None):
-    """
-    torch.nn.functional.conv_transpose2d(input, weight, bias=None, stride=1, padding=0, output_padding=0, groups=1, dilation=1)
-    """
-    if len(input.shape) not in [3, 4]:
-        raise ValueError(f"Expected input tensor to have 3 or 4 dimensions, but got {input.shape}")
-    stride_val = IR.try_unwrap(stride)
-    padding_val = IR.try_unwrap(padding)
-    output_padding_val = IR.try_unwrap(output_padding)
-    dilation_val = IR.try_unwrap(dilation)
-    groups_val = IR.try_unwrap(groups)
-    if isinstance(stride_val, int):
-        stride_val = (stride_val, stride_val)
-    if isinstance(padding_val, int):
-        padding_val = (padding_val, padding_val)
-    if isinstance(output_padding_val, int):
-        output_padding_val = (output_padding_val, output_padding_val)
-    if isinstance(dilation_val, int):
-        dilation_val = (dilation_val, dilation_val)
-    if not (len(stride_val) == 2 and len(padding_val) == 2 and len(output_padding_val) == 2 and len(dilation_val) == 2):
-        raise ValueError("stride, padding, output_padding, and dilation must have a length of 2")
-    iH, iW = input.shape[-2:]
-    kH, kW = weight.shape[2:4]
-    oH = (iH - 1) * stride_val[0] - 2 * padding_val[0] + dilation_val[0] * (kH - 1) + output_padding_val[0] + 1
-    oW = (iW - 1) * stride_val[1] - 2 * padding_val[1] + dilation_val[1] * (kW - 1) + output_padding_val[1] + 1
-    if input.shape[-3] != weight.shape[0]:
-        raise ValueError(f'Input channels and weight input channels must be the same. input channels: {input.shape[-3]}, weight input channels: {weight.shape[0]}')
-    if input.shape[-3] % groups_val != 0:
-        raise ValueError(f'Input shape and groups are not compatible. input shape: {input.shape}, groups: {groups_val}')
-    if weight.shape[0] % groups_val != 0:
-        raise ValueError(f'Weight shape and groups are not compatible. weight shape: {weight.shape}, groups: {groups_val}')
-    # FIXME: inchannel is reduction dim or outchannel?
-    # iC+ represents the merging of input channels
-    if len(input.shape) == 3:
-        if bias is None:
-            annos = [f'iC+ {iH} {iW}, iC+ oC {kH} {kW} -> oC {oH} {oW}'] if groups_val == 1 else \
-                    [f'(groups group_size^) {iH} {iW}, (groups group_size^) oC {kH} {kW} -> (groups oC) {oH} {oW}']
-            return IRDimops(ConvTranspose2D, 'conv_transpose2d', signature, annos, [input, weight],
-                            bias=None, stride=stride, padding=padding, output_padding=output_padding, groups=groups, dilation=dilation)
-        else:
-            annos = [f'iC+ {iH} {iW}, iC+ oC {kH} {kW}, oC -> oC {oH} {oW}'] if groups_val == 1 else \
-                    [f'(groups group_size^) {iH} {iW}, (groups group_size^) oC {kH} {kW}, oC -> (groups oC) {oH} {oW}']
-            return IRDimops(ConvTranspose2D, 'conv_transpose2d', signature, annos, [input, weight, bias],
-                            stride=stride, padding=padding, output_padding=output_padding, groups=groups, dilation=dilation)
-    if len(input.shape) == 4:
-        if bias is None:
-            annos = [f'n iC+ {iH} {iW}, iC+ oC {kH} {kW} -> n oC {oH} {oW}'] if groups_val == 1 else \
-                    [f'n (groups group_size^) {iH} {iW}, (groups group_size^) oC {kH} {kW} -> n (groups oC) {oH} {oW}']
-            return IRDimops(ConvTranspose2D, 'conv_transpose2d', signature, annos, [input, weight],
-                            bias=None, stride=stride, padding=padding, output_padding=output_padding, groups=groups, dilation=dilation)
-        else:
-            annos = [f'n iC+ {iH} {iW}, iC+ oC {kH} {kW}, oC -> n oC {oH} {oW}'] if groups_val == 1 else \
-                    [f'n (groups group_size^) {iH} {iW}, (groups group_size^) oC {kH} {kW}, oC -> n (groups oC) {oH} {oW}']
-            return IRDimops(ConvTranspose2D, 'conv_transpose2d', signature, annos, [input, weight, bias],
-                            stride=stride, padding=padding, output_padding=output_padding, groups=groups, dilation=dilation)
+                    stride=stride, padding=padding, dilation=dilation, groups=ori_groups)
 
 
 def SVD(input, some=True, compute_uv=True, *, out=None, signature=None):
@@ -3271,7 +2807,7 @@ def Gather(input: IRTensor, dim, index: IRTensor, sparse_grad=False, out=None, s
             input_anno[i] += '^'
             index_anno[i] += '^'
         else:
-            # TODO: Currently, this only works in static cases.
+            # TODO: Currently, this only works in static cases. 
             # When dynamic shape is enabled, this partition may be incorrect.
             # We keep the partition here for now, and consider reporting errors that cannot be partitioned at run time in future.
             index_anno[i] = input_anno[i]
@@ -3306,7 +2842,7 @@ def Unfold(input: IRTensor, kernel_size, dilation=1, padding=0, stride=1, signat
     """
     if not isinstance(input, IRTensor) or len(input.shape) != 4:
         raise ValueError("Input must be an IRTensor with 4 dimensions, [N, C, H, W].")
-
+    
     kernel_size = (kernel_size, kernel_size) if isinstance(kernel_size, int) else kernel_size
     dilation = (dilation, dilation) if isinstance(dilation, int) else dilation
     padding = (padding, padding) if isinstance(padding, int) else padding
@@ -3330,43 +2866,16 @@ def Sigmoid(input, *, out=None, signature=None):
     return IRDimops(Sigmoid, 'sigmoid', signature, annos, [input])
 
 
-def DictKeys(o: Union[Dict, IRObject], signature=None):
-    signature = 'nnscaler.runtime.function.dict_keys'
-
-    if not isinstance(o, dict) and not (isinstance(o, IRObject) and isinstance(o.value, dict)):
-         raise ValueError(f'the input should be a dict or an IRObject with dict value, but get {o}')
-
-    # put tuple of keys as value, because tuple supports all operations of dict.keys()
-    value = tuple(o.keys() if isinstance(o, dict) else o.value.keys())
-
-    # set is_constant to False to make sure it will never be folded.
-    ir_value = IR.new('dictkeys', value, is_constant=False)
-    return IRPyFunc(signature, inputs=[o], outputs=[ir_value])
+def Dictkeys(o: Union[Dict, IRObject], signature=None):
+    assert isinstance(o, dict) or isinstance(o.value, dict), f'the input should be a dict or an IRObject with dict value, but get {o}'
+    return IRPyFunc(signature, inputs=[o], outputs=[IRObject(name='dictkeys', value=o.value.keys(), is_constant=o.is_constant)])
 
 
 def DictValues(o: Union[Dict, IRObject], signature=None):
-    signature = 'nnscaler.runtime.function.dict_values'
-
-    if not isinstance(o, dict) and not (isinstance(o, IRObject) and isinstance(o.value, dict)):
-         raise ValueError(f'the input should be a dict or an IRObject with dict value, but get {o}')
-
-    # put tuple of values as value, because tuple supports all operations of dict.values()
-    value = o.values() if isinstance(o, dict) else o.value.values()
-
-    # set is_constant to False to make sure it will never be folded.
-    ir_value = IR.new('dictvalues', value, is_constant=False)
-    return IRPyFunc(signature, inputs=[o], outputs=[ir_value])
+    assert isinstance(o, dict) or isinstance(o.value, dict), f'the input should be a dict or an IRObject with dict value, but get {o}'
+    return IRPyFunc(signature, inputs=[o], outputs=[IRObject(name='dictvalues', value=o.value.values(), is_constant=o.is_constant)])
 
 
 def DictItems(o: Union[Dict, IRObject], signature=None):
-    signature = 'nnscaler.runtime.function.dict_values'
-
-    if not isinstance(o, dict) and not (isinstance(o, IRObject) and isinstance(o.value, dict)):
-         raise ValueError(f'the input should be a dict or an IRObject with dict value, but get {o}')
-
-    # put tuple of kv pairs as value, because tuple supports all operations of dict.items()
-    value = o.items() if isinstance(o, dict) else o.value.items()
-
-    # set is_constant to False to make sure it will never be folded.
-    ir_value = IR.new('dictitems', value, is_constant=False)
-    return IRPyFunc(signature, inputs=[o], outputs=[ir_value])
+    assert isinstance(o, dict) or isinstance(o.value, dict), f'the input should be a dict or an IRObject with dict value, but get {o}'
+    return IRPyFunc(signature, inputs=[o], outputs=[IRObject(name='dictitems', value=o.value.items(), is_constant=o.is_constant)])

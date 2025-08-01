@@ -11,16 +11,15 @@ from .util import replica, partition_node
 from nnscaler.graph import IRGraph
 from nnscaler.graph.segment import IRSegment
 from nnscaler.ir.operator import IRDataOperation, IRFwOperation
-from nnscaler.ir.tensor import IRSubTensor
-from nnscaler.ir import IRCell
 from nnscaler.graph.function import IRDimops
 from nnscaler.graph.function.anchor import IRGraphAnchor
 from nnscaler.graph.function.pyfunc import IRPyFunc
 from nnscaler.graph.schedule.predefined import PredefinedSched
 
 import json
+import os
 import logging
-import copy
+import time
 from typing import Dict, List
 from pathlib import Path
 from collections import defaultdict
@@ -37,7 +36,6 @@ def check_env(autodist_config: AutoDistConfig):
     if not arch_dir.exists():
         _logger.info(f'create folder: {arch_dir}')
         arch_dir.mkdir(parents=True, exist_ok=True)
-
 
 def pre_estimate_mem(graph: ModelGraph):
     '''
@@ -97,7 +95,7 @@ def calc_parallel_plan(graph: IRGraph,
         [node.cid for node in group] for group in recompute_groups
     ]
 
-    if autodist_config.pipeline_enabled:
+    if autodist_config.pipeline:
         pp_out = calc_optimal_pp_plan(autodist_graph, autodist_config)
     else:
         pp_out = calc_optimal_spmd_plan(autodist_graph, autodist_config)
@@ -118,7 +116,9 @@ def parallelize_graph(graph: IRGraph,
             search_out_json = json.load(f)
         search_out = PipelineSearchOutput.from_json(search_out_json)
     else:
+        compile_start_time = time.time()
         search_out = calc_parallel_plan(graph, autodist_config)
+        compile_cost_time = time.time() - compile_start_time
 
         if autodist_config.save_plan_path:
             _logger.info(f'save plan to {autodist_config.save_plan_path}')
@@ -138,69 +138,58 @@ def parallelize_graph(graph: IRGraph,
         nodes = [cid2node[cid] for cid in group]
         graph.recompute(nodes)
 
-    def subtensor_desc(t):
-        return (t.indmap, t.grad is not None)
-    tensor_split_info = defaultdict(dict)
-    for ftensor in graph.full_tensors():
-        if ftensor.is_grad():
-            continue
-        consumers = graph.consumers(ftensor)
-        if not consumers:
-            continue
-        for consumer in consumers:
-            find_desc = False
-            for stage_idx, stage_desc in enumerate(pp_desc.spmd_descs):
-                if consumer.cid not in stage_desc.partition_descs:
-                    continue
-                find_desc = True
-                node_desc = stage_desc.partition_descs[consumer.cid].desc
-                if len(node_desc) != 1:
-                    raise RuntimeError(f'node {consumer} is partitioned along multiple dims')
-
-                (p_idx, p_dim), p_num = node_desc[0]
-                if p_idx == -1:
-                    partitioned_node = consumer
-                else:
-                    partitioned_nodes = consumer.algorithm('dim').instantiate(idx=p_idx, dim=p_dim, num=p_num)
-                    if partitioned_nodes is None:
-                        raise RuntimeError(f'node {consumer} cannot be partitioned by {p_idx}-{p_dim}-{p_num}')
-                    partitioned_node = partitioned_nodes[0]
-
-                if stage_idx not in tensor_split_info[ftensor]:
-                    tensor_split_info[ftensor][stage_idx] = set()
-                for input in partitioned_node.inputs():
-                    if isinstance(input, IRSubTensor) and input.parent == ftensor:
-                        if p_idx == -1 and stage_desc.mesh_desc.ngpus > 1:
-                            tensor_split_info[ftensor][stage_idx].add(('REPLICATED', subtensor_desc(input)))
-                        else:
-                            # special case: if the stage has only one gpu, we treat it as partitioned
-                            tensor_split_info[ftensor][stage_idx].add(('PARTITIONED', subtensor_desc(input)))
-                break
-            assert find_desc, f'node {consumer} not found in any stage'
-
-    # add multiref for shared parameters across stages
-    # note that we have constrained that shared parameters cannot be partitioned in SPMDSolver, other input tensors
-    # belonging to the same operator can be partitioned. For example, in some LLMs, the embedding matrix is shared
-    # with the output layer. In this case, the batch dim / seq dim of the activation tensor can be partitioned.
-    for ftensor, stage_info in tensor_split_info.items():
-        if not ftensor.is_param():
-            continue
-        splits = set()
-        find_replicated = False
-        for stage_splits in stage_info.values():
-            splits.update(stage_splits)
-            if any(s[0] == 'REPLICATED' for s in stage_splits):
-                find_replicated = True
-        splits = list(splits)
-        # For safety, we will add multiref when detecting shared param are all replicated for pipeline parallelism.
-        # The reason is that stages may have different number of devices, it is hard to synchronize gradients directly
-        # by inserting reducers although weights are all REPLICAED.
-        if len(splits) > 1 or (len(pp_desc.spmd_descs) > 1 and find_replicated):
-            _logger.info(f'add multiref for shared param {ftensor}')
-            graph.multiref(ftensor, comment='shared param')
-
     # graph staging
     if len(pp_desc.spmd_descs) > 1:
+        # add multiref for shared parameters across stages
+        shared_param2stage_info = defaultdict(dict)
+        for ftensor in graph.attributes():
+            if not ftensor.is_param():
+                continue
+            for ctensor, consumer in zip(graph.ctensors(ftensor),
+                                         graph.consumers(ftensor)):
+                if ctensor.grad is None:
+                    continue
+                for stage_idx, stage_desc in enumerate(pp_desc.spmd_descs):
+                    if consumer.cid in stage_desc.partition_descs:
+                        if len(stage_desc.partition_descs[
+                                consumer.cid].desc) != 1:
+                            raise RuntimeError(
+                                f'node {consumer} has more than one partition dim'
+                            )
+                        (p_idx, p_dim), p_num = stage_desc.partition_descs[
+                            consumer.cid].desc[0]
+                        if p_idx != -1 and consumer.inputs()[p_dim] == ftensor:
+                            raise RuntimeError(
+                                f'node {consumer} has partitioned input {ftensor}'
+                            )
+                        is_replicated = p_idx == -1
+                        if stage_idx not in shared_param2stage_info[ftensor]:
+                            shared_param2stage_info[ftensor][stage_idx] = []
+                        shared_param2stage_info[ftensor][stage_idx].append(
+                            is_replicated)
+
+        for ftensor, stage_info in shared_param2stage_info.items():
+            if len(stage_info) == 1:
+                continue
+            # special case: all stages have only one gpu
+            stage_idxs = list(stage_info.keys())
+            stage_sizes = [
+                pp_desc.spmd_descs[i].mesh_desc.ngpus for i in stage_idxs
+            ]
+            if all([s == 1 for s in stage_sizes]):
+                continue
+            # check whether all partitioned
+            # In AutoDist, shared parameters are not allowed to be partitioned.
+            # As a result, the related operator is replicated or in data parallel.
+            has_replicated = False
+            for stage_idx, replicate_info in stage_info.items():
+                if any(replicate_info):
+                    has_replicated = True
+                    break
+            if has_replicated:
+                _logger.info(f'add multiref for shared param {ftensor}')
+                graph.multiref(ftensor)
+
         stages = []
         for spmd_desc in pp_desc.spmd_descs:
             stage = []
@@ -215,24 +204,38 @@ def parallelize_graph(graph: IRGraph,
     else:
         stages = [graph]
 
-    if autodist_config.pipeline_nstages != 'auto' and len(stages) != autodist_config.pipeline_nstages:
-        raise RuntimeError("pipeline_nstages doesn't match the number of stages (based on your pipeline_pivots config) in the plan")
+    # TODO: check pipeline_nstages when ready.
+    # if autodist_config.pipeline and len(stages) != autodist_config.pipeline_nstages:
+    #     raise RuntimeError("pipeline_nstages doesn't match the number of stages (based on your pipeline_pivots config) in the plan")
 
-    # add multiref to an activation tensor when the states of the tensor and its grad are different
-    # among consumers and current segment's outputs
-    for idx, (stage, spmd_desc) in enumerate(zip(stages, pp_desc.spmd_descs)):
+    # add multiref to a tensor when
+    # 1. it is not a grad tensor
+    # 2. it has more than one consumers
+    # 3. consumers are different operators or in different partitions
+    for stage, spmd_desc in zip(stages, pp_desc.spmd_descs):
         for ftensor in stage.full_tensors():
-            if ftensor.is_grad() or ftensor.is_param():
+            if ftensor.is_grad():
                 continue
-            if idx not in tensor_split_info[ftensor]:
+            if len(stage.consumers(ftensor)) <= 1:
                 continue
-            splits = copy.deepcopy(tensor_split_info[ftensor][idx])
-            for output in IRCell.get_objects_from_complex(stage.outputs()):
-                if isinstance(output, IRSubTensor) and output.parent == ftensor:
-                    splits.add(('REPLICATED', subtensor_desc(output)))
+            consumers = stage.consumers(ftensor)
+            splits = set()
+            for consumer in consumers:
+                if consumer.cid in spmd_desc.partition_descs:
+                    node_desc = spmd_desc.partition_descs[consumer.cid].desc
+                    if len(node_desc) != 1:
+                        raise RuntimeError(
+                            f'node {consumer} has more than one partition desc')
+                    (p_idx, p_dim), p_num = node_desc[0]
+                else:
+                    _logger.warning(
+                        f'node {consumer} is not in any partition desc')
+                    p_idx, p_dim, p_num = -1, -1, spmd_desc.mesh_desc.ngpus
+                repr_str = f'{consumer.signature}-{p_idx}-{p_dim}-{p_num}'
+                splits.add(repr_str)
             if len(splits) > 1:
-                _logger.debug(f'add multiref for {ftensor} in stage {stage}')
-                stage.multiref(ftensor, comment='activation')
+                _logger.debug(f'add multiref {consumers}')
+                stage.multiref(ftensor)
 
     # partition and assign nodes to devices
     # TODO(yizhu1): network topo aware device map

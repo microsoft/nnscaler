@@ -65,7 +65,7 @@ A shape annotation consists of dimension annotation separated by (multiple) spac
 
 """
 
-from typing import Callable, Dict, Iterable, List, Union, Set, Tuple, Optional, overload
+from typing import Callable, Dict, Iterable, List, Union, Set, Tuple, Optional
 import enum
 import re
 import string
@@ -74,6 +74,7 @@ from itertools import dropwhile
 
 from nnscaler.ir.cten import IRTensor, IRObject
 from nnscaler.ir.operator import IRFwOperation
+from nnscaler.algorithm.factory import DistAlgorithmFactory
 
 
 _kSpecialIdentifiers = ('*', '?')
@@ -111,11 +112,11 @@ class DimAnno:
         return '(' + ' '.join(self._identifiers) + ')'
 
     @property
-    def identifiers(self) -> Tuple[str, ...]:
+    def identifiers(self) -> Tuple[str]:
         return self._identifiers
 
     @property
-    def reduces(self) -> Tuple[ReduceType, ...]:
+    def reduces(self) -> Tuple[ReduceType]:
         return self._reduces
 
     def __eq__(self, other):
@@ -174,7 +175,7 @@ class ShapeAnno:
         self._dims: Tuple[DimAnno] = dim_annos
 
     @property
-    def dims(self) -> Tuple[DimAnno, ...]:
+    def dims(self) -> Tuple[DimAnno]:
         return self._dims
 
     @property
@@ -416,15 +417,14 @@ class OpAnno:
         outputs = ', '.join(repr(output) for output in self.outputs())
         return inputs + ' -> ' + outputs
 
-    @classmethod
-    def parse(cls, anno: str) -> Tuple[Tuple[ShapeAnno, ...], Tuple[ShapeAnno, ...]]:
+    @staticmethod
+    def parse(anno: str) -> Tuple[Tuple[ShapeAnno], Tuple[ShapeAnno]]:
         """!
         Parse op annotation string to input shape annos and output shape annos.
 
-        Args:
-            anno (str): operator annotation
-        Returns:
-            tuple[tuple[ShapeAnno, ...], tuple[ShapeAnno, ...]]: input shape annos and output shape annos
+        @param anno str: operator annotation
+
+        @return (inputs, outputs) Tuple[Tuple[ShapeAnno], Tuple[ShapeAnno]]
         """
         # to inputs and outputs
         if '->' not in anno:
@@ -438,69 +438,12 @@ class OpAnno:
         # to ShapeAnnos
         inputs: Tuple[ShapeAnno] = tuple(ShapeAnno(shape) for shape in inputs)
         outputs: Tuple[ShapeAnno] = tuple(ShapeAnno(shape) for shape in outputs)
-        cls._verify_and_fix_inner_dim_anno(anno, inputs, outputs)
-
         return inputs, outputs
 
-    @classmethod
-    def _verify_and_fix_inner_dim_anno(
-        cls,
-        anno: str,
-        inputs: Tuple[ShapeAnno, ...],
-        outputs: Tuple[ShapeAnno, ...]
-    ):
-        """
-        Verify to make sure reduce type of annotations are consistent.
-        We also force reduce type of all inner dimension identifiers to be freeze,
-        Because we can't partition inner dimensions in current implementation.
-        """
-        # used to track reduce type of each identifier
-        id_reduce_map: dict[str, DimAnno.ReduceType] = dict()
-        for shape in inputs + outputs:
-            for edim in shape.dims:
-                for idx, identifier in enumerate(edim.identifiers):
-                    if id_reduce_map.setdefault(identifier, edim.reduces[idx]) != edim.reduces[idx]:
-                        raise ValueError(f"Reduce type of identifier {identifier} is not consistent")
-
-        non_first_inner_dim_ids = cls._get_non_leading_anno_ids(*inputs, *outputs)
-        updated_ids = set()
-
-        for shape in inputs + outputs:
-            for edim in shape.dims:
-                reduces = []
-                for idx, identifier in enumerate(edim.identifiers):
-                    if identifier in non_first_inner_dim_ids and edim.reduces[idx] != DimAnno.ReduceType.Freeze:
-                        updated_ids.add(identifier)
-                        reduces.append(DimAnno.ReduceType.Freeze)
-                    else:
-                        reduces.append(edim.reduces[idx])
-                # HACK: modify protected member to fix reduce type inplace
-                edim._reduces = tuple(reduces)
-
-        if updated_ids:
-            _logger.debug(f"Inner dimensions {updated_ids} in {anno} are forced to be frozen because they can't be partitioned")
-
-    @classmethod
-    def _get_non_leading_anno_ids(cls, *shape_annos: ShapeAnno) -> Set[str]:
-        """
-        collect all unpartitioned identifiers in inner dimensions, which most are not in the first position.
-        See `transform_space` and `_verify_and_fix_inner_dim_anno` for more information.
-        """
-        nonleading_ids = set()
-        for shape in shape_annos:
-            for dim, dim_anno in enumerate(shape.dims):
-                for identifier in list(dropwhile(lambda x: x == '1', dim_anno.identifiers))[1:]:
-                    if not str.isdecimal(identifier):
-                        nonleading_ids.add(identifier)
-        return nonleading_ids
-
-    @classmethod
-    def create_op_str(
-        cls,
-        ins: Tuple[Tuple[Union[str, Tuple[str]]]],
-        ous: Tuple[Tuple[Union[str, Tuple[str]]]]
-    ) -> str:
-        """
+    @staticmethod
+    def create_op_str(ins: Tuple[Tuple[Union[str, Tuple[str]]]],
+                      ous: Tuple[Tuple[Union[str, Tuple[str]]]]) -> str:
+        """!
         Create operator annotation string
         e.g.,
             ins = [ ['a', 'b', 'c+'], ['c+', ['d', 'e']] ]
@@ -508,12 +451,10 @@ class OpAnno:
         =>
             'a b c+, c+ (d e) -> a b d e'
 
-        Args:
-            ins (Tuple[Tuple[Union[str, Tuple[str]]]): input identifier list
-            ous (Tuple[Tuple[Union[str, Tuple[str]]]): output identifier list
+        @param ins Tuple[Tuple[Union[str, Tuple[str]]]: input identifier list
+        @param ous Tuple[Tuple[Union[str, Tuple[str]]]: output identifier list
 
-        Returns:
-            str: operator annotation
+        @return anno str: operator annotation
         """
         in_annos = list()
         ou_annos = list()
@@ -560,9 +501,14 @@ class OpAnno:
         # in both cases, a can be partitioned, but b can't
 
         # collect all unpartitioned identifiers that are not in first position
-        nonleading_ids = self._get_non_leading_anno_ids(*self.inputs(), *self.outputs())
+        nonleading_ids = set()
+        for shape in self.inputs() + self.outputs():
+            for dim, dim_anno in enumerate(shape.dims):
+                for identifier in list(dropwhile(lambda x: x == '1', dim_anno.identifiers))[1:]:
+                    if not str.isdecimal(identifier):
+                        nonleading_ids.add(identifier)
 
-        visited : Set[str] = set()  # to remove equivalent configurations
+        visited : Set[str] = set()  # to remove equavalent configurations
         configs = []
         shapes = self.inputs()
         for idx, shape in enumerate(shapes):
@@ -734,6 +680,11 @@ class IRDimops(IRFwOperation):
         n_outputs = len(self._oannos)
         super().__init__(name, signature, inputs, n_outputs, **kwargs)
 
+        # change tensor to IRObject for '?' annotation
+        for idx, shape_anno in enumerate(self._oannos):
+            if shape_anno.ignore:
+                self.set_output(idx, IRObject())
+
     @property
     def anno(self) -> OpAnno:
         return self._anno
@@ -764,17 +715,16 @@ class IRDimops(IRFwOperation):
         assert index < len(self.outputs()), "index out of boudary"
         return self._oannos[index]
 
-    def infer_shape(self) -> dict[int, tuple[int, ...]]:
+    def infer_shape(self) -> bool:
         """
         Shape inference using the matched annotation and tensor.
 
         @return sucess: True if successfully inferred shape
         """
-        shapes = {}
-        for oidx in range(len(self.outputs())):
+        for oidx, otensor in enumerate(self.outputs()):
             shape_anno = self.oanno(oidx)
             if shape_anno.ignore:
-                # otensor can be any type, including IRObject, collection types (list, dict, etc.)
+                assert isinstance(otensor, IRObject), f"expect IRObject for unknown shape, get {otensor}"
                 continue
             shape = []
             for odim in range(shape_anno.ndims):
@@ -782,8 +732,11 @@ class IRDimops(IRFwOperation):
                 for identifier in shape_anno[odim].identifiers:
                     accum *= self.anno.getlen(identifier)
                 shape.append(accum)
-            shapes[oidx] = tuple(shape)
-        return shapes
+            otensor.shape = shape
+        # print(f'=> sign: {self.signature} anno: {self.anno}\n'
+        #       f'=> inputs: {self.inputs()}\n'
+        #       f'=> outputs: {self.outputs()}')
+        return True
 
     def new(self, inputs: List[IRTensor], outputs: List[IRTensor], **kwargs):
         """!
@@ -912,6 +865,24 @@ class IRDimops(IRFwOperation):
                 if not ret:
                     return False
         return True
+
+    def algorithms(self, tag: Optional[str] = None):
+        factory = DistAlgorithmFactory()
+        if tag is None:
+            algos = list()
+            if factory.exist(type(self)):
+                algos += [template(self) for template in factory.algorithms(type(self))]
+            if factory.exist(IRDimops):
+                algos += [template(self) for template in factory.algorithms(IRDimops)]
+            return algos
+        else:
+            if factory.exist(type(self), tag):
+                template = factory.algorithms(type(self), tag)
+                return template(self)
+            if factory.exist(IRDimops, tag):
+                template = factory.algorithms(IRDimops, tag)
+                return template(self)
+            return None
 
     def transform_space(self) -> List[Tuple[int, int]]:
         """

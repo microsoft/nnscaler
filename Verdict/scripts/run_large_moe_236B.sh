@@ -1,0 +1,4 @@
+#!/bin/bash
+python main.py --sm gen_model/mgeners/moe_default_dp1_pp1_tp1_nm1_gbs1024_ly60_h128_hi512_sq128_a6_r160.pkl --pm gen_model/mgeners/moe_default_dp16_pp4_tp8_nm16_gbs1024_ly60_h128_hi512_sq128_a6_r160.pkl --seed 0 --no_cache_nodes --no_cache_stages --time  --max_ser_proc 30 --max_vrf_proc 30 --loglevel INFO |& tee -a data/logs/moe_default_dp16_pp4_tp8_nm16_gbs1024_ly60_h128_hi512_sq128_a6_r160.txt
+
+# python main.py --sm gen_model/mgeners/moe_default_dp1_pp1_tp1_nm1_gbs1024_ly60_h128_hi512_sq128_a6_r160.pkl --pm gen_model/mgeners/moe_default_dp16_pp4_tp8_nm16_gbs1024_ly60_h128_hi512_sq128_a6_r160.pkl --seed 0  --time  --max_ser_proc 30 --max_vrf_proc 1 --loglevel DEBUG |& tee tmp.txt

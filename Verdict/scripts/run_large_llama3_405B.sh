@@ -1,0 +1,4 @@
+#!/bin/bash
+python main.py --sm gen_model/mgeners/llama3_default_dp1_pp1_tp1_nm1_gbs2048_ly126_h128_hi1024_sq128.pkl --pm gen_model/mgeners/llama3_default_dp64_pp16_tp8_nm16_gbs2048_ly126_h128_hi1024_sq128.pkl --seed 0 --no_cache_nodes --no_cache_stages --time  --max_ser_proc 30 --max_vrf_proc 30 --loglevel INFO |& tee -a data/logs/llama3_default_dp64_pp16_tp8_nm16_gbs2048_ly126_h128_hi1024_sq128.txt
+
+# python main.py --sm gen_model/mgeners/llama3_default_dp1_pp1_tp1_nm1_gbs2048_ly126_h128_hi1024_sq128.pkl --pm gen_model/mgeners/llama3_default_dp64_pp16_tp8_nm16_gbs2048_ly126_h128_hi1024_sq128.pkl --seed 0 --time  --max_ser_proc 30 --max_vrf_proc 30 --loglevel DEBUG |& tee -a data/logs/llama3_default_dp64_pp16_tp8_nm16_gbs2048_ly126_h128_hi1024_sq128.txt

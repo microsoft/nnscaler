@@ -1,6 +1,7 @@
 #  Copyright (c) Microsoft Corporation.
 #  Licensed under the MIT License.
 
+
 class IDGenerator:
     """
     Tensor / Operator manager. To guarantee that each IRTensor / IROperator id

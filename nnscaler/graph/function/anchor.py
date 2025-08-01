@@ -1,6 +1,7 @@
 #  Copyright (c) Microsoft Corporation.
 #  Licensed under the MIT License.
 
+
 from nnscaler.ir.operator import IRFwOperation
 from nnscaler.ir.cten import IRObject
 
@@ -48,8 +49,8 @@ class IRGraphAnchor(IRFwOperation):
         self.kwargs['name'] = name
         self.set_output(0, IRObject('anchor', value=None))
 
-    def infer_shape(self) -> dict[int, tuple[int, ...]]:
-        return {}
+    def infer_shape(self):
+        return True
 
     def __repr__(self) -> str:
         return f"AnchorOp-{self.cid}(name={self.name})"

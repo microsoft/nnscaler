@@ -1,0 +1,16 @@
+- model.py: fairscale, fs_init?
+- inference only?
+
+1. llama2 7B (zhiqi's version)
+2. llama3 8B
+
+Q:
+- inference only?
+- cuda OOM?
+- compiler & parallelize
+
+
+1. llama inference 改 training
+2. mock flash attention
+3. 跑起来8b version, 用parallelize
+

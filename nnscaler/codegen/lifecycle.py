@@ -20,7 +20,7 @@ class LifeCycle:
         graph_outputs = IRSegment.get_objects_from_complex(graph_outputs)
         func_emission = FuncEmission()
 
-        self.nodes: Dict[IRCell, int] = {node: lid for lid, node in enumerate(nodes)}
+        self.nodes: Dict[int] = {node: lid for lid, node in enumerate(nodes)}
         # the last line id of consuming or producing a tensor
         self.lifetime: Dict[IRObject, int] = {}
         # the tensors can be released given the finish of line id
@@ -38,20 +38,12 @@ class LifeCycle:
             inputs : Iterable[IRObject]
 
             if isinstance(node, (IRSegment, ExeReuseCell)):
-                # this is only for scheduler to track the lifetime of tensors
-                # for module code generation, no IRSegment/ExeReuseCell will be used.
-                # so will not go into this branch.
-
                 # forward segment
                 if node.isfw():
                     outputs = node.outputs()
                     inputs = node.inputs()
                 # backward segment
                 else:
-                    # in `_train_step`, we will explicitly call backward to generate gradients.
-                    # When pipeline is enabled, there will be multiple backward calls in the same segment.
-                    # So we also need to track the temporary gradient tensors
-                    # and delete them after the backward call to save memory.
                     fw_inputs, fw_outputs, output_grads, input_grads = \
                         func_emission.get_backward_callsite_io_tensors(node)
                     # remove loss gradient
@@ -65,10 +57,10 @@ class LifeCycle:
 
             # aggressively mark all outputs for immediate deletion,
             # namely *after* 'i'-th statement, in case it's never used.
-            self.lifetime.update((tout, i) for tout in IRSegment.get_objects_from_complex(outputs) if is_activation(tout))
+            self.lifetime.update((tout, i) for tout in outputs if is_activation(tout))
 
             # "fast-forward" all inputs to the current statement, namely after 'i'-th node.
-            self.lifetime.update((tin, i) for tin in IRSegment.get_objects_from_complex(inputs) if is_activation(tin))
+            self.lifetime.update((tin, i) for tin in inputs if is_activation(tin))
 
 
         # Here (i+1) is always greater than 'len(nodes)'
@@ -102,43 +94,30 @@ class LifeCycle:
         line_id = self.nodes[node]
         return self.release.get(line_id, [])
 
-    def releasable_after_node(self, obj: IRObject, node: IRCell) -> bool:
+    def releasable_after_node(self, tensor: IRSubTensor, node: IRCell) -> bool:
         """
-        Check if the tensor is releasable after executing the node.
-        Please note that if it is not a IRSubTensor(is IRObject),
-            we will never manually release it.
+        Check if the tensor is releasable after executing the node
 
-        Args:
-            tensor (IRObject): the tensor to be checked
-            node (IRCell): the node to be checked
-        Returns:
-            releasable (bool): whether the tensor is releasable after executing
+        @param tensor IRSubTensor
+        @param node IRCell
+
+        @return releasable bool
         """
-        if not isinstance(obj, IRSubTensor):
-            return False
-
         assert node in self.nodes
-        assert obj in self.lifetime
+        assert tensor in self.lifetime[tensor]
         line_id = self.nodes[node]
-        return self.lifetime[obj] < line_id
+        return self.lifetime[tensor] < line_id
 
-    def releasable_after_line(self, obj: IRObject, line: int) -> bool:
+    def releasable_after_line(self, tensor: IRSubTensor, line: int) -> bool:
         """
-        Check if the tensor is releasable after executing the node.
-        Please note that if it is not a IRSubTensor(is IRObject),
-            we will never manually release it.
+        Check if the tensor is releasable after executing the node
 
-        Args:
-            tensor (IRObject): the tensor to be checked
-            line (int): the line to be checked
-        Returns:
-            releasable (bool): whether the tensor is releasable after specific line.
+        @param tensor IRSubTensor
+        @param line int
+
+        @return releasable bool
         """
-        if not isinstance(obj, IRSubTensor):
-            return False
-
-        assert obj in self.lifetime
-        return self.lifetime[obj] < line
+        return self.lifetime[tensor] < line
 
     def get_line(self, node: IRCell) -> int:
         """

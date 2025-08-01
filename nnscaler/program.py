@@ -4,13 +4,12 @@
 from typing import List, Tuple, Optional, Any, Dict, Union
 import inspect
 
-from nnscaler.ir.cten import IRCell, IRObject, IR
+from nnscaler.ir.cten import IRCell, IRObject
 from nnscaler.ir.tensor import IRFullTensor, IRSubTensor
 from nnscaler.ir.operator import IRBpOperation, IRDataOperation
 
 from nnscaler.graph import IRGraph
 from nnscaler.graph import parser
-from nnscaler.graph.function.wrapnn import wrapnn
 
 from nnscaler.runtime.module import CubeModule
 from nnscaler.runtime.device import DeviceGroup
@@ -22,52 +21,47 @@ import torch
 import torch.utils.data as data
 
 
-_program_graph: Optional[IRGraph] = None
-
-
-def enable_global_graph():
-    global _program_graph
-    _program_graph = IRGraph([], [], [], 'program')
-
-
-def disable_global_graph():
-    global _program_graph
-    _program_graph = None
-
-
-def is_global_graph_enabled():
-    return _program_graph is not None
-
-
 class Program:
-    """
-    This is only used in @compile for backward compatibility.
-    """
+
+    class __Program:
+
+        def __init__(self):
+            self._graph = IRGraph([], [], [], 'program')
+
+    instance = None
+
+    def __init__(self):
+        if not Program.instance:
+            Program.instance = Program.__Program()
+
+    def __getattr__(self, name):
+        return getattr(self.instance, name)
+
     def add_node(self, node: IRCell):
-        _program_graph.insert(node, _program_graph.nnodes)
+        self.instance._graph.insert(node, self.instance._graph.nnodes)
 
     def add_nodes(self, nodes: List[IRCell]):
         for node in nodes:
             self.add_node(node)
 
     def get_graph(self) -> IRGraph:
-        return _program_graph
+        return self.instance._graph
 
     def set_input(self, inputs: Tuple[Any]):
-        _program_graph.reset_inputs(len(inputs))
+        self.instance._graph.reset_inputs(len(inputs))
         for idx, obj in enumerate(inputs):
-            _program_graph.set_input(idx, obj)
+            self.instance._graph.set_input(idx, obj)
         # update gradient
-        for t in IRGraph.get_objects_from_complex(_program_graph.inputs()):
+        for t in IRGraph.get_objects_from_complex(self.instance._graph.inputs()):
             if isinstance(t, IRSubTensor) and t.requires_grad:
                 t.grad = t.parent.grad.tosub()
 
     def set_output(self, outputs: Tuple[Any]):
-        _program_graph.reset_outputs(len(outputs))
+        self.instance._graph.reset_outputs(len(outputs))
         for idx, otensor in enumerate(outputs):
-            _program_graph.set_output(idx, otensor)
+            self.instance._graph.set_output(idx, otensor)
         # update gradient
-        for t in IRGraph.get_objects_from_complex(_program_graph.outputs()):
+        for t in IRGraph.get_objects_from_complex(self.instance._graph.outputs()):
             if isinstance(t, IRSubTensor) and t.requires_grad:
                 t.grad = t.parent.grad.tosub()
 
@@ -76,16 +70,18 @@ class Program:
         Close the recording of program.
         If the program doesn't do backward, set all tensors with requires_grad=False.
         """
+        graph = self.get_graph()
         # inference scenario, set all gradients to none.
-        if not any(isinstance(node, IRBpOperation) for node in _program_graph.nodes()):
-            _program_graph.no_backward()
+        if not any(isinstance(node, IRBpOperation) for node in graph.nodes()):
+            # set gradients of activation tensors to none
+            for ftensor in graph.full_tensors():
+                ftensor.requires_grad = False
 
     def clear(self):
-        # will enable and create an empty global graph
-        enable_global_graph()
+        Program.instance._graph = IRGraph([], [], [], 'program')
 
     def __repr__(self):
-        return repr(_program_graph)
+        return repr(self.instance._graph)
 
 
 class SemanticDataLoader:
@@ -108,18 +104,31 @@ class SemanticDataLoader:
         # the IRObject representing the `dataloader` instance, which is only used by the
         # IRDataOperation. Since we already know the output of the dataloader,
         # we don't need to set the value for it.
-        self.irobj = IRObject(name='dataloader', value=None, is_constant=False)
+        self.irobj = IRObject(name='dataloader', value=None)
 
     def __iter__(self):
         return self
 
     def __next__(self):
+        def generate_output(sample, name='data'):
+            """Support complex of types: Tuple, List, Dict, torch.Tensor"""
+            if isinstance(sample, tuple):
+                return tuple(generate_output(t, name) for t in sample)
+            if isinstance(sample, list):
+                return list(generate_output(t, name) for t in sample)
+            if isinstance(sample, dict):
+                return {k: generate_output(v, str(k)) for k, v in sample.items()}
+            if isinstance(sample, torch.Tensor):
+                tensor = IRFullTensor(list(sample.shape), name, dtype=sample.dtype).tosub()
+                tensor._value = sample
+                return tensor
+            return IRObject(name, value=sample, is_constant=False)
         # get dataloader sample
         sample = next(iter(self.dataloader))
         if not isinstance(sample, tuple):
             sample = (sample,)
         # turn sample into IRObjects
-        outputs = tuple(IR.new('data', s, tosub=True, requires_grad=False, is_constant=False) for s in sample)
+        outputs = tuple(generate_output(s) for s in sample)
         outputs = tuple(IRObject('data', value=out) if not isinstance(out, IRObject) else out for out in outputs)
         # create dataloader operation
         # the `self.irobj` is the IRObject standing for the non-tensor value of real dataloader.
@@ -234,11 +243,10 @@ class SemanticModel:
                     dummy_input[str(name)] = value
                 self.dummy_input = dummy_input
             # parse graph
-            with wrapnn(self.model) as wrapped_model:
-                self._ir_graph = parser.convert_model(
-                    wrapped_model,
-                    dummy_input=self.dummy_input,
-                    attr_savedir=self.attr_savedir,
-                    constant_folding=self.constant_folding
-                )
+            self._ir_graph = parser.convert_model(
+                self.model,
+                dummy_input=self.dummy_input,
+                attr_savedir=self.attr_savedir,
+                constant_folding=self.constant_folding
+            )
             return self._ir_graph(*args)

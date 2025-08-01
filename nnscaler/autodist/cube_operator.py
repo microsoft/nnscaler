@@ -32,16 +32,13 @@ class CubeOperator:
         self.in_tensors, self.out_tensors = [], []
         self.op_name = self.ir_cell.signature
 
-        self.producers: List[CubeOperator] = list()
-        self.consumers: List[CubeOperator] = list()
+        self.producers: Set[CubeOperator] = set()
+        self.consumers: Set[CubeOperator] = set()
 
         self.dim_info = {}
         self.parallelable_dims = set()
-        self._has_sum_dim = False
         self._recompute = False
         self._recompute_start_op = False
-        self._recompute_last_op = False
-        self._has_attr = False
 
         self.omit_recompute_in_idx = []
         self.omit_train_idx = []
@@ -55,21 +52,11 @@ class CubeOperator:
         for item in ir_cell.inputs():
             if isinstance(item, IRTensor):
                 self.in_tensors.append(item)
-                if item.is_attr():
-                    self._has_attr = True
         for item in ir_cell.outputs():
             if isinstance(item, IRTensor):
                 self.out_tensors.append(item)
 
         self.collect_anno_info()
-
-    @property
-    def has_sum_dim(self):
-        return self._has_sum_dim
-
-    @property
-    def has_attr(self):
-        return self._has_attr
 
     @property
     def recompute(self):
@@ -87,19 +74,11 @@ class CubeOperator:
     def recompute_start_op(self, value: bool):
         self._recompute_start_op = value
 
-    @property
-    def recompute_last_op(self):
-        return self._recompute_last_op
-
-    @recompute_last_op.setter
-    def recompute_last_op(self, value: bool):
-        self._recompute_last_op = value
-
     def add_producer(self, producer: 'CubeOperator'):
-        self.producers.append(producer)
+        self.producers.add(producer)
 
     def add_consumer(self, consumer: 'CubeOperator'):
-        self.consumers.append(consumer)
+        self.consumers.add(consumer)
 
     def collect_anno_info(self):
         for idx_shape, shape_anno in enumerate(self.ir_cell.anno.inputs()):
@@ -110,8 +89,6 @@ class CubeOperator:
                     reduce_type = dim_anno.reduces[idx_id]
                     if reduce_type != DimAnno.ReduceType.Freeze:
                         self.parallelable_dims.add(identifier)
-                    if reduce_type == DimAnno.ReduceType.Sum:
-                        self._has_sum_dim = True
                     val = (idx_shape, idx_dim, idx_id, reduce_type)
                     if identifier not in self.dim_info:
                         self.dim_info[identifier] = val
@@ -136,7 +113,7 @@ class CubeOperator:
             if not isinstance(self.ir_cell, IRDimops):
                 raise ValueError(f'{self.ir_cell} is not IRDimops')
             idx, dim = pos
-            adim, reduce_type = self.ir_cell.algorithm(
+            adim, reduce_type = self.ir_cell.algorithms(
                 'dim').get_identifier_reduce(idx, dim, 2)
             assert adim is not None, f'cannot find dim at {pos} in {self.ir_cell}'
             return adim

@@ -1,7 +1,7 @@
 #  Copyright (c) Microsoft Corporation.
 #  Licensed under the MIT License.
 
-from typing import List, Optional, Tuple, Dict, Any, Literal
+from typing import List, Optional, Tuple, Dict, Any
 import more_itertools
 import logging
 import copy
@@ -10,28 +10,25 @@ import numpy as np
 import inspect
 
 from nnscaler.ir.cten import IRCell
-from nnscaler.ir.tensor import IRFullTensor, IRSubTensor
+from nnscaler.ir.tensor import IRSubTensor
 from nnscaler.ir.operator import IRBpOperation, IRDataOperation, IRFwOperation
 from nnscaler.ir.adapter import IRWeightReducer, IRAdapter
 from nnscaler.ir.adapter.prim import CollectivePrim
 
 from nnscaler.graph.graph import IRSegment
 from nnscaler.graph.parser.register import CustomizedOps
-from nnscaler.graph.tracer.metadata import AutocastInfo, GradMode
 
 from nnscaler.execplan import ExecutionPlan
 from nnscaler.execplan.execplan import ExeReuseCell
 
 from nnscaler.codegen.syntax.symtable import SymbolTable
-from nnscaler.codegen.syntax.blocks import ClassBlock, FunctionBlock, Block
+from nnscaler.codegen.syntax.blocks import ClassBlock, FunctionBlock
 
 from nnscaler.codegen.emit import FuncEmission
 from nnscaler.codegen.module.autograd import AutogradAdapterCodeGen
 from nnscaler.codegen.lifecycle import LifeCycle
 
 from nnscaler.flags import CompileFlag
-from nnscaler.utils import fields
-from nnscaler import __version__ as runtime_version
 
 
 _logger = logging.getLogger(__name__)
@@ -121,20 +118,17 @@ class ModuleCodeGen(FuncEmission):
         self.enable_dp = self.runtime_ndevs > len(self.devices)
 
         self.init_code: List[str] = [
-            '########## Generated Model Code ###########',
+            '\n\n########## Generated Model Code ###########',
             'from typing import *',
             'from pathlib import Path',
             'import torch', 'import torch.utils.checkpoint as ckpt',
-            'import nnscaler', 'import nnscaler.flags',
-            'import _operator', 'from numpy import inf', 'import builtins', '',
-            f'runtime_version = {runtime_version!r}', '', ''
-        ]
+            'import nnscaler', 'import _operator', 'from numpy import inf', 'import builtins', '', '']
 
         if CompileFlag.use_nnfusion:
             self.init_code.extend(['import nnfusion', ''])
 
         # customized op code
-        for op_impl in set(CustomizedOps.kOpCodeDef.values()):
+        for _, op_impl in CustomizedOps.kOpCodeDef.items():
             # self.init_code.append('@torch.jit.script')
             self.init_code.append(op_impl)
             self.init_code += ['']
@@ -169,14 +163,8 @@ class ModuleCodeGen(FuncEmission):
                     assert param not in all_params, \
                         f'detected a parameter {param} in multiple reducers on device {device}'
                 all_params.update(reducer.inputs())
-            # create reducers for the rest parameters used for this device
-            # nnscaler's weights are either fully replicated or partitioned, which has been checked
-            # at graph/gener/gen.py/gen_weights.
-            # We decouple the replicated and partitioned weights to align with the calculation of
-            # gradient norm which uses the replicated number of each weight to make the global value
-            # correct.
-            rest_params_replicated = []
-            rest_params_partitioned = []
+            # create a reducer for the rest parameters used for this device
+            rest_params = []
 
             def collect_rest_params(segment):
                 """Resursively collect parameters. Note parameters can be in sub-segments,
@@ -187,22 +175,18 @@ class ModuleCodeGen(FuncEmission):
                         if device not in ctensor.device: continue
                         if ctensor not in all_params:
                             # a same parameter can be consumed multiple times by different operators
-                            if ctensor.shape == ctensor.parent.shape:
-                                if ctensor not in rest_params_replicated:
-                                    rest_params_replicated.append(ctensor)
-                            else:
-                                if ctensor not in rest_params_partitioned:
-                                    rest_params_partitioned.append(ctensor)
+                            if ctensor not in rest_params:
+                                rest_params.append(ctensor)
                 for seg in segment.select(ntype=IRSegment, flatten=False):
                     collect_rest_params(seg)
 
             collect_rest_params(graph)
+            if len(rest_params) == 0:
+                continue
             # create reducer and append to the execution
-            # device will be scaled in `self.scale`
-            for reducer in IRWeightReducer.from_weights(rest_params_replicated, device):
-                self.execplan.at(device).append(reducer)
-            for reducer in IRWeightReducer.from_weights(rest_params_partitioned, device):
-                self.execplan.at(device).append(reducer)
+            reducer = IRWeightReducer(rest_params)
+            reducer.device = device  # will be scaled in `self.scale`
+            self.execplan.at(device).append(reducer)
 
     def get_comm_groups(self):
         """
@@ -319,6 +303,7 @@ class ModuleCodeGen(FuncEmission):
         end2end_mode: bool = False,
         forward_args: Optional[Dict[str, Any]] = None
     ) -> str:
+        import os
         """
         Generate model implementation code based on the given graph.
         if as_parallel_module is True, we will create a forward method for the module.
@@ -439,18 +424,6 @@ class ModuleCodeGen(FuncEmission):
         # initialize communication groups
         self.emit_comm_groups()
 
-        # we can have multiple segments in the graph when pipeline is enabled.
-        # Here we don't use tid to sort parameters
-        # because that assumption may be not true in the future,
-        # and the current implementation is clearer and more robust.
-        # key: parameter tensor, value: (segment index, node index)
-        param_first_used_pos: Dict[IRFullTensor, Tuple[int, int]] = {}
-        for i, n in enumerate(sequence):
-            if isinstance(n, IRSegment) and n.isfw():
-                for k, v in self._get_param_first_used_pos(n).items():
-                    if k not in param_first_used_pos:
-                        param_first_used_pos[k] = (i, v)
-
         # emit code
         for node in sequence:
             if isinstance(node, IRSegment):
@@ -461,7 +434,7 @@ class ModuleCodeGen(FuncEmission):
             elif isinstance(node, IRAdapter):
                 codes = self.emit_adapter(node, prefix_attr='self.', async_op=CompileFlag.async_comm)
             elif isinstance(node, IRWeightReducer):
-                self.init_reducer(node, device, param_first_used_pos, as_parallel_module)
+                self.init_reducer(node, device)
                 codes = self.emit_reducer(node)
             elif isinstance(node, IRBpOperation):
                 continue
@@ -493,25 +466,9 @@ class ModuleCodeGen(FuncEmission):
             class_name='GenModel',
             derived=[f'nnscaler.runtime.module.{"ParallelModule" if as_parallel_module else "CubeModule"}']
         ) as cb:
-            graph_sched = self.execplan.graph.sched
-            cb.insert_body(f'use_scheduler = {graph_sched is not None}')
-            cb.insert_body(f'nmicros_per_scheduler_step = {graph_sched.nmicros if graph_sched is not None else 1}')
-
             if as_parallel_module:
                 cb.insert_body(f'rank = {device}')  # save rank in class level
-                # async_op, max_bucket_size_bytes and zero_use_reduce_scatter
-                # parameters are for testing purpose
-                # and will not expose to user
-                with FunctionBlock(func_name='__init__',
-                    args=[
-                        'self',
-                        'init_params=True',
-                        '*',
-                        f'async_op={CompileFlag.async_reducer}',
-                        f'max_bucket_size_bytes={CompileFlag.max_reducer_bucket}',
-                        f'zero_use_reduce_scatter={CompileFlag.zero_use_reduce_scatter}',
-                    ]
-                ) as ib:
+                with FunctionBlock(func_name='__init__', args=['self', 'init_params=True']) as ib:
                     ib.insert_body(self.model_init_statements)
                     ib.insert_body('')
                     ib.insert_body('self._post_init(init_params)')
@@ -673,13 +630,13 @@ class ModuleCodeGen(FuncEmission):
                         if itensor.is_param():
                             code = psign.format(
                                 name=self.tensor_name(itensor),
-                                shape=tuple(itensor.origin_shape),
+                                shape=tuple(itensor.shape),
                                 dtype=itensor.dtype
                             )
                         elif itensor.is_buffer():
                             code = bsign.format(
                                 name=self.tensor_name(itensor),
-                                shape=tuple(itensor.origin_shape),
+                                shape=tuple(itensor.shape),
                                 dtype=itensor.dtype,
                                 persistent=itensor.is_persistent()
                             )
@@ -687,16 +644,13 @@ class ModuleCodeGen(FuncEmission):
                             raise RuntimeError(f"Unexpected tensor type: {itensor}")
                         self.model_init_statements.append(code)
                         slicers = tuple(slice(start, stop) for (start, stop) in itensor.indmap)
-                        if itensor.is_scalar_tensor():
-                            assert len(slicers) == 1 and slicers[0] == slice(0, 1), f"Unexpected slicers {slicers} for scalar tensor."
-                            slicers = '...'  # Ellipsis slicer for scalar tensor, x[...] is equivalent to x
                         val_chunks = itensor.valmap[1]
                         code = map_sign.format(
                             attr=self.tensor_name(itensor),
                             tid=itensor.parent.tid,
                             is_param=itensor.is_param(),
                             orig_name=itensor.parent.name,
-                            full_shape=tuple(itensor.parent.origin_shape),
+                            full_shape=tuple(itensor.parent.shape),
                             slicers=str(slicers),
                             val_chunks=val_chunks
                         )
@@ -713,24 +667,15 @@ class ModuleCodeGen(FuncEmission):
                 self.init_attributes(sub_node)
         return
 
-    def init_reducer(self,
-        node: IRWeightReducer,
-        device: int,
-        param_first_used_pos: Dict[IRFullTensor, int],
-        as_parallel_module: bool = True,
-    ) -> None:
+    def init_reducer(self, node: IRWeightReducer, device: int) -> None:
         """
         Emit code to initialize involved reducer objects in `__init__`.
 
         The fields storing intermediate codes that are populated by this method:
         -   `model_init_statements`
         """
-        # when parallel module is used,
-        # `max_bucket_size_bytes` and `async_op` are passed as arguments
-        max_nbytes = CompileFlag.max_reducer_bucket if not as_parallel_module else 'max_bucket_size_bytes'
-        async_op = CompileFlag.async_reducer if not as_parallel_module else 'async_op'
-        zero_use_reduce_scatter = CompileFlag.zero_use_reduce_scatter if not as_parallel_module else 'zero_use_reduce_scatter'
-
+        max_nbytes = CompileFlag.max_reducer_bucket
+        async_op = CompileFlag.async_reducer
         zero = CompileFlag.use_zero
         zero_ngroups = CompileFlag.zero_ngroups
         reduce_op = f"'{CompileFlag.reducer_op}'"
@@ -739,7 +684,6 @@ class ModuleCodeGen(FuncEmission):
             "{reducer} = nnscaler.runtime.adapter.Reducer("
             "ranks={ranks}, reduce_op={reduce_op}, "
             "async_op={async_op}, zero={zero}, max_bucket_size_bytes={max_nbytes}, "
-            "zero_use_reduce_scatter={zero_use_reduce_scatter}, "
             "zero_ngroups={zero_ngroups})"
         )
         reducer_add = 'self.add_reducer({reducer})'
@@ -751,16 +695,9 @@ class ModuleCodeGen(FuncEmission):
         ranks = list(sorted(node.device))
         init_code = reducer_init.format(
             reducer=reducer_name, ranks=ranks, reduce_op=reduce_op,
-            async_op=async_op, zero=zero, max_nbytes=max_nbytes,
-            zero_ngroups=zero_ngroups, zero_use_reduce_scatter=zero_use_reduce_scatter
-        )
+            async_op=async_op, zero=zero, max_nbytes=max_nbytes, zero_ngroups=zero_ngroups)
         self.model_init_statements.append(init_code)
-        # sort weights by first used time (which is gradient all-reduce time in reverse order)
-        # so that weights with similar gradient all-reduce time are bucketed together
-        weights = [
-            self.tensor_name(t, prefix_attr='self.')
-            for t in sorted(weights, key=lambda t: param_first_used_pos[t.parent])
-        ]
+        weights = [self.tensor_name(t, prefix_attr='self.') for t in weights]
         for weight in weights:
             add_param_code = add_param.format(reducer=reducer_name, weight=weight)
             self.model_init_statements.append(add_param_code)
@@ -771,9 +708,9 @@ class ModuleCodeGen(FuncEmission):
         """
         Emit IRSegment code.
 
-        The returned `List[str]` will be lines of the statements of the final
+        The resultant `List[str]` will be lines of the statements of the final
         Python method for the targeted Segment.
-        The returned lines will not include the signature and the return statement
+        The resultant lines will not include the signature and the return statement
         of the generated Python method. These lines will be put into `model_methods_bodies`
         and the missing Python-syntactic parts will be injected later on.
 
@@ -822,7 +759,6 @@ class ModuleCodeGen(FuncEmission):
                     if len(inputs_to_rel) > 0:
                         del_stmt = self.emit_release(inputs_to_rel)
                         codes.append(del_stmt)
-
         return codes
 
     def _emit_nodes(self, nodes: List[IRCell], lifecycle: LifeCycle, runtime_devid: int) -> List[str]:
@@ -840,136 +776,23 @@ class ModuleCodeGen(FuncEmission):
         The fields storing intermediate codes that are populated by this method:
         - NONE
         """
-        def has_op_context_info(node: IRCell):
-            if node.op_context is not None:
-                return True
-            else:
-                # if node is a IRFwOperation convert from fx graph (not create by nnscaler), it should have `op_context` field,
-                # otherwise the node is created by nnscaler.
-                return False
-
-        def emit_context_manager(node: IRCell):
-            # Consider to emit torch.no_grad and torch.autocast context manager.
-            #
-            # There have two kinds of return values:
-            #     1. str, "", an empty str means there is no need to add context manager, current node is under default context.
-            #     2. str, "with xxx as yyy, aaa as bbb:", current node is under a specific context, need to add context manager.
-            assert node.op_context is not None
-            grad_mode = GradMode(**node.op_context["grad_mode"])
-            autocast_info = AutocastInfo(**node.op_context["autocast_info"])
-            if grad_mode.grad_mode and autocast_info.nesting == 0:
-                return ""
-            else:
-                ctx_managers = []
-                if grad_mode.inference_mode:
-                    ctx_managers.append("torch.inference_mode()")
-                elif grad_mode.no_grad_mode:
-                    ctx_managers.append("torch.no_grad()")
-
-                # NOTE: assume all tensor on cuda device, just care about cuda autocast now
-                if autocast_info.nesting > 0:
-                    ctx_managers.append(f"torch.autocast(device_type='cuda', dtype={autocast_info.cuda_dtype!r}, enabled={autocast_info.cuda_enabled!r}, cache_enabled={autocast_info.cache_enabled!r})")
-                else:
-                    assert autocast_info.nesting == 0, f'get autocast nesting state: {autocast_info.nesting}'
-                code = "with " + ", ".join(ctx_managers) + ":"
-                return code
-
-        def emit_node(node):
-            node_code = []
+        node_codes = []
+        for node in nodes:
             # execute
             if isinstance(node, IRFwOperation):
                 code = self.emit_fnode(node, runtime_devid=runtime_devid, plan_ndevs=len(self.devices), runtime_ndevs=self.runtime_ndevs, prefix_attr='self.')
-                node_code += code
+                node_codes += code
             elif isinstance(node, IRAdapter):
                 # for adapters inside an IRSegment, we don't apply async communication to it
                 # as it is mostly in critical path.
                 code = self.emit_adapter(node, async_op=False)
-                node_code += code
+                node_codes += code
             else:
                 raise RuntimeError(f"unexpected type {type(node)} in IRSegment")
             # release
             tensors_to_del = lifecycle.release_tensors_after_node(node)
             if len(tensors_to_del) > 0:
-                node_code.append(self.emit_release(tensors_to_del))
-            return node_code
-
-        def insert_codes_under_ctx(ctx_code, codes):
-            if ctx_code != "" and codes:
-                with Block(ctx_code) as cblock:
-                    cblock.insert_body(codes)
-                # [''] to make a new line, make the generated code pretty
-                return [''] + cblock.code + ['']
-            else:
-                return codes
-
-        node_codes = []
-        current_context_manager_code = ""
-        current_codes = []
-        for node in nodes:
-            if has_op_context_info(node):
-                new_context_manager_code = emit_context_manager(node)
-                if current_context_manager_code != new_context_manager_code:
-                    node_codes += insert_codes_under_ctx(current_context_manager_code, current_codes)
-                    current_codes = emit_node(node)
-                    current_context_manager_code = new_context_manager_code
-                else:
-                    current_codes.extend(emit_node(node))
-            else:
-                # Node without op context infortmation means it is inserted by nnscaler, not convert from original fx graph,
-                # for example, multiref node and adapter node, currently for nodes inserted by nnscaler we have the following assumption:
-                #     - the fx traced graph shows a context manager's impact to tensors,
-                #     - the behavior of an inserted node is determined by tensor properties, like data type and requires grad,
-                #     - combine the two points together, it is safe to put the inserted node in the default context.
-                # Base on this assumption, when we meet a node without op context infortmation, will force break the current code context scope
-                # and emit current node code without context managers.
-                #
-                # Here is an example about the inserted node code generation, the inserted node is a multiref node of y,
-                # and all the inserted nodes will under default context (without context managers):
-                #     """
-                #     # original code
-                #     with torch.no_grad():
-                #         y = func1(x)
-                #         z = func2(x)
-                #
-                #     # generated code
-                #     with torch.no_grad():
-                #         y = func1(x)
-                #     y_1, y_2 = nnscaler.runtime.function.multiref(y, 2)
-                #     with torch.no_grad():
-                #         z = func2(x)
-                #     """
-                #
-                # This way have two risks:
-                #     1. the assumption is no longer valid in subsequent development.
-                #     2. nodes that originally belonged to the same context need to be executed in a continuous context and cannot be interrupted.
-                # Fortunately, these two risks have not yet occurred for the current inserted nodes and supported context managers.
-                #
-                # Please note that if one entire context scope is split to multiple sub-scope, it may introduce additional overhead.
-                # Here is an overhead example about torch.autocast:
-                #     """
-                #     # original code
-                #     with torch.autocast(device_type='cuda', dtype=torch.float32, enabled=True, cache_enabled=True):
-                #         y = func1(x, a)
-                #         z = func2(x, b)
-                #
-                #     # generated code
-                #     with torch.autocast(device_type='cuda', dtype=torch.float32, enabled=True, cache_enabled=True):
-                #         y = func1(x, a)
-                #     ...
-                #     with torch.autocast(device_type='cuda', dtype=torch.float32, enabled=True, cache_enabled=True):
-                #         z = func2(x, b)
-                #     """
-                # In the original code, x might cast to float32 and used by both func1 and func2,
-                # but in generated code, because the scope is interrupted, the two new scopes cannot share the x cast result,
-                # then there might have a additional cast x to float32 for func2.
-                #
-                # For torch.no_grad and torch.inference_mode, the overhead is not significant, so we can ignore it.
-                #
-                # TODO: all inserted nodes should have its op context field.
-                node_codes += insert_codes_under_ctx(current_context_manager_code, current_codes)
-                node_codes += emit_node(node)
-                current_codes = []
-        node_codes += insert_codes_under_ctx(current_context_manager_code, current_codes)
+                node_codes.append(self.emit_release(tensors_to_del))
 
         return node_codes
 
@@ -1029,25 +852,10 @@ class ModuleCodeGen(FuncEmission):
             fb.insert_body(f'return {output_names_tuple}')
         codes = [''] + fb.code + ['']
         codes.append(
-            f'{output_names_tuple} = ckpt.checkpoint(recompute, {input_names_tuple}, use_reentrant=False)'
+            f'{output_names_tuple} = ckpt.checkpoint(recompute, {input_names_tuple}, use_reentrant=True)'
         )
 
         return codes
-
-    def _get_param_first_used_pos(self, segment: IRSegment) -> Dict[IRFullTensor, int]:
-        """
-        Get the first used node index of each parameter in the segment.
-        """
-        # get all the parameters in the segment
-        first_used_pos: Dict[IRFullTensor, int] = {}
-
-        for i, node in enumerate(segment.nodes()):
-            # parameters are used as inputs of the node
-            for tin in IRSegment.get_objects_from_complex(node.inputs()):
-                if isinstance(tin, IRSubTensor) and tin.is_param() and tin.parent not in first_used_pos:
-                    first_used_pos[tin.parent] = i
-
-        return first_used_pos
 
     def clear(self):
         """

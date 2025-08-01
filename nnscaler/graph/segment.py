@@ -4,7 +4,6 @@
 from contextlib import contextmanager
 from typing import Dict, Union, List, Optional, Set, Tuple, Any, Callable
 import numpy as np
-import logging
 
 from nnscaler.ir.tensor import IRFullTensor, IRSubTensor, ValueMap
 from nnscaler.ir.cten import IRTensor, IRCell, IRObject
@@ -13,9 +12,6 @@ from nnscaler.ir.adapter import IRAdapter
 
 from nnscaler.graph.function.function import MultiRef
 from nnscaler.graph.function.pyfunc import IRPyFunc
-
-
-_logger = logging.getLogger(__name__)
 
 
 class CellPosition:
@@ -30,7 +26,7 @@ class CellPosition:
     def __eq__(self, other: object) -> bool:
         assert isinstance(other, CellPosition), "Cannot compare with non-GraphIndex object"
         return self.indices == other.indices
-
+    
     def __lt__(self, other: object) -> bool:
         assert isinstance(other, CellPosition), "Cannot compare with non-GraphIndex object"
         if len(self.indices) < len(other.indices):
@@ -210,7 +206,7 @@ class IRSegment(IRCell):
 
     def index(self, node: IRCell) -> CellPosition:
         """
-        Get node index. The dispatched node (e.g., IRAdapter, IRSegment)
+        Get node index. The dispatched node (e.g., IRAdapter, IRSegment) 
         will return the index to its un-dispatched node
 
         @param node IRCell: the queried node
@@ -300,7 +296,7 @@ class IRSegment(IRCell):
         A full tensor (ftensor) is originally produced by some operator(s).
         These operators can be further partitioned into multiple sub-operators.
         Each sub-operator potentially produces a smaller part of the ftensor (a.k.a. sub-tensor).
-        This function returns all the sub-tensors that are produced by operators
+        This function returns all the sub-tensors that are produced by operators 
         inside the segment.
 
         Args:
@@ -317,7 +313,7 @@ class IRSegment(IRCell):
         A full tensor (ftensor) is originally consumed by some operator(s).
         These operators can be further partitioned into multiple sub-operators.
         Each sub-operator potentially consumes a smaller part of the ftensor (a.k.a. sub-tensor).
-        This function returns all the sub-tensors that are consumed by operators
+        This function returns all the sub-tensors that are consumed by operators 
         inside the segment.
 
         Args:
@@ -336,15 +332,15 @@ class IRSegment(IRCell):
         applied for this graph.
 
         If a tensor is consumed by multiple consumers, the value map of its gradient
-        will be in exponential format.
+        will be in exponential format. 
 
         E.g., t has consumed by node1, node2, node3 and node4.
         Then the gradient value_map of t (t.grad) of each consumer is (idx, nchunks):
             (0, 2), (2, 4), (6, 8), (7, 8),
         where:
               (0, 2) + (2, 4) + (6, 8) + (7, 8)
-            = (0, 2) + (2, 4) + (3, 4)
-            = (0, 2) + (1, 2)
+            = (0, 2) + (2, 4) + (3, 4) 
+            = (0, 2) + (1, 2) 
             = FULL VALUE
 
         @param ftensor IRFullTensor: the full tensor.
@@ -365,35 +361,24 @@ class IRSegment(IRCell):
         # set for producer
         for ptensor, producer in zip(self.ptensors(ftensor), self.producers(ftensor)):
             # filter out non-autograd operators of IRPyFunc
-            if isinstance(producer, IRPyFunc):
-                if fgrad is not None:
-                    msg = f'nnScaler does not support backward of IRPyFunc: {producer}, ' + \
-                           'skip setting gradient, please register it as IRDimOps.'
-                    _logger.warning(msg)
-                continue
+            if isinstance(producer, IRPyFunc): continue
             grad = None if fgrad is None else fgrad.select(ptensor.indmap, (0, 1))
             for t in producer.find(ptensor):
                 t.grad = grad
-
+        
         # set for consumers
-        # We strictly follow the `requires_grad` in the fx graph in most cases. However, we will
-        # ignore the gradient when the corresponding subtensor is consumed by a IRPyFunc, since
-        # nnScaler will not generate a backward node for IRPyFunc currently (check IRGraph.backward).
-        consumers, ctensors = [], []
+        consumers, ctensors = [], []  # consumers that require gradient
         for ctensor, consumer in zip(self.ctensors(ftensor), self.consumers(ftensor)):
             itensors = consumer.find(ctensor)
             # set by default None
             for itensor in itensors:
                 itensor.grad = None
-            if isinstance(consumer, IRPyFunc):
-                continue
             # filter out non-autograd operators
             if fgrad is None: continue
             if isinstance(consumer, IRPyFunc): continue
             if any(isinstance(t, IRSubTensor) and t.requires_grad for t in consumer.outputs()):
                 consumers.append(consumer)
                 ctensors.append(ctensor)
-
         # set with value map
         curr_valmap = ValueMap((0, 1))
         nconsumers = len(consumers)
@@ -455,7 +440,7 @@ class IRSegment(IRCell):
             self._ctensors[ftensor] = []
         if ftensor.is_attr():
             self._attributes.add(ftensor)
-
+    
     def _remove_ftensor(self, ftensor: IRObject):
         """
         Remove a full tensor in segment
@@ -551,7 +536,7 @@ class IRSegment(IRCell):
         Args:
             node (IRCell): the removed node
             _pos (Optional[Union[int, CellPosition]): help to save cost if provide node position.
-
+        
         Returns:
             CellPosition: the removed index
         """
@@ -621,15 +606,15 @@ class IRSegment(IRCell):
     @contextmanager
     def update(self, node):
         """
-        Update a node. Note the related change in backward operator
+        Update a node. Note the related change in backward operator 
         will not be automatically updated.
-
+    
         TODO: update operator dependency
 
         e.g.,
             with graph.modify(node) as node:
                 node.set_input(0, tensor)
-
+        
         @param node IRCell: the node that must in the graph
         @return node IRCell: the modify node
         """
@@ -663,7 +648,7 @@ class IRSegment(IRCell):
             IRSegment, turn `flatten=False` will get the same result as `flatten=True`,
             and can save more time because `flatten=False` will not traverse the
             nodes in IRSegment.
-
+        
         Args:
             name (Optional[str]): the node name
             ntype (Optional[Type]): the node type
@@ -699,7 +684,7 @@ class IRSegment(IRCell):
         assert isinstance(fwop, IRFwOperation), "Only allow insert an IRFwOperation"
         pos = CellPosition((index,)) if isinstance(index, int) else index
         assert isinstance(pos, CellPosition), "Expect index to be int or CellPosition"
-
+    
         index = pos.indices[-1]
         fsegment = self if len(pos) == 1 else self.node(CellPosition(pos.indices[1:]))
         fsegment.insert(fwop, index)
@@ -720,161 +705,25 @@ class IRSegment(IRCell):
 
     # ===================== Advance Graph manipulations ==================
 
-    def multiref(self, ftensor: IRFullTensor, comment: Optional[str] = None, *deprecated_args) -> IRFwOperation:
+    def multiref(self, ftensor: IRFullTensor, *deprecated_args) -> IRFwOperation:
         """
-        Multiref accepts a full tensor that used in multiple places (consumed by a node,
-        or belongs to a graph's outputs). Its output tensors are full tensors with new
-        ids and dispatched to the corresponding consumers.
-        The input tensor can be parameter, buffer or activation tensors.
+        Add multiref to separate forward nodes that consume a same tensor into different tensor alias.
+        This should be called before any graph transformation.
 
-        Note that during the adapter generation (IRAdapterGener), the multiref inserted
-        here will be partitioned automatically by `autoref`. Further more, multiref may
-        be added to the graph at that time to reduce the communication time, check
-        `gen_activation` and `local_consumer_multiref` for more details.
+        Operators in a group can only be partitioned by a same tensor split strategy.
+        The created multiref operator will be partitioned automatically when generating
+        tensor adapters.
 
-        Args:
-            tensor (IRSubTensor): full tensor to be multiref.
-
-        Returns:
-            multiref (IRFwOperation): the inserted multiref operator.
-
-        This function should be called before any graph transformation, like replicate,
-        partition. The created multiref operator will be partitioned automatically when
-        generating adapters.
-
-        multiref can be regarded as an approach to create different aliases for the input
-        full tensor, so we can overcome the limitation of communication generation logic
-        and correctly generate communications.
-
-        At runtime, multiref just creates multiple tensors with the same storage, as the following
-        code snippet shows:
-        ```python
-        def multiref(tensor: torch.Tensor, times: int) -> Tuple[torch.Tensor]:
-            return tensor if times == 1 else tuple([tensor] * times)
-        ```
-
-        There are two kinds of communications in the system.
-            - Adapter: Which is used to exchange tensors data during forward and backward across
-              devices in the same scale unit. We use RVDLayout algorithm to generate adapters which
-              is composed of collective primitives at runtime. The limitation here is the communication
-              should be simple. If the communication is too complex, the generation will fail.
-            - IRWeightReducer: Which is used to sync weight (parameter) gradients across devices after
-              backward. IRWeightReducer will be mapped to nnscaler.runtime.adapter.Reducer in runtime.
-              The limitation here is the weight should be ALL partitioned or ALL replicated (check
-              gen_weight in IRAdapterGener). Put it in a simple word, reducer is added when the parameter
-              can be simply aggregated (summed) across certain devices.
-
-        multiref is here to rescue. Some typical usage of this function are listed below with explanations.
-
-            - Adapter generation case 1: If the full tensor has multiple consumers, and consumers consume
-              different portion of the full tensor (different tp partition). In this case, RVDLayout may
-              fail to generate backward communication. We should use multiref to create an alias for each
-              consumer. RVDLayout will generate communication between each alias and its consumer correctly.
-              The inserted multiref will aggregate the gradients automatically in the backward pass according
-              to the multiref's implementation and torch.autograd's mechanism.
-
-              Example: If op1/op2 are consumers of fulltensor ft, and will be partitioned different:
-                op1(ft)
-                op2(ft)
-              multref should be inserted
-                ft1, ft2 = multiref(ft, 2)
-                op1(ft1)
-                op2(ft2)
-              Note that when op1 is replicated over multiple devices, op2 partitions its another input (not ft2),
-              although ft's indmap is same on op1 and op2, but we cannot add the gradients directly. As a result,
-              the multiref is needed too.
-
-            - Adapter generation case 2: If the full tensor has multiple consumers, but these consumers have
-              different behavior in backward, ie, some of consumers generate gradient (normal torch ops), and
-              some of consumers don't generate gradient (mostly IRPyFunc). In this case, we need to use multiref,
-              so each alias can have different behaviors in backward.
-
-              Example: If op1 (generate grad)/getitem (doesn't generate grad) are consumers of fulltensor ft, but with different backward behavior:
-                torch_op(ft)
-                getitem(ft)
-              multref should be inserted
-                ft1, ft2 = multiref(ft, 2)
-                torch_op(ft1)
-                getitem(ft2)
-
-            - Adapter generation case 3: When the full tensor has consumers and also is graph's output (a specail
-              consumer). If consumers and graph outputs satisify case 1 or case 2, we also need to insert multiref.
-              It is a little difference with previous cases, because we don't update the tensor of graph outputs,
-              but use the old name. This is correct since the IRPyFunc and the segment's outputs are forced to be
-              replicated by the system.
-
-              Example: If op is the only consumer of fulltensor ft:
-                op(ft)
-                return ft
-              multref should be inserted
-                ft1 = multiref(ft, 1)
-                op(ft1)
-                return ft # note old name is used.
-
-            - IRWeightReducer generation case 1: when gradients over devices can not be accumulated directly to
-              synchronize. This typically happens when a parameter is shared, especially in pipeline parallelism.
-              Here we can use multiref to synchronize gradients, but the semantic is different. (TODO: add a new
-              function to handle this case to make it more clear). With multiref, the weight becomes an activation,
-              so no IRWeightReducer will be generated. Instead, Adapter will be used in runtime.
-
-              Example: weight w is shared by two consumers, the distributed plan is two-stage pipeline,
-                stage 0 uses gpu 0
-                stage 1 uses gpu (1, 2)
-              weights are all replicated in all devices.
-              If we don't insert multiref, the weight will be held in both stages, but the communication will fail to generate.
-              If we ignore the communication generation, the code will look like:
-              gencode0:
-              ```
-              def __init__(....):
-                self.w = torch.nn.Parameter(...)
-                ...
-              def forward(...):
-                ...
-                op1(self.w)
-                ...
-              ```
-              gencode 1:
-              ```
-              def __init__(....):
-                self.w = torch.nn.Parameter(...)
-                ...
-              def forward(...):
-                ...
-                op2(self.w)
-                ...
-              ```
-              We cannot sum up the gradients on gpu 0/1/2 directly. In logic, the real gradient should be a sum of gpu0 and gpu1's gradients or
-              gpu0 and gpu2's gradients. As the example shows, generating a reducer is hard in this case. Multiref is inserted to convert the
-              param to activation to bypass the difficulty, the code will look like:
-              gencode0:
-              ```
-              def __init__(....):
-                self.w = torch.nn.Parameter(...)
-                ...
-              def forward(...):
-                 ...
-                 w1, w2 = multiref(self.w)
-                 op1(w1)
-                 ...
-              ```
-              gencode1:
-              ```
-              def __init__(....):
-                ...
-              def forward(w2, ...):
-                ...
-                op2(w2)
-                ...
-              ```
-              You can see weight is gone in gencode1's constructor. Instead, it will be passed as forward argument. multiref here is just a way to
-              convert weight to activation, change the way to generate communication and aggregate gradients by adapters and multiref correctly.
+        @param tensor IRSubTensor: tensor.
+        @return multiref IRFwOperation: the inserted multiref operator.
         """
         assert ftensor in self._fobjects, f"tensor: {ftensor} not in this graph."
+        if len(self.consumers(ftensor)) <= 1: return
         assert not ftensor.is_grad(), f"graph.multiref can only be applied on a non-gradient full tensor."
         # check no transformation
         assert len(self.ptensors(ftensor)) <= 1, f"no transformation should be called before multiref"
         assert len(set(self.ctensors(ftensor))) == 1, f"no transformation should be called before multiref"
-
+        
         # create new full tensors
         consumers = self.consumers(ftensor)
         tensor = self.ctensors(ftensor)[0]
@@ -882,8 +731,6 @@ class IRSegment(IRCell):
         otensors: List[IRSubTensor] = [ft.select(tensor.indmap, tensor.valmap) for ft in ftensors]
         # create multiref
         multiref = MultiRef(tensor, len(consumers))
-        if comment:
-            multiref.comment = comment
         for idx, otensor in enumerate(otensors):
             multiref.set_output(idx, otensor)
         # setup gradient
@@ -899,10 +746,7 @@ class IRSegment(IRCell):
             fidx = min(self.index(consumer) for consumer in self.consumers(ftensor))
         else:
             fidx = max(self.index(prod) for prod in self.producers(ftensor)) + 1
-        # when the consumer is a IRPyFunc, the tensor at the consumer side will not have a grad
-        # in this case, we only insert the multiref node in the forward graph
-        req_backward = any(output.grad is not None for output in multiref.outputs())
-        if req_backward:
+        if req_grad:
             self.finsert(multiref, fidx)
         else:
             self.insert(multiref, fidx)
@@ -927,7 +771,7 @@ class IRSegment(IRCell):
     def single_consume(self, one_for_all: bool = True):
         """
         Transform graph to make each non-attribute tensor has up to
-        one consumer. Multiref nodes will be inserted. The API is useful
+        one consumer. Multiref nodes will be inserted. The API is useful 
         for cases like inference, where different consumers are partitioned
         with different tensor dimensions.
 
@@ -998,10 +842,9 @@ class IRSegment(IRCell):
                     if len(cnodes) > 0:
                         itensors = [ftensor.like() for _ in range(2)]
                         multiref = MultiRef(reftensor, 2)
-                        multiref.comment = 'create at IRSegment:single_consume'
                         for idx, itensor in enumerate(itensors):
                             multiref.set_output(idx, itensor)
-                        multiref.verify_shape()
+                        multiref.infer_shape()
                         # insert multiref right before the consumor
                         idx = self.index(consumer)
                         # require backward
@@ -1039,10 +882,9 @@ class IRSegment(IRCell):
                         consumer.set_input(idx, itensor)
                 # create and insert multiref operation
                 multiref = MultiRef(ftensor, len(cnodes))
-                multiref.comment = 'create at IRSegment:single_consume'
                 for idx, itensor in enumerate(itensors):
                     multiref.set_output(idx, itensor)
-                multiref.verify_shape()
+                multiref.infer_shape()
                 idx = self.index(producers[ftensor]) + 1 if ftensor in producers else 0
                 # idx = nodes.index(cnodes[0])
                 if any(itensor.requires_grad for itensor in node.inputs()):
@@ -1051,14 +893,14 @@ class IRSegment(IRCell):
                     self.insert(multiref, idx)
 
     # ====================== Graph Generations ============================
-
+    
     @staticmethod
     def get_inputs(nodes: List[IRCell], exclude_attr: bool = True):
         """
         Get all the input tensors that are required by nodes.
 
         @param nodes List[IRCell]: the nodes
-
+        
         @return inputs List[IRTensor]: the input tensors
         """
         all_outputs = list()
@@ -1107,7 +949,7 @@ class IRSegment(IRCell):
     def create_segment(self, nodes: List[IRCell], attr_as_inputs: bool = False) -> IRCell:
         """Create a segment (sub-graph) with part of the nodes.
 
-        This only return the created segment without modifying the graph.
+        This only return the created segment wihout modifying the graph.
 
         Calling this requires that the dependencies are already materialized,
         i.e., every input IRSubTensor should have a corresponding producer. Two scenarios
@@ -1122,7 +964,7 @@ class IRSegment(IRCell):
             attr_as_inputs (bool): whether to treat attributes as segment inputs
 
         Returns:
-            segment (IRSegment): the grouped segment.
+            segment (IRSegment): the grouped segment. 
         """
         segment = self
         segment_outputs = IRSegment.get_objects_from_complex(segment.outputs())
@@ -1142,11 +984,12 @@ class IRSegment(IRCell):
 
         # tensor and its device match
         dmatch = lambda t1, t2: t1 == t2 and t1.device == t2.device
-
+        
         inputs, outputs = set(), set()
         sub_cids = set(node.cid for node in nodes)
         for node in nodes:
-            for itensor in node.iobjs():
+            for itensor in node.inputs():
+                if not isinstance(itensor, IRObject): continue
                 if itensor.is_attr():
                     if attr_as_inputs:
                         inputs.add(itensor)
@@ -1159,9 +1002,10 @@ class IRSegment(IRCell):
                 # if no producers inside the nodes can produce data, set as input
                 if all(pid not in sub_cids for pid in pids):
                     inputs.add(itensor)
-            for otensor in node.oobjs():
-                # if the tensor is required by segment outputs, set as output
-                if otensor in segment_outputs:
+            for otensor in node.outputs():
+                if not isinstance(otensor, IRObject): continue
+                # if the tensor is required by segment outputs or is loss during train, set as output
+                if (isinstance(otensor, IRSubTensor) and otensor.is_loss()) or otensor in segment_outputs:
                     outputs.add(otensor)
                     continue
                 consumers, ctensors = self.consumers(otensor.parent), self.ctensors(otensor.parent)
@@ -1185,7 +1029,7 @@ class IRSegment(IRCell):
 
     def dispatch(self, devid: int, _gen_mirror: bool = True) -> Optional[IRCell]:
         """
-        Instantiate the segment to a specific device.
+        Instantiate the segement to a specific device.
 
         @param devid int: the target device
 
@@ -1197,11 +1041,17 @@ class IRSegment(IRCell):
             return self
         if devid in self._dispatch_cached:
             return self._dispatch_cached[devid]
-
+        # inputs, outputs, nodes = [], [], []
         inputs, outputs, nodes = self.inputs(), self.outputs(), []
         for node in self._nodes:
             if devid in node.device:
                 nodes.append(node.dispatch(devid))
+                # for itensor in node.inputs():
+                #     if itensor in self._inputs and itensor not in inputs:
+                #         inputs.append(itensor)
+                # for otensor in node.outputs():
+                #     if otensor in self._outputs and otensor not in outputs:
+                #         outputs.append(otensor)
 
         def order(tensors: Set[IRObject]) -> Tuple[IRObject]:
             """Reorder by logical tensor id. Temporally necessary for pipeline scheduling"""
@@ -1209,7 +1059,7 @@ class IRSegment(IRCell):
             tids = np.array([t.parent.tid for t in tensors])
             indices = np.argsort(tids)
             return tuple(tensors[idx] for idx in indices)
-
+        
         if self.isfw():
             inputs, outputs = order(inputs), order(outputs)
 

@@ -36,6 +36,7 @@ from nnscaler.utils import print_each_rank, load_default_schedule
 
 
 _logger = logging.getLogger(__name__)
+_logger.setLevel(logging.INFO)
 
 
 def compile(model: Union[torch.nn.Module, SemanticModel], *args,
@@ -106,7 +107,7 @@ def compile(model: Union[torch.nn.Module, SemanticModel], *args,
                                dtype=arg.dtype).tosub()
             arg._value = tensor
         else:
-            arg = IRObject('obj', value=arg, is_constant=False)
+            arg = IRObject('obj', value=arg)
         inputs.append(arg)
 
     myrank = DeviceGroup().rank

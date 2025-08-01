@@ -9,11 +9,11 @@ from typing import List, Optional, Union, Tuple
 import copy
 
 from nnscaler.ir.tensor import IRSubTensor, IndexMap, ValueMap
-from nnscaler.flags import CompileFlag
 
 
 # the general adapter primitive class
 class IRAdapterPrim:
+
     def __init__(self, inputs: List[IRSubTensor], outputs: List[IRSubTensor], **kwargs):
         self._inputs = list(inputs)
         self._outputs = list(outputs)
@@ -24,17 +24,6 @@ class IRAdapterPrim:
         self.signature = None
         # whether the primitive is happened locally
         self.local: bool = False
-
-    def is_valid(self) -> bool:
-        """
-        check if the input to the adapter primitive is valid
-        """
-        # TODO: put this check to the constructor
-        # In current implementation of RVDLayout optimal path search
-        # Invalid inputs can be generated, but then discarded later.
-        # In order to keep current flow, let's disable this check in construction,
-        # and call it after all the prims are generated
-        return True
 
     def input(self, idx:int):
         return self._inputs[idx]
@@ -194,7 +183,7 @@ class MovePrim(CommPrim):
     def __init__(self, itensors: List[IRSubTensor], otensors: List[IRSubTensor], **kwargs):
         if len(kwargs) == 0:
             assert len(itensors) == 1 and len(otensors) == 1
-            kwargs['shape'] = itensors[0].origin_shape
+            kwargs['shape'] = itensors[0].shape
             kwargs['dtype'] = str(itensors[0].dtype)
             kwargs['src'] = itensors[0].device[0] if len(itensors[0].device) > 0 else None
             kwargs['dst'] = otensors[0].device[0] if len(otensors[0].device) > 0 else None
@@ -236,7 +225,7 @@ class RDScatterPrim(CommPrim):
         """
         if len(kwargs) == 0:
             assert len(itensors) == 1
-            kwargs['shape'] = itensors[0].origin_shape
+            kwargs['shape'] = tuple(itensors[0].shape)
             kwargs['dtype'] = str(itensors[0].dtype)
             kwargs['src'] = itensors[0].device[0] if len(itensors[0].device) > 0 else None
             kwargs['dsts'] = tuple(otensor.device[0] if len(otensor.device) > 0 else None for otensor in otensors)
@@ -267,7 +256,7 @@ class RVScatterPrim(CollectivePrim):
         """
         if len(kwargs) == 0:
             assert len(itensors) == 1
-            kwargs['shape'] = itensors[0].origin_shape
+            kwargs['shape'] = tuple(itensors[0].shape)
             kwargs['dtype'] = str(itensors[0].dtype)
             kwargs['src'] = itensors[0].device[0] if len(itensors[0].device) > 0 else None
             kwargs['dsts'] = tuple(otensor.device[0] if len(otensor.device) > 0 else None for otensor in otensors)
@@ -292,7 +281,7 @@ class RDGatherPrim(CommPrim):
     def __init__(self, itensors: List[IRSubTensor], otensors: List[IRSubTensor], dim: int, **kwargs):
         if len(kwargs) == 0:
             assert len(otensors) == 1
-            kwargs['shape'] = itensors[0].origin_shape
+            kwargs['shape'] = tuple(itensors[0].shape)  # the input tensor shape
             kwargs['dtype'] = str(itensors[0].dtype)
             kwargs['srcs'] = tuple(itensor.device[0] if len(itensor.device) > 0 else None for itensor in itensors)
             kwargs['dst'] = otensors[0].device[0] if len(otensors[0].device) > 0 else None
@@ -302,7 +291,7 @@ class RDGatherPrim(CommPrim):
 
     def volume(self) -> int:
         return self.output(0).nelement()
-
+    
     def __repr__(self) -> str:
         inputs = ', '.join(f'{t.name}{t.tid}{t.shape}{t.valmap}' for t in self.inputs())
         outputs = ', '.join(f'{t.name}{t.tid}{t.shape}{t.valmap}' for t in self.outputs())
@@ -317,7 +306,7 @@ class RVGatherPrim(CollectivePrim):
     def __init__(self, itensors: List[IRSubTensor], otensors: List[IRSubTensor], **kwargs):
         if len(kwargs) == 0:
             assert len(otensors) == 1
-            kwargs['shape'] = itensors[0].origin_shape
+            kwargs['shape'] = tuple(itensors[0].shape)
             kwargs['dtype'] = str(itensors[0].dtype)
             kwargs['srcs'] = tuple(otensor.device[0] if len(otensor.device) > 0 else None for otensor in otensors)
             kwargs['dst'] = otensors[0].device[0] if len(otensors[0].device) > 0 else None
@@ -341,7 +330,7 @@ class BroadcastPrim(CollectivePrim):
     def __init__(self, itensors: List[IRSubTensor], otensors: List[IRSubTensor], **kwargs):
         if len(kwargs) == 0:
             assert len(itensors) == 1
-            kwargs['shape'] = itensors[0].origin_shape
+            kwargs['shape'] = tuple(itensors[0].shape)
             kwargs['dtype'] = str(itensors[0].dtype)
             kwargs['src'] = itensors[0].device[0] if len(itensors[0].device) > 0 else None
         super().__init__(itensors, otensors, **kwargs)
@@ -353,6 +342,7 @@ class BroadcastPrim(CollectivePrim):
 
     def __repr__(self) -> str:
         return f"{self.outputs()} = broadcast{self.device}({self.inputs()}, src={self.kwargs['src']})"
+
 
 
 class AllReducePrim(CollectivePrim):
@@ -406,10 +396,9 @@ class ReduceScatterPrim(CollectivePrim):
         Use ring-based communication cost
         """
         ndevs = len(self.inputs())
-        vol = (ndevs - 1) * self.input(0).nelement() // ndevs
-        if CompileFlag.disable_reduce_scatter_adapter:
-            vol *= 100
-        return vol
+        # FIXME: temporally disable reduce scatter in code generation
+        # which has parity issues for now.
+        return 100 * (ndevs - 1) * self.input(0).nelement() // ndevs
 
     def __repr__(self) -> str:
         return f'{self.outputs()} = reduce_scatter[{self.device}]({self.inputs()})'
@@ -444,22 +433,6 @@ class AllToAllPrim(CollectivePrim):
         super().__init__(itensors, otensors, idim=idim, odim=odim, **kwargs)
         self.signature = 'nnscaler.runtime.adapter.all_to_all'
 
-    def is_valid(self) -> bool:
-        """
-        check if the input to all-to-all primitive is valid
-        """
-        indmaps = [t.indmap for t in self._inputs]
-
-        idim = self.kwargs['idim']
-        odim = self.kwargs['odim']
-
-        # odim should be the same for all input tensors
-        for i in range(1, len(indmaps)):
-            if indmaps[i][odim] != indmaps[0][odim]:
-                return False
-
-        return IRSubTensor.is_dim_continous(self._inputs, idim)
-
     def volume(self) -> int:
         ndevs = len(self.inputs())
         return self.input(0).nelement() * (ndevs - 1) // ndevs
@@ -489,9 +462,8 @@ class VChunkPrim(CollectivePrim):
     """
     def __init__(self, itensors: List[IRSubTensor], otensors: List[IRSubTensor], **kwargs):
         super().__init__(itensors, otensors, **kwargs)
-        # FIXME: nnscaler.runtime.adapter.vchunk does not exist
         self.signature = 'nnscaler.runtime.adapter.vchunk'
-
+    
     def volume(self) -> int:
         return 0
 

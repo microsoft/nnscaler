@@ -1,14 +1,19 @@
-*SOSP'25 Artifact Evaluation for VERDICT*
+*SOSP'25 Artifact Evaluation for Paper#501 VERDICT*
 
-# Introduction to Verdict
-**Overview:** Verdict is a tool to verify parallelization equivalence for distributed model training. It ensures that the original and parallelized models are arithmetically equivalent, effectively eliminating bugs such as wrong tensor transformation, wrong collective communications, etc., that are introduced in the parallelization process.
+# Introduction to VERDICT
+**Overview:** VERDICT is a verification tool for ensuring *parallelization equivalence* in distributed model training. It guarantees that the parallelized model is arithmetically equivalent to its original single-device version, thereby eliminating errors such as incorrect tensor transformations or faulty collective communication introduced during parallelization.
 
-**Workflow:** Verdict takes the *execution plans* of both single-device (original) model and multi-device (parallelized) model as inputs enriched with *lineages*, and converts respective execplan into *symbolic SSA DAG* (single-static assignment directed acyclic graph). Verdict then partition dual graphs into small subgraphs to form independent *stages* based on lineages. Once stages are determined, they are executed in parallel. Within each stage, tensor shape reduction is applied, and z3 is used to symbolically verify the output equivalence. Once all stage passes the check, the end-to-end equivalence is guaranteed.
+**Workflow:** 
+VERDICT takes the *execution plans* (execplans) of both the original (single-device) and parallelized (multi-device) models, each enriched with *lineages*. It then transforms these into *symbolic SSA DAGs* (single-static assignment directed acyclic graphs). The dual graphs are partitioned into independent *stages* using lineage information. Each stage undergoes parallel execution, where shape reduction is applied, followed by symbolic verification using Z3. If all stages pass, VERDICT guarantees end-to-end equivalence.
+
 ![DesignOverview](docs/assets/design.png)
 
 **Implementation:** 
-Verdict is implemented with an interface design. Verdict defines a general graph interface and a solver interface, with a list of allowable reigistered operators. The nnScaler backend takes the responsibility to produce SSA DAGs that meet the requirements. A coarse reference to source code is shown in below.
+VERDICT is implemented with modular interfaces. It defines a general graph interface and a solver interface, supporting a registry of allowable operators. The [*nnScaler*](https://github.com/microsoft/nnscaler) backend constructs SSA DAGs that conform to VERDICT’s requirements. A high-level view of the implementation is shown below:
+
 ![ImplOverview](docs/assets/impl.png)
+
+ 
 
 ---
 

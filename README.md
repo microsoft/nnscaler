@@ -81,16 +81,6 @@ To fully reproduce results, we recommend to run Verdict artifact evaluation on a
 ### ⏳ Estimated Completion Time
 As these plans corresponds to real-world large scale training, involving up to 8192 GPUs, their verification time can be costly. Estimated time is listed below. (L1-L3 and D1-D2 will use 30 workers for stage-parallel execution. D3 will use 10 workers due to memory constraints.)
 
-### 📋 Table of Experiments
-| Exp. ID | Model       | DP  | TP  | PP  | NM  | Est. Time |
-| ------- | ----------- | --- | --- | --- | --- | --------- |
-| L1      | llama3-8B   | 512 | 1   | 1   | 1   | 5 mins    |
-| L2      | llama3-70B  | 16  | 8   | 4   | 32  | 2.5 hours |
-| L3      | llama3-405B | 64  | 8   | 16  | 16  | 8 hours   |
-| D1      | DSV3-16B    | 16  | 4   | 2   | 16  | 30 mins   |
-| D2      | DSV3-236B   | 16  | 8   | 4   | 16  | 2.5 hours |
-| D3      | DSV3-671B   | 32  | 8   | 8   | 16  | 9 hours   |
-
 
 ### 🛠 How to Run
 > ⚠️ Note: As these experiments take hours to run, we recommend using `screen` or `tmux` in case of ssh disconnection.
@@ -110,6 +100,17 @@ As these plans corresponds to real-world large scale training, involving up to 8
    bash scripts/run_large_moe_671B.sh;
    ```
     Each script contains a command similar to the demo's in installation guide. Feel free to take a look.
+
+### 📋 Table of Experiments
+| Exp. ID | Model       | DP  | TP  | PP  | NM  | Est. Time |
+| ------- | ----------- | --- | --- | --- | --- | --------- |
+| L1      | llama3-8B   | 512 | 1   | 1   | 1   | 5 mins    |
+| L2      | llama3-70B  | 16  | 8   | 4   | 32  | 2.5 hours |
+| L3      | llama3-405B | 64  | 8   | 16  | 16  | 8 hours   |
+| D1      | DSV3-16B    | 16  | 4   | 2   | 16  | 30 mins   |
+| D2      | DSV3-236B   | 16  | 8   | 4   | 16  | 2.5 hours |
+| D3      | DSV3-671B   | 32  | 8   | 8   | 16  | 9 hours   |
+
 
 ### 👀 Expected Output
 

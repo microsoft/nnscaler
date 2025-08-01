@@ -41,7 +41,7 @@ To fully reproduce results, we recommend to run VERDICT artifact evaluation on a
 
 
 ## 🚀 Installation
-1. Create [conda](https://www.anaconda.com/download/success) environment.
+1. Create [conda](https://www.anaconda.com/download/success) environment. ⚠️ *This step can be skipped when using the provided machine, since it's already set up.*
     ```
     cd Verdict
     conda env create -f conda-environment.yml

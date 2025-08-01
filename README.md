@@ -18,7 +18,7 @@ VERDICT is implemented with modular interfaces. It defines a general graph inter
 ---
 
 # Artifact Evaluation Guide
-Welcome to artifact evaluation guide for Verdict (SOSP'25). The following document outlines the procedures needed to reproduce our results and guides you through the key experiments presented in the paper.
+Welcome to artifact evaluation guide for VERDICT (SOSP'25). The following document outlines the procedures needed to reproduce our results and guides you through the key experiments presented in the paper.
 
 
 ### ✅ Checklist with Estimated Time Cost
@@ -31,11 +31,11 @@ Welcome to artifact evaluation guide for Verdict (SOSP'25). The following docume
 > ⚠️ **Note:** Due to refined design, optimizations and code refactoring, the current evaluation results are improved thus different from statistics in the submitted paper. Please refer to each section for expected outputs. 
 
 ### 💻 Hardware Requirements
-To fully reproduce results, we recommend to run Verdict artifact evaluation on a machine with at least 32 CPU (virtual) cores and 1TB memory. For SOSP'25 AE reviewers, please contact authors for Azure virtual machine instances.
+To fully reproduce results, we recommend to run VERDICT artifact evaluation on a machine with at least 32 CPU (virtual) cores and 1TB memory. For SOSP'25 AE reviewers, please contact authors for Azure virtual machine instances.
 
 ### 🎭 Recommended Evaluation Strategy
-- Evaluation of §8.1 and §8.2 are about Verdict's performance, thus having to be run on capable machines, such as Azure VM instances. These experiments are estimated to take total 30 hours and do not require much reviewer engagement except for inspection of final dumped statistics, due to acknowledged correctness of input models.
-- Evaluation of §8.3 bug reproduction can be more interesting. Verdict will verify 14 buggy parallelized models, detect their violations, and print out information helpful for bug diagnosis. These experiments are lightweight, and *can be run on personal devices*.
+- Evaluation of §8.1 and §8.2 are about VERDICT's performance, thus having to be run on capable machines, such as Azure VM instances. These experiments are estimated to take total 30 hours and do not require much reviewer engagement except for inspection of final dumped statistics, due to acknowledged correctness of input models.
+- Evaluation of §8.3 bug reproduction can be more interesting. VERDICT will verify 14 buggy parallelized models, detect their violations, and print out information helpful for bug diagnosis. These experiments are lightweight, and *can be run on personal devices*.
 
 
 
@@ -81,7 +81,7 @@ To fully reproduce results, we recommend to run Verdict artifact evaluation on a
 ## 🚀 Evaluate *Real-World Parallelization*
 
 ### 🎯 Goal
-(Paper §8.1) To demonstrate Verdict’s practicality and time cost, we experiment on verifying execution plans for LLaMA3 (8B/70B/405B) and DeepSeek-V3 (16B/236B/671B) models under various real-world parallelization setup. There are total 6 runs. Parallelizaion scheme listed below.
+(Paper §8.1) To demonstrate VERDICT practicality and time cost, we experiment on verifying execution plans for LLaMA3 (8B/70B/405B) and DeepSeek-V3 (16B/236B/671B) models under various real-world parallelization setup. There are total 6 runs. Parallelizaion scheme listed below.
 
 ### ⏳ Estimated Completion Time
 As these plans corresponds to real-world large scale training, involving up to 8192 GPUs, their verification time can be costly. Estimated time is listed below. (L1-L3 and D1-D2 will use 30 workers for stage-parallel execution. D3 will use 10 workers due to memory constraints.)
@@ -130,7 +130,7 @@ To check the evaluation results conveniently, take a look at the column `t_total
 ## 🚀 Evaluate *Scalability*
 
 ### 🎯 Goal
-(Paper §8.2) This evaluation measures scalability trends of Verdict. According to the design of Verdict, the time complexity should be invariant with respect to actual tensor shapes due to shape reduction, and sub-/linear to parallelization.
+(Paper §8.2) This evaluation measures scalability trends of VERDICT. According to the design of VERDICT, the time complexity should be invariant with respect to actual tensor shapes due to shape reduction, and sub-/linear to parallelization.
 
 ### ⏳ Estimated Completion Time
 There will be 40 runs, taking 6 hours in total.
@@ -161,7 +161,7 @@ Inspect output plots in `nnscaler/ae/figs`. The trends should ressemble the foll
 ## 🚀 Evaluate *Bug Reproduction*
 
 ### 🎯 Goal
-(Paper §8.3) This evaluation demonstrates Verdict can detect real-world parallelization bugs. We will use Verdict to verify 14 buggy execution plans crafted from real-world buggy models. We will see how Verdict detect them, and output useful information for diagnosis. All execution plans are crafted on the base model of llama3-8B with 2-way DP, 2-way TP, 2-way PP and 2 microbatches.
+(Paper §8.3) This evaluation demonstrates VERDICT can detect real-world parallelization bugs. We will use VERDICT to verify 14 buggy execution plans crafted from real-world buggy models. We will see how VERDICT detect them, and output useful information for diagnosis. All execution plans are crafted on the base model of llama3-8B with 2-way DP, 2-way TP, 2-way PP and 2 microbatches.
 
 ### ⏳ Estimated Completion Time
 Total execution time of 14 cases should finish within 3 minumtes. Manual examination of results takes around 15 minutes.
@@ -234,7 +234,7 @@ target_Tp: Tensor(wtype='p', rank=0, mb=0, tid=7000, v=0),
 Ts: Tensor(wtype='s', rank=0, mb=0, tid=7000, v=1),
 ...
 ```
-The log indicates a runtime error occured when breaking down the full Gs and Gp into stages. The target Tp `Tensor(wtype='p', rank=0, mb=0, tid=7000, v=0)` is serving as an output tensor of the new stage (refer to the following illustration). A stage is ideally determined by finding Ts and Tp's (which are tensors in already verified lineages), and extract  the nodes between Tp's and target Tp (as well as nodes between Ts and target Ts). Verdict will sanity check that target Tp is reachable from *any* of tensor in candidate Tp's. The error log shows that this reachability is not met, and graph slicing is aborted.
+The log indicates a runtime error occured when breaking down the full Gs and Gp into stages. The target Tp `Tensor(wtype='p', rank=0, mb=0, tid=7000, v=0)` is serving as an output tensor of the new stage (refer to the following illustration). A stage is ideally determined by finding Ts and Tp's (which are tensors in already verified lineages), and extract  the nodes between Tp's and target Tp (as well as nodes between Ts and target Ts). VERDICT will sanity check that target Tp is reachable from *any* of tensor in candidate Tp's. The error log shows that this reachability is not met, and graph slicing is aborted.
 
 ![DesignOverview](docs/assets/slc.png)
 Recall that in Bug 2, the missing operator breaks the dataflow. Such bugs are early detected before executing symbolic verification.
@@ -505,4 +505,4 @@ The log should contain the following lines.
     target.extend(indexed_nodes[(dp, tp, pp, mb, False)])
 KeyError: (0, 0, 0, 1, False)
 ``` 
-Bug 14 issues cross-dp gradient synchronization before the second microbatch completes all its operations, leaving alone the last backward operator. The log indicates that symmetry among microbatches is violated, and Verdict is unable to align and infer lineages. 
+Bug 14 issues cross-dp gradient synchronization before the second microbatch completes all its operations, leaving alone the last backward operator. The log indicates that symmetry among microbatches is violated, and VERDICT is unable to align and infer lineages. 

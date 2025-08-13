@@ -45,8 +45,21 @@ def init():
         None
     """
     from nnscaler import runtime
-    _ = runtime.device.DeviceGroup()
+    runtime.device.init_device()
     _ = runtime.resource.EnvResource()
+
+
+def uninit():
+    """
+    Uninitialize the nnscaler library.
+
+    It will destroy the torch distributed nccl process_group
+
+    Returns:
+        None
+    """
+    from nnscaler.runtime.device import uninit_device
+    uninit_device()
 
 
 def _check_torch_version():
@@ -55,7 +68,7 @@ def _check_torch_version():
     torch_version = str(torch.__version__).split('+')[0]
     torch_version = tuple(int(v) for v in torch_version.split('.')[:2])
     if torch_version < (2, 0):
-        logging.warn(f"expected PyTorch version >= 2.0 but got {torch_version}")
+        logging.warning(f"expected PyTorch version >= 2.0 but got {torch_version}")
 
 
 _check_torch_version()

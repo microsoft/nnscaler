@@ -542,6 +542,10 @@ class IRObject:
     def is_constant(self) -> bool:
         return self._is_constant
 
+    @is_constant.setter
+    def is_constant(self, val: bool):
+        self._is_constant = val
+
     def __eq__(self, obj) -> bool:
         if not isinstance(obj, IRObject):
             return False

@@ -164,8 +164,9 @@ class CostDatabase:
         def insert_profile_info(info: List[Tuple[str, str, ProfiledMetrics]]):
             for sign, serialized, profiled_metrics in info:
                 _logger.debug(f'profiled {sign} in {serialized} with {profiled_metrics}')
-                if not self.db.exist_serialized(sign, serialized):
-                    self.db.insert(sign, serialized, profiled_metrics)
+                # Align with `re_profile`'s semantic, as long as we get the profile info,
+                # we will override the old one
+                self.db.insert(sign, serialized, profiled_metrics)
 
         if parallel_profile:
             _logger.info('Profiling in parallel')

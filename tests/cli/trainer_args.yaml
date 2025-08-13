@@ -1,3 +1,6 @@
+vars:
+  dim: 16
+  drop_last: true
 compute_config:
   plan_ngpus: 4
   runtime_ngpus: 100
@@ -16,7 +19,7 @@ seed: 0
 model:
   type: tests.cli.common.MLP
   args:
-    dim: 16
+    dim: $(vars.dim)
     nlayers: 16
 
 optimizer:
@@ -27,17 +30,17 @@ optimizer:
 dataset:
   type: tests.cli.common.SimpleDataset
   train_args:
-    dim: 16
+    dim: $(vars.dim)
     size: 100
   val_args:
-    dim: 16
+    dim: $(vars.dim)
     size: 10
 
 dataloader:
   train_args:
-    drop_last: true
+    drop_last: $(vars.drop_last)
   val_args:
-    drop_last: true
+    drop_last: $(vars.drop_last)
 
 checkpoint:
   keep_last_n_checkpoints: 30

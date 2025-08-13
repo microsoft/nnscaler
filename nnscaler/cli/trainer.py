@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 CHECKPOINT_FILE_FORMAT: str = '{epoch:04d}-{step:04d}/{rank}.ckpt'
 CHECKPOINT_LAST_DIR_NAME: str = 'last'
 CHECKPOINT_BEST_DIR_NAME: str = 'best'
+CHECKPOINT_MERGED_FILE_NAME: str = 'merged.ckpt'
 CHECKPOINT_LAST_FILE_FORMAT: str = 'last/{rank}.ckpt'
 CHECKPOINT_BEST_FILE_FORMAT: str = 'best/{rank}.ckpt'
 
@@ -46,7 +47,8 @@ CHECKPOINT_BEST_FILE_FORMAT: str = 'best/{rank}.ckpt'
 @dataclass
 class TrainStatus:
     best_loss = float('inf')
-    # the train steps done so far
+    # the train steps done (forward/backward/optimizer step) so far
+    # This will be updated after optimizer.step is done, but before validation/logging metrics/saving checkpoint.
     finished_train_steps: int = 0
 
 
@@ -83,11 +85,16 @@ class Trainer:
             self.train_args = TrainerArgs.from_cli(cli_args)
 
         self.rank = None
+        self.world_size = None
+        self.local_world_size = None
+        self.local_rank = None
+        self.node_rank = None
         self.sync_group = None
         self.model = None
         self.optimizer = None
         self.dataset = {'train': None, 'val': None, 'test': None}
         self.dataloader: Dict[str, Optional[DataLoader]] = {'train': None, 'val': None, 'test': None}
+        self.dataloader_resumed = False  # whether the dataloader is resumed from checkpoint
         self.lr_scheduler = None
         self.train_status = TrainStatus()
         self.dummy_input = None
@@ -99,25 +106,40 @@ class Trainer:
         self.rng_states_from_resume: dict[str, torch.Tensor] | None = None
 
     def run(self):
-        self._setup()
-        if self.train_args.compile_mode:
-            return
-        self._train()
+        try:
+            self._setup()
+            if not self.train_args.compile_mode:
+                self._train()
+        finally:
+            for stage in ['train', 'val', 'test']:
+                if self.dataloader[stage] is not None and (close_fn := getattr(self.dataloader[stage], 'close', None)):
+                    close_fn()
+                self.dataset[stage] = None
+                self.dataloader[stage] = None
+            if self.hook:
+                self.hook.on_finalize(self)
+            # It is very common to use `torch.distributed` after training
+            # So let's not uninitialize nnscaler here.
+            # TODO: make it configurable?
+            # nnscaler.uninit()
 
     def _fix_input(self, input):
         return fix_input(input, self.train_args.input_dtype)
 
     def _load_dummy_input(self):
+        if dummy_sample_gen_fn := self.train_args.resolved_dummy_sample_gen_fn:
+            return dummy_sample_gen_fn(self.train_args)
+
         with enforce_zero_num_worker(DataLoader):
-            assert self.dataset['train'] is not None, "train dataset is not set"
-            dataloader = self.train_args.create_dataloader('train', self.dataset['train'])
+            dataset = self.train_args.create_dataset('train')
+            dataloader = self.train_args.create_dataloader('train', dataset)
             assert dataloader.num_workers == 0, "The dataloader must have `num_workers=0`."
-            return next(iter(dataloader))
+            value = next(iter(dataloader))
+            if close_fn := getattr(dataloader, 'close', None):
+                close_fn()
+            return value
 
     def _setup(self):
-        self.train_args.init_env(self)
-        compile_only = self.train_args.compile_mode
-
         if is_running_distributed():
             nnscaler.init()
             if torch.distributed.get_rank() == 0:
@@ -125,13 +147,27 @@ class Trainer:
             else:
                 logging.getLogger().setLevel(logging.WARNING)
 
-        # create dataset and dataloader
-        for stage in ['train', 'val', 'test']:
-            self.dataset[stage] = self.train_args.create_dataset(stage)
+        self.train_args.init_env(self)
+
+        # make sure all ranks are synchronized after init_env
+        if is_running_distributed():
+            torch.distributed.barrier()
+
+        compile_only = self.train_args.compile_mode
 
         # load a dummy input from training dataset
         self.dummy_input = self._load_dummy_input()
         self.dummy_input = self._fix_input(self.dummy_input)
+
+        pmodel = parallelize_model(self.train_args, self.dummy_input, load_module=not compile_only)
+        if compile_only:
+            return
+
+        torch.distributed.barrier()
+
+        # create dataset and dataloader
+        for stage in ['train', 'val', 'test']:
+            self.dataset[stage] = self.train_args.create_dataset(stage)
 
         for stage in ['train', 'val', 'test']:
             self.dataloader[stage] = self.train_args.create_dataloader(stage, self.dataset[stage])
@@ -145,12 +181,11 @@ class Trainer:
                         f"You can specify `drop_last=True` in DataLoader to fix this problem."
                     )
 
-        pmodel = parallelize_model(self.train_args, self.dummy_input, load_module=not compile_only)
-        if compile_only:
-            return
-
-        torch.distributed.barrier()
         self.rank = torch.distributed.get_rank()
+        self.world_size = torch.distributed.get_world_size()
+        self.local_world_size = int(os.environ.get('LOCAL_WORLD_SIZE'))
+        self.local_rank = int(os.environ.get('LOCAL_RANK'))
+        self.node_rank = int(os.environ.get('GROUP_RANK'))
 
         self.total_train_steps_per_epoch = len(self.dataloader['train']) // self.train_args.update_freq
         if len(self.dataloader['train']) % self.train_args.update_freq != 0:
@@ -200,11 +235,13 @@ class Trainer:
         self.hook.after_setup(self)
 
     @classmethod
-    def merge_checkpoint(cls, checkpoint_files: List[str], output_file: str):
-        state_dicts = [torch.load(f, map_location='cpu') for f in checkpoint_files]
+    def _merge_checkpoint(cls, checkpoint_files: List[str]):
+        state_dicts = [torch.load(f, map_location='cpu', weights_only=False) for f in checkpoint_files]
         for i in range(1, len(state_dicts)):
             if state_dicts[i]['train_args'] != state_dicts[0]['train_args']:
                 raise ValueError(f"train_args in {checkpoint_files[i]} is different from {checkpoint_files[0]}")
+            if state_dicts[i].get('lr_scheduler', None) != state_dicts[0].get('lr_scheduler', None):
+                raise ValueError(f"lr_scheduler state in {checkpoint_files[i]} is different from {checkpoint_files[0]}")
 
         module_state_dict, opt_state_dict = nnscaler.merge_state_dicts(
             [s['model'] for s in state_dicts],
@@ -212,14 +249,98 @@ class Trainer:
         )
         train_args = copy.deepcopy(state_dicts[0]['train_args'])
         train_args['checkpoint']['save_type'] = 'merged'
+
+        global_keys = {
+            'model', 'optimizer', 'train_args',
+            'train_status', 'lr_scheduler', 'rank'
+        }
+        # for extra keys (including `dataloader` and `rng_states`), we will not merge them.
+        # Intead we will collect them from all state_dicts
+        extra_keys: Dict[str, list] = {}
+        for s in state_dicts:
+            extra_keys.update({k: [] for k in s.keys() if k not in global_keys})
+        if extra_keys:
+            sorted_state_dicts = sorted(state_dicts, key=lambda x: x['rank'])
+            for s in sorted_state_dicts:
+                for k in extra_keys:
+                    extra_keys[k].append(s.get(k, None))
+
         merged_state_dict = {
             'model': module_state_dict,
             'optimizer': opt_state_dict,
             'lr_scheduler': state_dicts[0].get('lr_scheduler', None),
             'train_status': state_dicts[0]['train_status'],
             'train_args': train_args,
-            'rng_states': None,
+            **extra_keys,
         }
+        return merged_state_dict
+
+    def _broadcast_merged_state_dict(self, state_dict: Dict[str, Any]):
+        """
+        Broadcast the merged state dict to all ranks.
+        We can't broadcast the whole state_dict at once, because it may be too large, and leads to OOM.
+        Here we will break the model and optimizer state_dict into smaller pieces and broadcast them one by one.
+        Please note we use `torch.distributed.broadcast_object_list` to broadcast the state_dict (including tensors inside).
+        """
+
+        def _broadcast_keys(sdict: Dict[str, Any], set_keys=True):
+            if self.rank == 0:
+                state_keys = list(sdict.keys())
+            else:
+                state_keys = None
+            state_key_list = [state_keys]
+            torch.distributed.broadcast_object_list(state_key_list, src=0)
+            state_keys = state_key_list[0]
+            if set_keys and self.rank != 0:
+                for key in state_keys:
+                    sdict[key] = {}  # assume the values are empty dicts
+            return state_keys
+
+        def _broadcast_value(sdict, key):
+            if self.rank == 0:
+                value_list = [sdict[key]]
+            else:
+                value_list = [None]
+            torch.distributed.broadcast_object_list(value_list, src=0)
+            if self.rank != 0:
+                sdict[key] = value_list[0]
+
+        def _broadcast_values(sdict, keys):
+            for key in keys:
+                _broadcast_value(sdict, key)
+
+        if self.rank == 0:
+            if state_dict is None:
+                raise ValueError("state_dict should not be None in rank 0 when broadcasting")
+        else:
+            if state_dict is not None:
+                raise ValueError("state_dict should be None in other ranks when broadcasting")
+            state_dict = {}
+
+        state_keys = _broadcast_keys(state_dict)
+
+        for skey in state_keys:
+            logger.info(f"Broadcasting {skey}.")
+            if skey == 'optimizer':
+                opt_keys = _broadcast_keys(state_dict['optimizer'])
+                opt_keys_without_state = [
+                    k for k in opt_keys if k != 'state'
+                ]
+                _broadcast_values(state_dict['optimizer'], opt_keys_without_state)
+                idxs = _broadcast_keys(state_dict['optimizer']['state'])
+                for idx in idxs:
+                    idx_keys = _broadcast_keys(state_dict['optimizer']['state'][idx])
+                    _broadcast_values(state_dict['optimizer']['state'][idx], idx_keys)
+            elif skey == 'model':
+                model_keys = _broadcast_keys(state_dict['model'])
+                _broadcast_values(state_dict['model'], model_keys)
+            else:
+                _broadcast_value(state_dict, skey)
+        return state_dict
+
+    @classmethod
+    def merge_checkpoint(cls, checkpoint_files: List[str], output_file: str):
+        merged_state_dict = cls._merge_checkpoint(checkpoint_files)
         torch.save(merged_state_dict, output_file)
 
     def _log_finalize(self):
@@ -236,17 +357,45 @@ class Trainer:
             logger.setup(config)
 
     def _load_checkpoint(self):
-        resume_from = self.train_args.checkpoint.get_resume_checkpoint_dir()
+        resume_from = self.train_args.checkpoint.get_resume_checkpoint()
         if not resume_from:
             return
         logger.info(f"Resuming from {resume_from}")
         if resume_from.is_file():
             resume_from = resume_from   # when we load from merged checkpoint
+            state_dict = torch.load(resume_from, map_location='cpu', weights_only=False)
+            if convert_fn := self.train_args.checkpoint.resolved_convert_fn:
+                state_dict = convert_fn(state_dict)
         else:
-            resume_from = resume_from / f'{self.rank}.ckpt'
-        state_dict = torch.load(resume_from, map_location='cpu')
+            ckpt_files = list(resume_from.glob('*.ckpt'))
+            rank_ckpt_files = {int(f.stem): f for f in ckpt_files if f.stem.isdigit()}
+            if set(rank_ckpt_files.keys()) != set(range(len(rank_ckpt_files))):
+                raise ValueError(f"Checkpoint files in {resume_from} are not complete: {rank_ckpt_files.keys()}")
+            if len(rank_ckpt_files) != self.world_size \
+                and self.train_args.checkpoint.resume_from.with_merged is False:
+                raise ValueError(f"World size is different with original one: {len(rank_ckpt_files)} != {self.world_size}")
+
+            if len(rank_ckpt_files) != self.world_size or self.train_args.checkpoint.resume_from.with_merged:
+                # merge the checkpoint files from all ranks and broadcast to all ranks
+                torch.distributed.barrier()
+                if self.rank == 0:
+                    logger.info(f"Merging checkpoint files from {resume_from}")
+                    state_dict = self._merge_checkpoint(list(rank_ckpt_files.values()))
+                else:
+                    state_dict = None
+                logger.info(f"Broadcasting merged checkpoint to all ranks.")
+                state_dict = self._broadcast_merged_state_dict(state_dict)
+                logger.info(f"Broadcasted merged checkpoint to all ranks.")
+            else:
+                resume_from = resume_from / f'{self.rank}.ckpt'
+                state_dict = torch.load(resume_from, map_location='cpu', weights_only=False)
+
         self.hook.on_load_checkpoint(self, state_dict)
-        ckpt_save_type = state_dict['train_args']['checkpoint']['save_type']
+        # if it is not a well-formed state_dict (from third party)
+        # we will treat it as a merged state_dict
+        ckpt_save_type = state_dict.get('train_args', {}) \
+            .get('checkpoint', {}) \
+            .get('save_type', 'merged')
 
         if ckpt_save_type == 'merged': # it is a merged state dict
             nnscaler.load_merged_state_dict(
@@ -271,8 +420,35 @@ class Trainer:
                 raise ValueError("lr_scheduler is not set in the current trainer")
             if self.lr_scheduler:
                 self.lr_scheduler.load_state_dict(state_dict['lr_scheduler'])
-        self.train_status = TrainStatus(**state_dict['train_status'])
-        self.rng_states_from_resume = state_dict.get('rng_states')  # resumed in _global_batch_iterator()
+        if 'dataloader' in state_dict and state_dict['dataloader'] is not None:
+            if not self._is_resumable_dataloader():
+                raise ValueError("dataloader is not resumable, but checkpoint contains dataloader state")
+            if ckpt_save_type == 'merged':
+                dataloader_states = state_dict['dataloader']
+                # only load dataloader state when all ranks have the same state
+                # TODO: is this reasonable?
+                if all(dataloader_states[i] == dataloader_states[0] for i in range(1, len(dataloader_states))):
+                    self.dataloader['train'].load_state_dict(dataloader_states[0])
+                    self.dataloader_resumed = True
+                else:
+                    logger.warning("Dataloader states are not the same across ranks, will use dry run to resume dataloader state.")
+                    self.dataloader_resumed = False
+            else:
+                self.dataloader['train'].load_state_dict(state_dict['dataloader'])
+                self.dataloader_resumed = True
+        else:
+            self.dataloader_resumed = False
+
+        if 'train_status' in state_dict:
+            self.train_status = TrainStatus(**state_dict['train_status'])
+
+        # we don't resume rng states when loading merged checkpoint,
+        if ckpt_save_type != 'merged':
+            self.rng_states_from_resume = state_dict.get('rng_states')  # resumed in _global_batch_iterator()
+        else:
+            logger.warning("RNG states are not resumed when loading merged checkpoint.")
+
+        self.hook.after_load_checkpoint(self, state_dict)
 
     def _log_mem_stats(self, tag=None):
         # log minimum free memory over the iteration
@@ -295,9 +471,17 @@ class Trainer:
         idx_format = f"0{ndigits}d"
         int_format = ''
         float_format = '.3f'
-        metris_str = ', '.join(
+        float_scientific_format = '.3e'
+        def _select_format(v):
+            if isinstance(v, float):
+                if v != 0.0  and (v < 1e-3 or v > 1e3):
+                    return float_scientific_format
+                else:
+                    return float_format
+            return int_format
+        metrics_str = ', '.join(
             [
-                f"{k}={format(v, float_format if isinstance(v, float) else int_format)}"
+                f"{k}={format(v, _select_format(v))}"
                 for k, v in metrics.items()
             ]
         )
@@ -305,7 +489,13 @@ class Trainer:
             step_str = f'{format(idx, idx_format)}/{self.total_train_steps_per_epoch} '
         else:
             step_str = f''
-        return f"{epoch_desc}: {step_str}{metris_str}"
+        return f"{epoch_desc}: {step_str}{metrics_str}"
+
+    def _is_resumable_dataloader(self):
+        return (
+            callable(getattr(self.dataloader['train'], 'state_dict', None)) and
+            callable(getattr(self.dataloader['train'], 'load_state_dict', None))
+        )
 
     def _save_checkpoint(self, loss):
         checkpoint_config = self.train_args.checkpoint
@@ -342,8 +532,15 @@ class Trainer:
             'train_status': asdict(self.train_status),
             'train_args': self.train_args.to_dict(),
             'rng_states': self._get_rng_states(),
+            'rank': self.rank,
+            'nnscaler': nnscaler.__version__,
         }
+
+        if self._is_resumable_dataloader():
+            state_dict['dataloader'] = self.dataloader['train'].state_dict()  # problematic
+
         self.hook.on_save_checkpoint(self, state_dict)
+
         ckpt_file = save_dir / CHECKPOINT_FILE_FORMAT.format(
             epoch=current_epoch,
             step=self.train_status.finished_train_steps,
@@ -391,9 +588,8 @@ class Trainer:
 
         torch.distributed.barrier()
         # remove old checkpoints
-        local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
         # only the first rank in the group will do the job
-        if self.rank % local_world_size == 0:
+        if self.rank % self.local_world_size == 0:
             try:
                 self._expire_checkpoints()
             except Exception as e:
@@ -436,22 +632,25 @@ class Trainer:
             shutil.rmtree(save_dir / ckpt_name)
 
     def _global_batch_iterator(self, num_skip_first=0, stage='train'):
-        if num_skip_first == 0:
-            # if the checkpoint stops at the end of an epoch,
-            # the rng states must be resumed before creating iterator
-            # because `DataLoader.__iter__()` uses the rng (dunno why),
-            # and the previous run had not call it yet
-            self._try_resume_rng_states()
-
-        it = iter(self.dataloader[stage])
-        for _ in range(num_skip_first * self.train_args.update_freq):
-            _sample = next(it)
-
-        if num_skip_first != 0:
-            # if the checkpoint stops in the middle of an epoch,
-            # the rng states must be resumed before loading the first batch, which depends on the rng;
-            # and must be resumed after skipping unused batches, which will affect the rng
-            self._try_resume_rng_states()
+        if stage == 'train':
+            if self.dataloader_resumed or num_skip_first == 0:
+                # if the checkpoint stops at the end of an epoch,
+                # the rng states must be resumed before creating iterator
+                # because `DataLoader.__iter__()` uses the rng (dunno why),
+                # and the previous run had not call it yet
+                self._try_resume_rng_states()
+                it = iter(self.dataloader[stage])
+            else:  # dry run until reach the desired batch.
+                it = iter(self.dataloader[stage])
+                for _ in range(num_skip_first * self.train_args.update_freq):
+                    _sample = next(it)
+                # if the checkpoint stops in the middle of an epoch,
+                # the rng states must be resumed before loading the first batch, which depends on the rng;
+                # and must be resumed after skipping unused batches, which will affect the rng
+                self._try_resume_rng_states()
+        else:
+            # for validation and test, we don't need to resume rng states
+            it = iter(self.dataloader[stage])
 
         samples = []
         for sample in it:
@@ -465,19 +664,9 @@ class Trainer:
 
     def aggregate_outputs(self, loss_outputs, sync_group) -> AggregatedOutputs:
         # loss is the first element of the output (or the only element)
-        losses = [
-            loss if isinstance(loss, torch.Tensor)
-            else loss[0]
-            for loss in loss_outputs
-        ]
-        loss_sum = torch.sum(torch.stack(losses), dtype=torch.float64)
-        torch.distributed.all_reduce(loss_sum, group=sync_group)
-        num_batches = torch.tensor(len(losses), device=torch.cuda.current_device())
-        torch.distributed.all_reduce(num_batches, group=sync_group)
-
-        return AggregatedOutputs(
-            loss_sum=loss_sum.item(),
-            num_batches=num_batches.item(),
+        return AggregatedOutputs.aggregate(
+            loss_outputs, sync_group=sync_group,
+            loss_fn=lambda loss: loss if isinstance(loss, torch.Tensor) else loss[0]
         )
 
     def _fix_batches(self, batches):
@@ -592,6 +781,7 @@ class Trainer:
         self.hook.on_train_start(self)
 
         for epoch in range(start_epoch, self.train_args.max_epochs or sys.maxsize):
+            # TODO: make sure set_epoch doesn't have negative effect when called multiple times (i.e. when resuming)
             if hasattr(self.dataloader['train'], 'set_epoch'):
                 self.dataloader['train'].set_epoch(epoch)
             elif hasattr(self.dataloader['train'].sampler, 'set_epoch'):
@@ -655,6 +845,7 @@ class Trainer:
         batches_count = 0
 
         self.hook.on_val_start(self)
+        val_start_at = time.perf_counter()
         for idx, batches in data_iter:
             if self.train_args.max_val_steps and idx >= self.train_args.max_val_steps:
                 break
@@ -664,29 +855,30 @@ class Trainer:
 
             self.model.eval()
             with torch.inference_mode():
-                self.hook.on_val_step_start(self, batches[:num_batches], idx)
+                self.hook.on_val_step_start(self, batches[:num_batches])
                 losses = self.model.infer_step(batches)
-                self.hook.on_val_step_end(self, losses[:num_batches], batches[:num_batches], idx)
+                self.hook.on_val_step_end(self, losses[:num_batches])
 
             aggregate_outputs = self.train_args.resolved_aggregate_outputs_fn or self.aggregate_outputs
             aggregated_outputs = aggregate_outputs(losses[:num_batches], self.sync_group)
             self.hook.after_aggregate_val_step_outputs(
                 self, aggregated_outputs,
                 aggregated_outputs.loss_sum / aggregated_outputs.num_batches,
-                idx
             )
             loss_sum += aggregated_outputs.loss_sum
             batches_count += aggregated_outputs.num_batches
 
+        val_wall = time.perf_counter() - val_start_at
         # update train status
         loss = loss_sum / batches_count
         self.hook.on_val_end(self, loss)
 
         step_stat.val_loss = loss
-        val_metrics = asdict(step_stat)
+        val_metrics = {'val_loss': loss, 'val_wall': val_wall}
+        self.hook.before_log_val_metrics(self, val_metrics)
         self.log_metrics(val_metrics, tag='val')
         if self.rank == 0 and self.train_args.enable_log_progress:
-            logger.info(self._format_metrics(f'Validation', None, val_metrics))
+            logger.info(self._format_metrics(f'Validation', None, asdict(step_stat)))
         return step_stat.val_loss
 
     def _train_epoch(self, epoch: int) -> None:
@@ -717,6 +909,8 @@ class Trainer:
         step_stat: Optional[_StepStat] = None
         for i, batches in data_iter:
             idx = i + resume_from_idx
+            self.hook.on_step_start(self, epoch, idx)
+
             step_start_at = time.perf_counter()
             step_stat = _StepStat()
             step_metrics = {}
@@ -730,23 +924,26 @@ class Trainer:
             self.optimizer.zero_grad()
             self.hook.after_zero_grad(self)
 
-            self.hook.on_train_step_start(self, batches[:num_batches], idx)
+            self.hook.on_train_step_start(self, batches[:num_batches])
             losses = self.model.train_step(batches, is_dummy_batch)
-            self.hook.on_train_step_end(self, losses[:num_batches], batches[:num_batches], idx)
+            self.hook.on_train_step_end(self, losses[:num_batches])
 
             aggregate_outputs = self.train_args.resolved_aggregate_outputs_fn or self.aggregate_outputs
             aggregated_outputs = aggregate_outputs(losses[:num_batches], self.sync_group)
             if self.train_args.optimizer.loss_reduction == 'mean':
                 loss = aggregated_outputs.loss_sum / aggregated_outputs.num_batches
+            elif self.train_args.optimizer.loss_reduction == 'per-token-mean':
+                if not aggregated_outputs.num_tokens:
+                    raise RuntimeError("`aggregate_outputs` doesn't set `num_tokens` field")
+                loss = aggregated_outputs.loss_sum / aggregated_outputs.num_tokens
             else:
                 loss = aggregated_outputs.loss_sum
             step_stat.train_loss = loss
-            self.hook.after_aggregate_train_step_outputs(self, aggregated_outputs, loss, idx)
+            self.hook.after_aggregate_train_step_outputs(self, aggregated_outputs, loss)
 
             self.hook.before_sync_grad(self)
-            # actually `sync_shard_grad` is no-op here
-            # because trainer only supports end2end model
-            # and syncing grad in end2end model is done in `_train_step`.
+            # `sync_shard_grad` is no-op if the whole model is parallelized
+            #  because syncing grad in end2end model is done in `_train_step`.
             self.optimizer.sync_shard_grad()
             self.hook.after_sync_grad(self)
 
@@ -791,6 +988,8 @@ class Trainer:
             self._log_mem_stats(tag='train')
             step_metrics = {k:v for k, v in asdict(step_stat).items() if v is not None}
             step_metrics['train_wall'] = time.perf_counter() - step_start_at
+            step_metrics['loss'] = step_metrics['train_loss']
+            self.hook.before_log_train_metrics(self, step_metrics, aggregated_outputs)
             self.log_metrics(step_metrics, tag='train')
             if self.rank == 0:
                 data_iter.set_postfix(step_metrics)
@@ -798,6 +997,8 @@ class Trainer:
                     and self.train_status.finished_train_steps % self.train_args.log_progress_every_n_train_steps == 0:
                     logger.info(self._format_metrics(epoch_desc, idx + 1, step_metrics))
                     step_metrics = {}
+
+            self.hook.on_step_end(self, epoch, idx, step_metrics, aggregated_outputs)
 
             # validate and save checkpoint
             if self.train_args.checkpoint.every_n_train_steps and \

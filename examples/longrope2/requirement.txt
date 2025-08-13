@@ -1,0 +1,4 @@
+zstandard
+transformers>=4.48
+datasets
+tensorboard

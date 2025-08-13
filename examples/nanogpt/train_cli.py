@@ -49,14 +49,14 @@ def init_env(trainer: 'Trainer'):
     torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
 
 
-def on_train_step_end(trainer: 'Trainer', outputs, batches, idx: int) -> None:
+def on_train_step_end(trainer: 'Trainer', outputs) -> None:
     if torch.distributed.get_rank() == 0:
-        print(f'# train_loss {idx:03d}', outputs[0].item())
+        print(f'# train_loss {trainer.train_status.finished_train_steps:03d}', outputs[0].item())
 
 
-def on_val_step_end(trainer: 'Trainer', outputs, batches, idx: int) -> None:
+def on_val_step_end(trainer: 'Trainer', outputs) -> None:
     if torch.distributed.get_rank() == 0:
-        print(f'# val_loss {idx:03d}', outputs[0].item())
+        print(f'# val_loss {trainer.train_status.finished_train_steps:03d}', outputs[0].item())
 
 
 # poor man's data loader

@@ -1,0 +1,50 @@
+compute_config:
+  plan_ngpus: 2
+  runtime_ngpus: 4
+  constant_folding: true
+  use_zero: true
+  use_end2end: true
+
+run_mode: run
+pas_policy: tp
+micro_batch_size: 2
+global_batch_size: 8
+max_epochs: 4
+max_train_steps: 100
+seed: 0
+
+model:
+  type: tests.cli.common.MLP
+  args:
+    dim: 16
+    nlayers: 16
+
+optimizer:
+  type: torch.optim.Adam
+  args:
+    lr: 0.01
+
+dataset:
+  type: tests.cli.common.SimpleIterDataset
+  train_args:
+    split: train
+    shuffle: false
+    batch_size: $(micro_batch_size)
+    replication: $(compute_config.plan_ngpus)
+  val_args:
+    split: val
+    shuffle: false
+    batch_size: $(micro_batch_size)
+    replication: $(compute_config.plan_ngpus)
+
+dataloader:
+  type: streaming.StreamingDataLoader
+  train_args:
+    shuffle: false
+    drop_last: true
+  val_args: $(dataloader.train_args)
+
+checkpoint:
+  keep_last_n_checkpoints: 30
+  every_n_train_steps: 1
+  save_type: deduped

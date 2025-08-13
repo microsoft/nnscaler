@@ -255,3 +255,26 @@ def test_input_gen_fn():
         fn = CustomizedOps.kOpInputGen[select_node.signature]
         ret = mock_select(*fn(select_node))
         assert True
+
+
+class MockModelKwargs(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc = torch.nn.Linear(10, 10)
+
+    def forward(self, x, y):
+        x, y = self.fc(x), self.fc(y)
+        return mock_add(x=x, y=y)
+
+
+# passed test
+@replace_all_device_with('cpu')
+def test_kw_args():
+    model = MockModelKwargs()
+    with tempfile.TemporaryDirectory() as tempdir:
+        ir_graph = convert_model(model, {'x': torch.rand(10, 10), 'y': torch.rand(10, 10)}, tempdir, False)
+
+        # test profiler.database
+        for node, p_name in zip(ir_graph.nodes(), ['linear', 'linear', 'mock_add']):
+            profile_name = get_func(node)[0].__qualname__
+            assert profile_name == p_name, f'{profile_name} should be {p_name}'

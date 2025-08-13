@@ -15,6 +15,7 @@ import math
 import logging
 from dataclasses import dataclass, asdict
 from pathlib import Path
+import contextlib
 
 import _operator # required by eval()
 import nnscaler  # required by eval()
@@ -22,6 +23,8 @@ from nnscaler.graph.function.dimops import IRDimops
 from nnscaler.ir.cten import IRTensor, IRObject
 from nnscaler.ir.operator import IRFwOperation
 from nnscaler.graph.parser.register import CustomizedOps
+from nnscaler.graph.tracer.metadata import AutocastInfo
+from nnscaler.utils import load_type
 
 _logger = logging.getLogger(__name__)
 
@@ -84,7 +87,7 @@ def get_func(node: IRFwOperation) -> Tuple[Callable, Shapes, DTypes, Dict]:
     if node.signature in CustomizedOps.kOpRuntime:
         fn = CustomizedOps.kOpRuntime[node.signature]
     else:
-        fn = eval(node.signature)
+        fn = load_type(node.signature)
     shapes, dtypes, requires_grads, values = [], [], [], []
 
     # TODO: this function should rewrite with pytree
@@ -176,8 +179,15 @@ def profile(node: IRFwOperation, func: Callable, shapes: Shapes, dtypes: DTypes,
         train_kwargs[name] = train_val
         eval_kwargs[name] = eval_val
 
+    assert node.op_context is not None, f"node {node}: op_context is None"
+    autocast_info = AutocastInfo(**node.op_context["autocast_info"])
+    if autocast_info.nesting > 0:
+        ctx = torch.autocast(device_type='cuda', dtype=autocast_info.cuda_dtype, enabled=autocast_info.cuda_enabled, cache_enabled=autocast_info.cache_enabled)
+    else:
+        ctx = contextlib.nullcontext()
     # run one sample
-    outputs = func(*tensors, **train_kwargs)
+    with ctx:
+        outputs = func(*tensors, **train_kwargs)
 
     # check whether func is a in-place operation
     for t1, t2 in zip(in_tensors, tensors):
@@ -195,7 +205,8 @@ def profile(node: IRFwOperation, func: Callable, shapes: Shapes, dtypes: DTypes,
     grads = tuple(torch.zeros_like(otensor) for otensor in outputs)
 
     def run_step(func, tensors, kwargs, backward: bool):
-        outputs = func(*tensors, **kwargs)
+        with ctx:
+            outputs = func(*tensors, **kwargs)
         outputs = (outputs,) if torch.is_tensor(outputs) else outputs
         outputs = tuple(filter(lambda x: torch.is_tensor(x) and x.requires_grad, outputs))
         if backward:

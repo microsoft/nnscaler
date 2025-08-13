@@ -17,3 +17,5 @@ tox-conda
 yapf
 wandb
 tensorboard
+mosaicml-streaming
+cppimport

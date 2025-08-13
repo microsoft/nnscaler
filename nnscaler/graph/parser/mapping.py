@@ -119,6 +119,7 @@ class SignFx2Op:
         __ttemplate('transpose'): function.Transpose,
         __tttemplate('expand'): function.Expand,
         __tttemplate('expand_as'): function.ExpandAs,
+        __tttemplate('item'): function.Item,
         __ttemplate('arange'): function.Arange,
         __ttemplate('linspace'): function.Linspace,
         __ttemplate('detach'): function.Detach,
@@ -140,6 +141,8 @@ class SignFx2Op:
         __ftemplate('layer_norm'): function.LayerNorm,
         __ftemplate('scaled_dot_product_attention'): function.ScaledDotProductAttention,
         __fcntemplate('scaled_dot_product_attention'): function.ScaledDotProductAttention,
+        __ttemplate('view_as_complex'): function.ViewAsComplex,
+        __ttemplate('view_as_real'): function.ViewAsReal,
 
         # ============== runtime function =================
         __tttemplate('size'): function.Size,

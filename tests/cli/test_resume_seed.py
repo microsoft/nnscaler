@@ -69,7 +69,7 @@ def _train(tmp_path, steps_per_epoch, max_train_steps, resume_from):
         model=ModelConfig(type=Model),
         optimizer=OptimizerConfig(type=torch.optim.AdamW),
         dataset=DatasetConfig(type=RandomDataset, train_args={'length': steps_per_epoch}),
-        checkpoint=CheckpointConfig(resume_from=resume_from, save_dir=tmp_path/'checkpoints'),
+        checkpoint=CheckpointConfig(resume_from=ResumeOptions(checkpoint=resume_from), save_dir=tmp_path/'checkpoints'),
         max_train_steps=max_train_steps,
         enable_progress_bar=False,
         seed=0,

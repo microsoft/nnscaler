@@ -30,8 +30,6 @@ from nnscaler.cli.trainer_args import (
 from nnscaler.runtime.f16_optimizer import MixedPrecisionAdamW
 import nnscaler.utils
 
-import torch._dynamo  # FIXME: a workaround to avoid tracing the dynamic import
-
 
 model_id = 'meta-llama/Meta-Llama-3-8B-Instruct'
 tokenizer_id = model_id

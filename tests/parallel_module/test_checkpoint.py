@@ -308,7 +308,7 @@ def _train(model: torch.nn.Module, num_replicas, rank, start, end, ckpt_dir, inf
     loss_fn = nn.BCELoss()
     optimizer = build_optimizer(model, torch.optim.Adam, lr=0.01)
     if ckpt_start_file.exists():
-        ckpt_dict = torch.load(ckpt_start_file)
+        ckpt_dict = torch.load(ckpt_start_file, weights_only=False)
         model_state_dict = ckpt_dict['model']
         for name, m in model.named_modules():
             prefix = f'{name}.' if name else ''
@@ -334,7 +334,7 @@ def _train(model: torch.nn.Module, num_replicas, rank, start, end, ckpt_dir, inf
         torch.save(inference_module.state_dict(), temp_inferenece_ckpt_file)
         torch.distributed.barrier()
         inference_ckpt_files = [ckpt_dir / temp_inferenece_ckpt_file_template.format(rank=i) for i in range(torch.distributed.get_world_size())]
-        inference_state_dicts = [torch.load(f) for f in inference_ckpt_files]
+        inference_state_dicts = [torch.load(f, weights_only=False) for f in inference_ckpt_files]
         merged_inference_state_dict, _ = merge_state_dicts(inference_state_dicts)
         assert_model_state_dict_equal(merged_model_state_dict, merged_inference_state_dict)
 
@@ -399,7 +399,7 @@ def _train(model: torch.nn.Module, num_replicas, rank, start, end, ckpt_dir, inf
     torch.distributed.barrier()
     if torch.distributed.get_rank() == 0:
         ckpt_files = [ckpt_dir / ckpt_file_template.format(rank=i, start=end) for i in range(torch.distributed.get_world_size())]
-        ckpt_state_dicts = [torch.load(f) for f in ckpt_files]
+        ckpt_state_dicts = [torch.load(f, weights_only=False) for f in ckpt_files]
         model_state_dicts = [ckpt['model'] for ckpt in ckpt_state_dicts]
         optimizer_state_dicts = [ckpt['optimizer'] for ckpt in ckpt_state_dicts]
         if check_merge_log:

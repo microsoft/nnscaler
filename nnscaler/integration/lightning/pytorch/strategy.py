@@ -514,9 +514,9 @@ class NnScalerStrategy(ParallelStrategy):
             raise FileNotFoundError(f"Checkpoint file {path} not found.")
 
         if path.is_dir():
-            state_dict: dict = torch.load(path / f'{self.global_rank}.pt')
+            state_dict: dict = torch.load(path / f'{self.global_rank}.pt', weights_only=False)
         else:
-            state_dict: dict = torch.load(path)
+            state_dict: dict = torch.load(path, weights_only=False)
         nnscaler_extra_state = state_dict.pop(self._nnscaler_extra_state_key)
         # load the extra states of the pl module
         self._lightning_module.load_state_dict(nnscaler_extra_state[self._pl_module_name_key], strict=False)
@@ -551,7 +551,7 @@ class NnScalerStrategy(ParallelStrategy):
             checkpoint_files: The list of checkpoint files to merge.
             output_file: The output file path.
         """
-        state_dicts = [torch.load(f, map_location='cpu') for f in checkpoint_files]
+        state_dicts = [torch.load(f, map_location='cpu', weights_only=False) for f in checkpoint_files]
 
         module_state_dicts = [s[cls._module_name_key] for s in state_dicts]
         opt_state_dicts = None

@@ -7,6 +7,8 @@ from typing import Any, Optional
 from dataclasses import asdict, replace
 import inspect
 import copy
+import logging
+from functools import partial
 
 import nnscaler
 from nnscaler.runtime.adapter.reducer import Reducer
@@ -19,10 +21,15 @@ from .trainer_args import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 def fork_rng():
     if torch.distributed.is_initialized():
-        rank = torch.distributed.get_rank()
-        return torch.random.fork_rng([rank])
+        # only capture the random state of the current device
+        # which is good enough for us
+        device = torch.cuda.current_device()
+        return torch.random.fork_rng([device])
     else:
         return torch.random.fork_rng()
 
@@ -145,9 +152,9 @@ class ModuleParallelizeConfigAdapter(PrecisionMixin, PolicyMixin):
             else self.trainer_args.precision
         )
 
-    def create_model(self) -> torch.nn.Module:
+    def create_model(self, module_args: Optional[tuple[tuple, dict]]=None) -> torch.nn.Module:
         model = (
-            self.parallel_module.create_model(self.trainer_args)
+            self.parallel_module.create_model(self.trainer_args, module_args)
             if self.parallel_module
             else self.trainer_args.create_model()
         )
@@ -187,13 +194,17 @@ class ModuleParallelizeConfigAdapter(PrecisionMixin, PolicyMixin):
         }
         return compute_config
 
-    def parallelize(self, dummy_input: Optional[dict[str, Any]] = None, *, load_module: bool = True):
+    def parallelize(self,
+        dummy_input: Optional[dict[str, Any]] = None, *,
+        load_module: bool = True,
+        module_args: Optional[tuple[tuple, dict]] = None
+    ):
         pmodel_class = nnscaler.parallelize(
             self.model_type,
             self.create_dummy_forward_args(dummy_input),
             self.resolved_pas_policy,
             self.resolve_compute_config(),
-            module_fn=self.create_model,
+            module_fn=partial(self.create_model, module_args=module_args),
             gen_savedir=self.gen_savedir,
             reuse=self.gen_reuse,
             instance_name=self.instance_name,
@@ -283,7 +294,7 @@ def parallelize_model(trainer_args: TrainerArgs, dummy_input: dict[str, Any], lo
         # parallelize the whole model
         return _new_adapter().parallelize(dummy_input, load_module=load_module)
 
-    if not load_module:
+    if not load_module and all(pm.args is not None for pm in trainer_args.model.parallel_modules):
         for m in trainer_args.model.parallel_modules:
             _new_adapter(m).parallelize(dummy_input, load_module=False)
         return
@@ -292,6 +303,7 @@ def parallelize_model(trainer_args: TrainerArgs, dummy_input: dict[str, Any], lo
         load_type(m.type): m
         for m in trainer_args.model.parallel_modules
     }
+    paralleled_sub_modules = set()
 
     def _default_new(cls, *args, **kwargs):
         return object.__new__(cls)
@@ -317,20 +329,36 @@ def parallelize_model(trainer_args: TrainerArgs, dummy_input: dict[str, Any], lo
             _restore_new()
             # it can go here when a subclass module of a parallelized module is instantiated
             if cls not in parallel_sub_modules:
+                # TODO: pass *args and **kwargs?
                 return cls.__new__(cls)
             else:
+                if cls in paralleled_sub_modules:
+                    logger.warning(
+                        f'Parallelized module {cls.__name__} is already created. Previously Parallelized version will be reused.'
+                    )
+                paralleled_sub_modules.add(cls)
                 parallel_module_config = parallel_sub_modules[cls]
                 adapter = _new_adapter(parallel_module_config)
                 # fork the random state to
                 # make sure the modules after parallelized module
                 # are the same in all devices.
+                # TODO: This will cause the random state to be different to non-parallel version.
+                # This is a trade-off to make sure the parallelized module is consistent.
+                # Maybe we can use torch.distributed.broadcast to sync the random state in all devices.
                 with fork_rng():
-                    return adapter.parallelize(dummy_input, load_module=True)
+                    return adapter.parallelize(dummy_input, load_module=load_module, module_args=(args, kwargs))
         finally:
             _patch_new()
 
     _patch_new()
     try:
-        return trainer_args.to_precision(trainer_args.create_model())
+        model = trainer_args.to_precision(trainer_args.create_model())
+        missing_modules = set(parallel_sub_modules.keys()) - paralleled_sub_modules
+        if missing_modules:
+            logger.warning(
+                f'The following modules are not parallelized because they are not used: {", ".join(m.__name__ for m in missing_modules)}'
+            )
+        if load_module:
+            return model
     finally:
         _restore_new()

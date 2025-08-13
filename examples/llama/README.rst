@@ -16,7 +16,7 @@ Assume following packages have been installed in the environment. ::
 
     nnscaler
     transformers==4.40.0
-    datasets==2.20.0
+    datasets==3.6.0
     apex
     flash-attn
 

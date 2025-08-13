@@ -295,8 +295,18 @@ def calc_optimal_pp_plan(
                             val = max(lhs, rhs)
                             if T[cur_idx][0] > val:
                                 T[cur_idx] = [val, prev_idx]
-    best_time = float('inf')
+
+    # why there are two bests here:
+    # if the model is too small, the best solution may not fully utilize all gpus (because of comm overhead, etc)
+    # this violates the user's plan_ngpus config so we must pick another
+    # here it records both bests to identify this case and warn the user
+    # best_time/state: the overall best solution
+    # valid_best_time/state: the best solution when we respect plan_ngpus config
+    best_time = math.inf
     best_state = (-1, -1, -1, -1)
+    valid_best_time = math.inf
+    valid_best_state = (-1, -1, -1, -1)
+
     micro_batch_num = autodist_config.update_freq
     for stage_num in range(1, ngpus + 1):
         if autodist_config.pipeline_nstages != 'auto' and autodist_config.pipeline_nstages != stage_num:
@@ -312,10 +322,15 @@ def calc_optimal_pp_plan(
                 cur_time = T[cur_idx][0] * (micro_batch_num - 1 + stage_num)
                 if best_time > cur_time:
                     best_time, best_state = cur_time, cur_idx
+                if pp_dev_num == ngpus and valid_best_time > cur_time:
+                    valid_best_time, valid_best_state = cur_time, cur_idx
 
     _logger.info(
-        f'best time/s: {best_time}, state (s, pp, tp, i): {best_state}')
-    if best_state == (-1, -1, -1, -1):
+        f'best time/s: {valid_best_time}, state (s, pp, tp, i): {valid_best_state}')
+    if best_state != valid_best_state:
+        _s, pp, _tp, _i = best_state
+        _logger.warning(f'the model is too small for {ngpus} GPUs; please use {pp} GPUs for better performance')
+    if valid_best_state == (-1, -1, -1, -1):
         raise RuntimeError('fail to find a valid pipeline plan')
 
     spmd_outs = []
@@ -331,12 +346,12 @@ def calc_optimal_pp_plan(
         if prev_idx[0] != -1:
             build_answer(*prev_idx)
 
-    build_answer(*best_state)
+    build_answer(*valid_best_state)
 
     spmd_descs = [spmd_out.desc for spmd_out in spmd_outs]
     pp_desc = PipelineParallelDesc(spmd_descs, [], autodist_config.mesh_desc)
     stage_mems = [spmd_out.memory for spmd_out in spmd_outs]
     stage_all_times = [spmd_out.all_time for spmd_out in spmd_outs]
     stage_comp_times = [spmd_out.comp_time for spmd_out in spmd_outs]
-    return PipelineSearchOutput(pp_desc, best_time, stage_mems, stage_all_times,
+    return PipelineSearchOutput(pp_desc, valid_best_time, stage_mems, stage_all_times,
                                 stage_comp_times)

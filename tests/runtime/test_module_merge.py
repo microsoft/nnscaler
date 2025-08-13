@@ -94,7 +94,7 @@ def merge_model_states_test():
         model_states = []
         fullmaps = []
         for i in range(DeviceGroup().world_size):
-            checkpoint = torch.load(f'checkpoint-shard{i}.pt')
+            checkpoint = torch.load(f'checkpoint-shard{i}.pt', weights_only=False)
             model_states.append(checkpoint['state_dict'])
             fullmaps.append(checkpoint['fullmap'])
         merged_state_dict = cube_model.merge_model_state_dicts(model_states, fullmaps)
@@ -138,7 +138,7 @@ def merge_optimizer_states_test():
     if DeviceGroup().rank == 0:
         states = []
         for i in range(DeviceGroup().world_size):
-            checkpoint = torch.load(f'checkpoint-shard{i}.pt')
+            checkpoint = torch.load(f'checkpoint-shard{i}.pt', weights_only=False)
             states.append((checkpoint['model'], checkpoint['optimizer'], checkpoint['fullmap']))
         merged_model_states, merged_optim_states = cube_model.merge_partial_states(states)
         assert_same_state(full_model_state, merged_model_states)
@@ -177,7 +177,7 @@ def merge_optimizer_states_test():
     if DeviceGroup().rank == 0:
         states = []
         for i in range(DeviceGroup().world_size):
-            checkpoint = torch.load(f'checkpoint-shard{i}.pt')
+            checkpoint = torch.load(f'checkpoint-shard{i}.pt', weights_only=False)
             states.append((checkpoint['model'], checkpoint['optimizer'], checkpoint['fullmap']))
         merged_model_states, merged_optim_states = cube_model.merge_partial_states(states)
         assert_same_state(full_model_state, merged_model_states)

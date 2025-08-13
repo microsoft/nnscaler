@@ -19,21 +19,13 @@ import math
 from transformers.utils import is_flash_attn_greater_or_equal_2_10
 
 from .utils import nnscaler_flash_attention_forward
+from customized_ops.ring_attention import wrap_ring_attn_func
 
-logger = logging.getLogger(__name__)
+_logger = logging.getLogger(__name__)
 
 
-try:
-    import os
-    import sys
-    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(
-        os.path.abspath(__file__)), '../../customized_ops/ring_attention')))
-    from ring_attn import wrap_ring_attn_func
-
-    def nnscaler_ring_attn_func(query_states, key_states, value_states, *args, **kwargs):
-        return wrap_ring_attn_func(query_states, key_states, value_states)
-except ModuleNotFoundError:
-    logger.warning("Ring Attention is not import correctly.")
+def nnscaler_ring_attn_func(query_states, key_states, value_states, *args, **kwargs):
+    return wrap_ring_attn_func(query_states, key_states, value_states)
 
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -181,9 +173,9 @@ class NNScalerMultiheadDiffFlashAttn(NNScalerMultiheadDiffAttn):
         cache_position: Optional[torch.LongTensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if output_attentions:
-            logger.warning("output_attentions is not supported for NNScalerMultiheadDiffFlashAttn.")
+            _logger.warning("output_attentions is not supported for NNScalerMultiheadDiffFlashAttn.")
         if attention_mask:
-            logger.warning("attention_mask is not supported for NNScalerMultiheadDiffFlashAttn.")
+            _logger.warning("attention_mask is not supported for NNScalerMultiheadDiffFlashAttn.")
 
         bsz, q_len, _ = hidden_states.size()
 

@@ -352,7 +352,6 @@ def test_codegen_recompute_kwargs():
         )
 
 
-
 class DefaultArgsModule(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -673,6 +672,58 @@ def test_codegen_clone():
             True
         )
         assert isinstance(g.nodes()[0], nnscaler.graph.function.dimops.IRDimops)
+
+
+class ItemModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, a):
+        return a.item()
+
+
+@replace_all_device_with('cpu')
+def test_codegen_item():
+    with tempfile.TemporaryDirectory() as tempdir:
+        m_new = parallelize(
+            ItemModule(),
+            {
+                'a': torch.tensor([5.0]),
+            },
+            'dp',
+            ComputeConfig(1, 1, constant_folding=True),
+            gen_savedir=tempdir,
+            load_module=False
+        )
+        assert m_new is None
+        # never fold torch.Tensor.item() to constant
+        assert _gencode_contains(tempdir, ItemModule, 0, '.*torch.Tensor.item.*')
+
+
+class ArangeModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, end):
+        return torch.arange(start=0, end=end, dtype=torch.float32)
+
+
+@replace_all_device_with('cpu')
+def test_codegen_arange():
+    with tempfile.TemporaryDirectory() as tempdir:
+        m_new = parallelize(
+            ArangeModule(),
+            {
+                'end': 5,
+            },
+            'dp',
+            ComputeConfig(1, 1, constant_folding=True),
+            gen_savedir=tempdir,
+            load_module=False
+        )
+        assert m_new is None
+        # never fold torch.Tensor.item() to constant
+        assert _gencode_contains(tempdir, ArangeModule, 0, '.*nnscaler.runtime.function.arange\(start=0, end=.*, step=1.*')
 
 
 class MinModule(torch.nn.Module):

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools"]
+requires = ["setuptools>=45", "wheel", "pybind11>=2.6", "pybind11[global]"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -28,7 +28,7 @@ dynamic.dependencies.file = "requirements.txt"
 
 # NOTE:
 # the following part only affects wheel, not sdist
-# since we are using cppimport, sdist is not needed
+# C++ extensions are now built via setup.py instead of cppimport
 packages.find.include = ["nnscaler*"]
 package-data = { nnscaler = ["resources/**", "autodist/*.h", "autodist/*.cpp"] }
 

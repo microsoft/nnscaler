@@ -105,6 +105,7 @@ For any questions or inquiries, please contact us at nnscaler@service.microsoft.
    examples/vit
    examples/deepseek
    examples/nanogpt
+   examples/longrope2
 
 .. toctree::
    :maxdepth: 1
@@ -123,6 +124,13 @@ For any questions or inquiries, please contact us at nnscaler@service.microsoft.
    parallel_module
    dimops
    verify_op
+
+.. toctree::
+   :maxdepth: 1
+   :hidden:
+   :caption: AutoDist
+
+   autodist/configuration
 
 .. toctree::
    :maxdepth: 1

@@ -120,6 +120,50 @@ This function has the following parameters:
     good distributed plan.
     Default: None.
 
+## `torch.autograd.Function`
+
+If you are using `torch.autograd.Function`, you should register it(internally its `apply` function is registered).
+Otherwise it will be replicated by default, which may lead to poor performance.
+
+```
+import torch
+import nnscaler
+
+annotation = ...
+
+@nnscaler.register_op(annotation)
+class MyFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, *args, **kwargs):
+        ...  # your forward implementation
+
+    @staticmethod
+    def backward(ctx, *grad_outputs):
+        ...  # your backward implementation
+```
+If you can't use class decorator, you can also register like this:
+```
+nnscaler.register_op(annotation)(MyFunction)
+```
+or
+```
+nnscaler.register_op(annotation)(MyFunction.apply)
+```
+
+## `torch.compile` functions
+
+If you are using `torch.compile` for better performance, you must register the function to avoid tracing into the compiling logic, which will cause the tracing to fail.
+```python
+import torch
+import nnscaler
+
+@torch.compile
+def my_function(x: torch.Tensor) -> torch.Tensor:
+    return x * 2
+
+nnscaler.register_op('* -> *')(my_function)
+
+```
 
 ## Dimension Annotion Operations
 

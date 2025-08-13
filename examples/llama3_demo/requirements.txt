@@ -1,4 +1,4 @@
-datasets==2.21.0
+datasets==3.6.0
 tensorboard
 torch==2.3.1
 transformers==4.42.4

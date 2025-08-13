@@ -579,7 +579,11 @@ class SPMDSolver:
                         if not cur_p_fathers[j]:
                             cur_p_fathers[j] = -1
                         else:
-                            assert len(cur_p_fathers[j]) == 1, f'unexpected partition {self.get_operator(i).ir_cell}, {cur_p_fathers[j]}'
+                            error_msg = f'find multiple p_fathers {cur_p_fathers[j]} for {self.get_operator(i)}' \
+                                f', this may due to its producer has multiple partitions but hard to distinguish' \
+                                f' at current operator\'s perspective, you can try to\n 1. add partition constraint' \
+                                f' to the producer or the consumer \n 2. double check annotations of related ops'
+                            assert len(cur_p_fathers[j]) == 1, error_msg
                             cur_p_fathers[j] = cur_p_fathers[j][0]
                     p_fathers.append(cur_p_fathers)
                     # -1 will be filtered out in the intersection operation below
@@ -1183,14 +1187,12 @@ class SPMDSolver:
 
     def do_dp(self, intervals: List[Tuple[int, int]],
               topk: int) -> List[List[SPMDSearchOutput]]:
-        import cppimport.import_hook
         try:
             import nnscaler.autodist.dp_solver as dp_solver
         except ImportError:
             raise RuntimeError(
-                'Failed to import solver. '
-                'If you installed nnscaler from source (`pip install -e .`), '
-                'please also make sure to put parent directory of `nnscaler` in `PYTHONPATH`.'
+                'Failed to import dp_solver. '
+                'Please install nnscaler with: pip install -e .'
             )
 
         if self.autodist_config.memory_granularity < 1024:

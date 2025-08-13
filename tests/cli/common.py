@@ -1,10 +1,13 @@
 #  Copyright (c) Microsoft Corporation.
 #  Licensed under the MIT License.
 
+from pathlib import Path
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from typing import Dict
+
+from streaming import MDSWriter, StreamingDataset, StreamingDataLoader
 
 from nnscaler.cli.trainer_args import TrainerArgs
 from tests.parallel_module.test_end2end import MLP
@@ -92,3 +95,27 @@ class SimpleDataset(Dataset):
 
     def __len__(self):
         return len(self.data)
+
+
+class SimpleIterDataset(StreamingDataset):
+    def __init__(self, split, *args, **kwargs):
+        name = Path(__file__).parent / f'streaming_data/simple_dataset_{split}'
+        super().__init__(local=name, *args, **kwargs)
+        # the data files are created using:
+        # dataset = SimpleDataset(dim, size)
+        # with MDSWriter(
+        #     columns={'data' : 'ndarray', 'target': 'ndarray'},
+        #     out=name, compression='zstd'
+        # ) as out:
+        #     for item in dataset:
+        #         out.write({
+        #             'data': item['data'].numpy(),
+        #             'target': item['target'].numpy()
+        #         })
+
+    def __iter__(self):
+        for item in super().__iter__():
+            yield {
+                'data': torch.tensor(item['data']),
+                'target': torch.tensor(item['target'])
+            }

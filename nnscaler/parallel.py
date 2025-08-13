@@ -16,6 +16,7 @@ import copy
 import os
 
 import torch
+import torch.distributed
 
 from nnscaler.codegen import ModuleCodeGen
 from nnscaler.codegen.schedule.schedule import ScheduleCodeGen
@@ -277,7 +278,7 @@ class ComputeConfig:
         """
         if Path(file).exists():
             try:
-                cfg = torch.load(file)
+                cfg = torch.load(file, weights_only=False)
                 if isinstance(cfg, dict): # in old version, we save the object directly (not save as dict)
                     # this can raise if cfg has extra keys.
                     # which means some fields of ComputeConfig has been removed(we should avoid this).
@@ -790,7 +791,7 @@ def _gencode(
         ret = RegenStatus.CODE
         logger.info(f"Reuse graph dump in {outdir}")
         graph = IRGraph.load(graph_ckp)
-        forward_args = torch.load(forward_args_ckp)
+        forward_args = torch.load(forward_args_ckp, weights_only=False)
 
     graph = pas_policy(graph, compute_config)
     if not isinstance(graph, IRGraph):
@@ -1074,7 +1075,7 @@ def parallelize(
 
     # all nodes will raise an exception if the code generation is failed.
     if regen_status == RegenStatus.ERROR:
-        raise RuntimeError("Reuse generated code failed.") from regen_exception
+        raise RuntimeError("Code generation failed.") from regen_exception
 
     if broadcast_strategy != BroadcastGenFilesStrategy.NONE:
         if not torch.distributed.is_initialized(): # we only support loading in torchrun environment
@@ -1298,8 +1299,16 @@ def build_optimizer(
     non_parallel_module_reducer = None
     non_parallel_modules = [m for m in module.modules() if not isinstance(m, ParallelModule)]
     parallel_modules = [m for m in module.modules() if isinstance(m, ParallelModule)]
+
     if not parallel_modules:
         raise RuntimeError("No ParallelModule found in the module. Please make sure you have called parallelize() before build_optimizer().")
+
+    non_parallel_parameters_dict = {} # use dict for dedup and order
+    for m in non_parallel_modules:
+        for param in m.parameters(recurse=False): # only leaf parameters to avoid duplicate
+            if param is not None and param.requires_grad:
+                non_parallel_parameters_dict[param] = None
+    non_parallel_parameters = list(non_parallel_parameters_dict.keys())
 
     # check if all ParallelModules have the same gpu_config
     compute_configs = [m.compute_config for m in parallel_modules]
@@ -1313,6 +1322,10 @@ def build_optimizer(
     # we need to add all parameters of non-parallel modules to a reducer to reduce grads
     # if there are non-parallel parameters
     if plan_ngpus != runtime_ngpus and non_parallel_modules and any(p.numel() for m in non_parallel_modules for p in m.parameters(False)):
+        # For non-parallel modules, we use a Reducer to reduce the gradients.
+        # Please note here we still follow the original compute_config,
+        # although we can use a different compute_config for non-parallel modules.
+        # for example, we can always use plan_ngpus=1, and that may lead better gpu memory usage whe zero is ON.
         group, _ = compute_configs[0].get_sync_group()
         reducer_config = {}
         if compute_config:
@@ -1324,9 +1337,8 @@ def build_optimizer(
                 'zero_ngroups': compute_config.zero_ngroups,
             }
         non_parallel_module_reducer = Reducer(group, **reducer_config)
-        for m in non_parallel_modules:
-            for param in m.parameters(recurse=False): # only add leaf parameters to avoid duplicate
-                non_parallel_module_reducer.add_param(param)
+        for param in non_parallel_parameters:
+            non_parallel_module_reducer.add_param(param)
         non_parallel_module_reducer.build_buckets()
 
     opt_module_locs: Dict[str, ModuleParameterLocation] = {}
@@ -1339,9 +1351,14 @@ def build_optimizer(
                         m.parameters_for_optimizer() if m.compute_config.use_zero
                         else m.parameters() # `ParallelModule.merge_partial_states` supports parameters_for_optimizer() only in zero mode
                     )
+                    if p is not None and p.requires_grad
                 ]
                 if isinstance(m, ParallelModule)
-                else m._parameters.items()
+                else [
+                    (name, p)
+                    for name, p in m._parameters.items()
+                    if p is not None and p.requires_grad
+                ]
         )
         for idx, (name, param) in enumerate(gen):
             if name.endswith(pm_suffix):  # is a parameter of ParallelModule
@@ -1374,6 +1391,8 @@ def build_optimizer(
     def _step_post_hook(opt, *args, **kwargs):
         for m in parallel_modules:
             m.gather_params()
+        if non_parallel_module_reducer:
+            non_parallel_module_reducer.gather_params()
 
     # Please note:
     # register_step_pre_hook doesn't work expectly
@@ -1389,6 +1408,19 @@ def build_optimizer(
             m.zero_grad()
         if non_parallel_module_reducer:
             non_parallel_module_reducer.zero_grad()
+        elif non_parallel_parameters:
+            # for the case when non-parallel modules are not managed by a reducer
+            for p in non_parallel_parameters:
+                # copied from Module.zero_grad()
+                if set_to_none:
+                    p.grad = None
+                else:
+                    if p.grad.grad_fn is not None:
+                        p.grad.detach_()
+                    else:
+                        p.grad.requires_grad_(False)
+                    p.grad.zero_()
+
     optimizer.zero_grad = types.MethodType(_patched_zero_grad, optimizer)
 
     orig_state_dict = optimizer.state_dict
@@ -1430,8 +1462,25 @@ def build_optimizer(
             grads.extend(mgrads)
 
         if non_parallel_module_reducer:
+            # all non parallel module parameters are the same across all ranks
+            # but we still need to handle the case when zero is on to get correct gnorm
             params = non_parallel_module_reducer.parameters_for_optimizer()
             mnorm, mgrads = calcuate_gnorm(params)
+            mnorm_squared = torch.square(mnorm)
+            if non_parallel_module_reducer.zero:
+                torch.distributed.all_reduce(mnorm_squared)
+                # parameters are duplicated `zero_ngroups * plan_ngpus` times.
+                # so we need to divide the norm by `zero_ngroups * plan_ngpus` to get the correct gnorm
+                # Reason (also see how non_parallel_module_reducer is constructed above):
+                # 1. Ranks in the same scale unit (plan_ngpus) have grads from exactly the same parameters.
+                #    because they are in the same position of a zero group.
+                # 2. Ranks in the same position of different zero groups have grads from exactly the same parameters
+                mnorm_squared.div_(non_parallel_module_reducer.zero_ngroups * plan_ngpus)
+            total_norm_squared += mnorm_squared
+            grads.extend(mgrads)
+        elif non_parallel_parameters:
+            # for the case when non-parallel modules are not managed by a reducer
+            mnorm, mgrads = calcuate_gnorm(non_parallel_parameters)
             total_norm_squared += torch.square(mnorm)
             grads.extend(mgrads)
 
@@ -2282,11 +2331,14 @@ def load_deduped_state_dict(
 
 
 def _broadcast_opt_state(optimizer_state_dict, state_indexes: List[int], dedup_group_size: int):
+    if not state_indexes:
+        return
+
     rank = torch.distributed.get_rank()
     broadcast_group = setup_stride_broadcast_group(dedup_group_size)
     src_rank, curr_parallel_group, curr_parallel_group_ranks = broadcast_group.src_rank, broadcast_group.group, broadcast_group.ranks
 
-    logging.info(f'Rank-{rank} is broadcasting states to ranks {curr_parallel_group_ranks}, broadcast root: {src_rank}...')
+    logging.info(f'Rank-{rank} is broadcasting optimizer states to ranks {curr_parallel_group_ranks}, broadcast source: {src_rank}...')
 
     # broadcast param groups and state keys/shapes/dtypes via broadcast_object_list
     if rank == src_rank:
@@ -2310,20 +2362,23 @@ def _broadcast_opt_state(optimizer_state_dict, state_indexes: List[int], dedup_g
 
     # broadcast step
     # step is too small, so we can just broadcast all of them all together
-    if rank == src_rank:
-        step_stack = torch.stack(
-            [optimizer_state_dict['state'][k]['step'] for k in state_indexes]
-        )
-    else:
-        step_stack = torch.zeros(
-            len(state_indexes),
-            dtype=optimizer_state_dict['state'][state_indexes[0]]['step'].dtype,
-            device=torch.cuda.current_device()
-        )
-    torch.distributed.broadcast(step_stack, src=src_rank, group=curr_parallel_group)
-    if rank != src_rank:
-        for k, v in zip(state_indexes, step_stack):
-            optimizer_state_dict['state'][k]['step'].copy_(v)
+    # some adam/adamw optimizers may not have step in their state dict
+    # so we need to check if 'step' is in the state dict
+    if 'step' in optimizer_state_dict['state'][state_indexes[0]]:
+        if rank == src_rank:
+            step_stack = torch.stack(
+                [optimizer_state_dict['state'][k]['step'] for k in state_indexes]
+            )
+        else:
+            step_stack = torch.zeros(
+                len(state_indexes),
+                dtype=optimizer_state_dict['state'][state_indexes[0]]['step'].dtype,
+                device=torch.cuda.current_device()
+            )
+        torch.distributed.broadcast(step_stack, src=src_rank, group=curr_parallel_group)
+        if rank != src_rank:
+            for k, v in zip(state_indexes, step_stack):
+                optimizer_state_dict['state'][k]['step'].copy_(v)
 
     # broadcast other states
     # TODO: can be slow?
@@ -2331,7 +2386,8 @@ def _broadcast_opt_state(optimizer_state_dict, state_indexes: List[int], dedup_g
         keys = sorted(optimizer_state_dict['state'][k].keys())
         # for mixed precision f16 optimizer, we will add custom keys
         # assert set(keys) == {'step', 'exp_avg', 'exp_avg_sq'}
-        keys.remove('step')  # we have done step in previous.
+        if 'step' in keys:
+            keys.remove('step')  # we have done step in previous.
         for key in keys:
             value = optimizer_state_dict['state'][k][key]
             torch.distributed.broadcast(value.data, src=src_rank, group=curr_parallel_group)
@@ -2368,7 +2424,7 @@ def _broadcast_weights(module: torch.nn.Module, stride_size: int):
     broadcast_group = setup_stride_broadcast_group(stride_size)
     rank = torch.distributed.get_rank()
     src_rank, curr_parallel_group, curr_parallel_group_ranks = broadcast_group.src_rank, broadcast_group.group, broadcast_group.ranks
-    logging.info(f'Rank-{rank} is broadcasting weight to ranks {curr_parallel_group_ranks}, broadcast root: {src_rank}...')
+    logging.info(f'Rank-{rank} is broadcasting weights of {module.__class__.__name__} to ranks {curr_parallel_group_ranks}, broadcast source: {src_rank}...')
 
     if isinstance(module, ParallelModule):
         if not _broadcast_single_value(src_rank, curr_parallel_group, module.non_presistent_buffers_inited):

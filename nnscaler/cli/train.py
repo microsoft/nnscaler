@@ -10,7 +10,10 @@ from nnscaler.cli.trainer import Trainer
 def main():
     nnscaler.utils.set_default_logger_level(level=logging.INFO)
     trainer = Trainer()
-    trainer.run()
+    try:
+        trainer.run()
+    finally:
+        nnscaler.uninit()
 
 
 if __name__ == '__main__':

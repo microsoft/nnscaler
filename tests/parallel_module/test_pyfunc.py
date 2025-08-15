@@ -35,14 +35,14 @@ class MyModule(torch.nn.Module):
         self.weight = torch.nn.Parameter(torch.rand(10, 10))
 
     def forward(self, x):
-        x = MyMatmul.apply(x, self.weight)
+        x = MyMatmul.apply(x[0], self.weight)
         return x
 
 
 def _worker():
     init_distributed()
 
-    dummy_input = {'x': torch.rand(2, 10)}
+    dummy_input = {'x': (torch.rand(2, 10), torch.rand(10, 10))}
     from nnscaler.graph.parser.parser import _logger as _logger_parser
     from nnscaler.graph.graph import _logger as _logger_graph
     from nnscaler.graph.segment import _logger as _logger_seg
@@ -63,8 +63,8 @@ def _worker():
         seg_logs = log_stream_seg.getvalue()
         graph_logs = log_stream_graph.getvalue()
         # parser.py: parse_prim_function_method
-        assert 'non register python runtime function' in parser_logs
-        # segment.py: infer_grad 
+        assert 'Find unknown custom autograd operation' in parser_logs
+        # segment.py: infer_grad
         assert 'nnScaler does not support backward of IRPyFunc' in seg_logs
         # graph.py: from_logic_graph
         assert 'nnScaler does not support to compute gradients for IRPyFunc.' in graph_logs

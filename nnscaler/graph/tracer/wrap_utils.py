@@ -408,6 +408,14 @@ def is_autograd_apply(func) -> bool:
         and orig_func.isinstance(getattr(func, '__self__', None), Type) and issubclass(func.__self__, torch.autograd.Function)
 
 
+def is_autograd_op(func) -> bool:
+    try:
+        return issubclass(func, torch.autograd.Function)
+    except TypeError:
+        # if func is not a class, then it is not an autograd function
+        return False
+
+
 def create_wrapped_autograd_apply(default_tracer: 'ConcreteTracer'):
     @classmethod
     @functools.wraps(orig_func.torch_agfunc_apply)
@@ -553,6 +561,8 @@ class torch_autocast_wrapper_clz:
     _fx_wrapped_ori_clz = orig_func.torch_autocast
 
     def __new__(cls, *args, **kwargs):
+        args = (arg.value if orig_func.isinstance(arg, cct.ConcreteProxy) else arg for arg in args)
+        kwargs = {k: v.value if orig_func.isinstance(v, cct.ConcreteProxy) else v for k, v in kwargs.items()}
         return orig_func.torch_autocast(*args, **kwargs)
 
     def __eq__(self, __o: object) -> bool:

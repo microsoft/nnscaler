@@ -1,10 +1,14 @@
 #  Copyright (c) Microsoft Corporation.
 #  Licensed under the MIT License.
 
-from typing import List, Tuple, Dict, Any, Union
-from dataclasses import dataclass, is_dataclass, asdict
+import os
+import copy
+
+from typing import List, Optional, Tuple, Dict, Any, Union
+from dataclasses import dataclass, field, is_dataclass, asdict
 import enum
 import ast
+import regex
 
 
 try:
@@ -17,12 +21,30 @@ _TYPE_KEY = '__type'
 _VALUE_TYPE_KEY = '__value_type'
 _VALUE_KEY = 'value'
 
+# Keys for metadata in dataclass fields
+# These keys are used to control the deserialization and normalization behavior
+
+# specify a custom deserialization function,
+# the return value of this function will be assigned to the dataclass field directly.
+# So it should return a value of the type specified in the dataclass field
+DESERIALIZE_KEY = 'deserialize'
+# specify a custom normalization function.
+# The value returned by this function will be further deserialized with default deserialization logic.
+NORMALIZE_KEY = 'normalize'
+# if set to True, the field will be skipped during deserialization
+# You can use `__post_init__` to handle the deserialization of the field.
+SKIP_DESERIALIZATION_KEY = 'skip_deserialization'
+
+
+class _KeyNotFoundError(KeyError):
+    pass
+
 
 def parse_args(argv: List[str]) -> dict:
     raw_args = {}
     last_key = None
     for v in argv:
-        if v.startswith('--'):
+        if isinstance(v, str) and v.startswith('--'):
             if '=' in v:
                 k, v = v[2:].split('=', 1)
                 raw_args[k] = v
@@ -51,12 +73,171 @@ def parse_args(argv: List[str]) -> dict:
     return args
 
 
-def merge_args(args: dict, new_args: dict):
+def merge_args(args: dict, argv: List[str]):
+    """
+    Please note that this function will modify the args in place.
+    """
+    _merge_args(args, parse_args(argv))
+
+
+def _merge_args(args: dict, new_args: dict):
+    """
+    Note: values in new_args can only be dict or str or None.
+    """
+    def _is_removed_key(k):
+        return isinstance(k, str) and k.endswith('!')
+
     for k, v in new_args.items():
-        if k in args and isinstance(args[k], dict) and isinstance(v, dict):
-            merge_args(args[k], v)
+        if _is_removed_key(k):
+            # if the key ends with '!', we will remove the key from args
+            args.pop(k, None) # a little trick to support merge self
+            k = k[:-1]
+            args.pop(k, None)
+            continue
+        if k not in args or not isinstance(args[k], (dict, list)):
+            # if the existing value is not a dict/list, we will overwrite it with the new value
+            # for example, if args is {'a': 1} and new_args is {'a': {'b': 2}},
+            # we will overwrite args['a'] with new_args['a']
+            if isinstance(v, dict):
+                new_v = copy.deepcopy(v)
+                # merge self trick is here.
+                # directly assign v to args[k] will not work
+                # because v can have removed keys.
+                _merge_args(new_v, v)
+                args[k] = new_v # do we need to keep the empty dict?
+            else:
+                args[k] = v
+        elif isinstance(args[k], dict):
+            if isinstance(v, dict):
+                _merge_args(args[k], v)
+            else:
+                args[k] = v
         else:
-            args[k] = v
+            assert isinstance(args[k], list)
+            # we only update per-element value if the new value is a dict
+            if isinstance(v, dict) \
+                and all(
+                    isinstance(item, int) or
+                    (isinstance(item, str) and item.isdigit()) or
+                    (_is_removed_key(item) and item[:-1].isdigit())
+                    for item in v.keys()
+                ):
+                current_value = {str(idx): item for idx, item in enumerate(args[k])}
+                new_value = {str(idx): item for idx, item in v.items()}
+                _merge_args(current_value, new_value)
+                current_value = {int(k): v for k, v in current_value.items()}
+                args[k] = [None] * (max(current_value.keys()) + 1)
+                for nk, nv in current_value.items():
+                    args[k][nk] = nv
+            else:
+                args[k] = v
+
+
+def resolve_args(args: dict):
+    """
+    Substitute the args with the value from the args.
+    For example, if args is {'a': '$(b)', 'b': 'c'}, then
+    it will be updated to {'a': 'c', 'b': 'c'}.
+    """
+    pattern = r'(\$\{[^}]+\}|\$\([^)]+\))'
+
+    def _is_variable(var_path):
+        return isinstance(var_path, str) and (
+            (var_path.startswith('$(') and var_path.endswith(')')) or
+            (var_path.startswith('${') and var_path.endswith('}'))
+        )
+
+    def _get_variable(var_path: Any) -> Optional[str]:
+        if not _is_variable(var_path):
+            return None
+        return var_path[2:-1]
+
+    def _get_variables(var_path: str) -> List[str]:
+        """
+        Get all variables in the var_path.
+        For example, if var_path is 'a$(a.b.c)b$(c.d)c', it will return ['a.b.c', 'c.d'].
+        """
+        # use regex to find all variables in the var_path
+        matches = regex.findall(pattern, var_path)
+        return [_get_variable(m) for m in matches]
+
+    def _resolve_variables(var_path: Any, resolved_vars: dict[str, str]) -> str | Any:
+        """
+        Resolve all variables in the var_path by replacing them with their values.
+        For example, if var_path is 'a$(b.c)d$(e.f)g', and resolved_vars is {'b.c': 'x', 'e.f': 'y'},
+        it will return 'axdyg'.
+        """
+        # special case, this will keep the type of the variable
+        if _is_variable(var_path):
+            return resolved_vars[_get_variable(var_path)]
+
+        # always return a string
+        var_path = regex.sub(
+            pattern,
+            lambda m: str(resolved_vars[_get_variable(m.group(0))]),
+            var_path
+        )
+        var_path = var_path.replace(r'$\(', '$(').replace(r'$\{', '${')  # escape the variable syntax
+        return var_path
+
+    def _get_value(data, var_path: list[Any]):
+        for key in var_path:
+            if isinstance(data, list):
+                data = data[int(key)]
+            elif key in data:
+                data = data[key]
+            else:
+                raise _KeyNotFoundError(f"{var_path} not found in args")
+        return data
+
+    def _set_value(data, var_path: list[Any], value):
+        value = copy.deepcopy(value)
+        for key in var_path[:-1]:
+            if isinstance(data, list):
+                data = data[int(key)]
+            elif key in data:
+                data = data[key]
+            else:
+                raise _KeyNotFoundError(f"{var_path} not found in args")
+
+        if isinstance(data, list):
+            data[int(var_path[-1])] = value
+        else:
+            data[var_path[-1]] = value
+
+    pending_values = set()
+    def _resolve(var_path: list[Any], value: Any):
+        if isinstance(value, dict):
+            for k, v in value.items():
+                _resolve(var_path + [k], v)
+            return value
+        elif isinstance(value, list):
+            for i, v in enumerate(value):
+                _resolve(var_path + [i], v)
+            return value
+        elif isinstance(value, str):
+            ref_keys = _get_variables(value)
+            ref_values = {}
+            for ref_key in ref_keys:
+                if ref_key in pending_values:
+                    raise ValueError(f"Circular reference detected for {ref_key}")
+                pending_values.add(ref_key)
+                ref_var_path = ref_key.split('.')
+                try:
+                    raw_ref_value = _get_value(args, ref_var_path)
+                    ref_values[ref_key] = _resolve(ref_var_path, raw_ref_value)
+                except _KeyNotFoundError as e:
+                    if ref_key in os.environ:
+                        ref_values[ref_key] = os.environ[ref_key]
+                    else:
+                        raise
+                pending_values.remove(ref_key)
+            resolved_value = _resolve_variables(value, ref_values)
+            _set_value(args, var_path, resolved_value)
+            return resolved_value
+        else:
+            return value
+    _resolve([], args)
 
 
 def _fix_any(type_):
@@ -93,6 +274,7 @@ class _TypeInfo:
     key_type: Any = None
     value_type: Any = None
     item_type: Any = None
+    metadata: dict = field(default_factory=dict)
 
 
 def _get_type_info_from_annotation(type_info):
@@ -130,9 +312,16 @@ def _get_type_info_from_annotation(type_info):
 def _get_type_info(dataclass_type) -> Dict[str, _TypeInfo]:
     if not is_dataclass(dataclass_type):
         raise ValueError(f"{dataclass_type} is not a dataclass")
-    type_dict = {}
+    type_dict: dict[str, _TypeInfo] = {}
     for k, v in dataclass_type.__dataclass_fields__.items():
-        type_dict[k] = _get_type_info_from_annotation(v.type)
+        if v.metadata.get(SKIP_DESERIALIZATION_KEY, False) or DESERIALIZE_KEY in v.metadata:
+            # if the field is marked as skip_deserialization,
+            # or if it has a custom deserialize function,
+            # we don't need to extract the type information
+            type_dict[k] = _TypeInfo(type=None)
+        else:
+            type_dict[k] = _get_type_info_from_annotation(v.type)
+        type_dict[k].metadata = v.metadata
     return type_dict
 
 
@@ -154,6 +343,12 @@ def _guess_deserialize_object(value):
     if isinstance(value, tuple):
         return tuple(_guess_deserialize_object(v) for v in value)
     if isinstance(value, str):
+        # special handling for 'false'/'true'.
+        # 'False'/'True' are handled in ast.literal_eval
+        if value == 'false':
+            return False
+        if value == 'true':
+            return True
         try:
             # try to parse as literal
             # if failed, return as it is
@@ -217,8 +412,20 @@ def deserialize_dataclass(value, value_type):
     for key, ti in type_info.items():
         if not key in value:
             continue
+
         used_keys.add(key)
+
         v = value[key]
+
+        if deserialize_func := ti.metadata.get(DESERIALIZE_KEY, None):
+            v = deserialize_func(v)
+            member_values[key] = v
+            continue
+
+        if normalize_func := ti.metadata.get(NORMALIZE_KEY, None):
+            v = normalize_func(v)
+            # will continue to process the value
+
         if ti.type is bool and v is None:
             v = True   # set bool to True if it shows up in cmd line
         if v is None:

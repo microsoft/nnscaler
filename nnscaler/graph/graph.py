@@ -396,8 +396,6 @@ class IRGraph(IRSegment):
 
         # insert forward node
         fsegment: IRSegment = self.segment(node)
-        for fnode in fnodes:
-            self.copy_node_meta_info(node, fnode)
         fsegment.replace(node, fnodes)
 
         if node.mirror is None: return fnodes

@@ -10,7 +10,7 @@ nnScaler can be installed from GitHub:
 
 .. code-block:: bash
 
-    pip install https://github.com/microsoft/nnscaler/releases/download/0.7/nnscaler-0.7-py3-none-any.whl
+    pip install https://github.com/microsoft/nnscaler/releases/download/0.8/nnscaler-0.8-py3-none-any.whl
 
     # You may also want to clone the repo to try out the examples
     git clone --recursive https://github.com/microsoft/nnscaler

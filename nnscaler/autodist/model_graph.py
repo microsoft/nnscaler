@@ -712,7 +712,13 @@ class ModelGraph:
                 ret += fetch_module(child, next_prefix)
             return ret
 
-        modules = fetch_module(self.scope_tree_root, [])
+        # the root module's name is not tracked in the tracer, to enable recomputing the
+        # whole module, we add a special 'ROOT' module name
+        if 'ROOT' in recompute_modules:
+            modules = [self.scope_tree_root]
+        else:
+            modules = fetch_module(self.scope_tree_root, [])
+
         train_mem = 0
         for module in modules:
             train_mem = max(train_mem, module.train_mem)
@@ -803,6 +809,9 @@ class ModelGraph:
                     if isinstance(t, IRTensor):
                         output_tensors.add(t)
             for node in group:
+                # Since we only profile IRDimops, skip if the node is not
+                if not isinstance(node, IRDimops):
+                    continue
                 is_border = False
                 for t in node.inputs():
                     if isinstance(t, IRTensor) and not t.is_attr():

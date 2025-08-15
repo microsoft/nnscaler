@@ -383,7 +383,7 @@ from nnscaler.graph.function.dimops import DimopSplit, TransformRule
 #    it difficult to handle it correctly without modifying the code
 # 3. dispatch by allgather is used currently, which is compatible with the replicated
 #    moe_route plan
-register_op(f'n^ l^ h^, e^ h^ -> (n^ l^) k^, (n^ l^) k^, 1')(moe_route)
+register_op(f'n^ l^ h^, e^ h^ -> (n^ l^) 64, (n^ l^) 64, 1')(moe_route)
 
 
 def nnscaler_llama_flash_attention_forward_anno(query_states, key_states, value_states, attention_mask, *args, **kwargs) -> str:

@@ -6,6 +6,16 @@ from pathlib import Path
 
 from nnscaler.graph.parser import FxModuleParser
 
+try:
+    import nnscaler.autodist.dp_solver
+except ImportError:
+    from pathlib import Path
+    from cppimport import build_filepath
+    import nnscaler.autodist
+    # lazy build the cpp file if it is not built yet
+    build_filepath(Path(nnscaler.autodist.__file__).with_name("dp_solver.cpp"), fullname="nnscaler.autodist.dp_solver")
+
+
 @pytest.fixture(autouse=True)
 def clean_generated_files():
     print('hello')

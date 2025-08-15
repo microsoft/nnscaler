@@ -164,3 +164,56 @@ def test_diff_partition_2():
         # linear_34 = nnscaler.runtime.adapter.nn.identity_allreduce(linear_34, ranks=[0, 1])
         # linear_105, linear_109 = nnscaler.runtime.function.multiref(linear_34, times=2)
         assert len(_gencode_contains(tempdir, ModelB, 0, 'nnscaler.runtime.adapter.nn.identity_allreduce')) == 1
+
+
+class Layer(torch.nn.Module):
+
+    def __init__(self):
+        super(Layer, self).__init__()
+        self.fc = torch.nn.Linear(10, 10, bias=False)
+
+    def forward(self, x):
+        y = self.fc(x)
+        x = x + y
+        return x
+
+
+class Decoder(torch.nn.Module):
+
+    def __init__(self):
+        super(Decoder, self).__init__()
+        self.layer1 = Layer()
+        self.layer2 = Layer()
+
+    def forward(self, x):
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = x.sum()
+        return x
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.device_count() < 4, reason='lack of gpu devices')
+def test_activation_pp():
+    m = Decoder()
+    m.train()
+    torch.manual_seed(0)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(0)
+    trace_data = torch.randn([2, 10], dtype=torch.float32, device=torch.cuda.current_device())
+
+    with tempfile.TemporaryDirectory() as tempdir:
+        pas_cfg = {
+            'load_plan_path': Path(__file__).parent / 'activation_pp.json',
+            'pipeline_nstages': 2,
+            'pipeline_pivots': 'Layer',
+        }
+        parallelize(
+                m,
+                {'x': trace_data},
+                'autodist',
+                ComputeConfig(4, 4, use_end2end=True, pas_config=pas_cfg),
+                reuse='override',
+                gen_savedir=tempdir,
+                load_module=False,
+        )
+        assert True, "should not raise any exception"

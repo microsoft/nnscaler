@@ -10,6 +10,7 @@ from nnscaler.graph.function.dimops import IRDimops, DimAnno, DimopSplit, Transf
 from nnscaler.ir.tensor import IRSubTensor
 from nnscaler.ir.cten import IRTensor
 from nnscaler.ir.operator import IRFwOperation
+from nnscaler.graph import IRGraph
 from collections import deque
 
 _logger = logging.getLogger(__name__)
@@ -173,6 +174,8 @@ class DimSplitEinops(GenericDistAlgo):
             sub_node.verify_shape()
             sub_nodes.append(sub_node)
 
+        for sub_node in sub_nodes:
+            IRGraph.copy_node_meta_info(node, sub_node)
         return sub_nodes
 
     def infer(self, idx: int, dim: Union[int, str], num: int) -> Optional[TransformRule]:

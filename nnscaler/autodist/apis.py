@@ -138,8 +138,115 @@ def parallelize_graph(graph: IRGraph,
         nodes = [cid2node[cid] for cid in group]
         graph.recompute(nodes)
 
-    def subtensor_desc(t):
-        return (t.indmap, t.grad is not None)
+    tensor_split_info = collect_tensor_split_info(graph, pp_desc)
+    # add multiref for shared parameters across stages
+    # note that we have constrained that shared parameters cannot be partitioned in SPMDSolver, other input tensors
+    # belonging to the same operator can be partitioned. For example, in some LLMs, the embedding matrix is shared
+    # with the output layer. In this case, the batch dim / seq dim of the activation tensor can be partitioned.
+    for ftensor, stage_info in tensor_split_info.items():
+        if not ftensor.is_param():
+            continue
+        splits = set()
+        find_replicated = False
+        for stage_splits in stage_info.values():
+            splits.update(stage_splits)
+            if any(s[0] == 'REPLICATED' for s in stage_splits):
+                find_replicated = True
+        splits = list(splits)
+        # For safety, we will add multiref when detecting shared param are all replicated for pipeline parallelism.
+        # The reason is that stages may have different number of devices, it is hard to synchronize gradients directly
+        # by inserting reducers although weights are all REPLICAED.
+        if len(splits) > 1 or (len(pp_desc.spmd_descs) > 1 and find_replicated):
+            _logger.info(f'add multiref for shared param {ftensor}')
+            graph.multiref(ftensor, comment='shared param')
+
+    # graph staging
+    if len(pp_desc.spmd_descs) > 1:
+        stages = []
+        for spmd_desc in pp_desc.spmd_descs:
+            stage = []
+            for cid in spmd_desc.partition_descs:
+                if cid not in cid2node:
+                    raise RuntimeError(f'node {cid} not found in {cid2node}, make sure the plan is correct')
+                stage.append(cid2node[cid])
+            stages.append(stage)
+        graph.staging([s[0] for s in stages])
+        stages = graph.select(ntype=IRSegment, flatten=False)
+        stages = [s for s in stages if s.isfw()]
+        # update tensor_split_info since the graph has been transformed
+        for stage in stages:
+            tensor_split_info.update(collect_tensor_split_info(stage, pp_desc))
+    else:
+        stages = [graph]
+
+    if autodist_config.pipeline_nstages != 'auto' and len(stages) != autodist_config.pipeline_nstages:
+        raise RuntimeError("pipeline_nstages doesn't match the number of stages (based on your pipeline_pivots config) in the plan")
+
+    # add multiref to an activation tensor when the states of the tensor and its grad are different
+    # among consumers and current segment's outputs
+    for idx, (stage, spmd_desc) in enumerate(zip(stages, pp_desc.spmd_descs)):
+        for ftensor in stage.full_tensors():
+            if ftensor.is_grad() or ftensor.is_param():
+                continue
+            if idx not in tensor_split_info[ftensor]:
+                continue
+            splits = copy.deepcopy(tensor_split_info[ftensor][idx])
+            for output in IRCell.get_objects_from_complex(stage.outputs()):
+                if isinstance(output, IRSubTensor) and output.parent == ftensor:
+                    splits.add(('REPLICATED', subtensor_desc(output)))
+            if len(splits) > 1:
+                _logger.debug(f'add multiref for {ftensor} in stage {stage}')
+                stage.multiref(ftensor, comment='activation')
+
+    # partition and assign nodes to devices
+    # TODO(yizhu1): network topo aware device map
+    offset = 0
+    for idx, (spmd_desc, stage) in enumerate(zip(pp_desc.spmd_descs, stages)):
+        cur_ngpus = spmd_desc.mesh_desc.ngpus
+        dev = [offset + i for i in range(cur_ngpus)]
+        stage_info_str = f'stage {idx} on devices {dev} with mem {search_out.stage_mems[idx]:.2f} GB'
+        _logger.info(f'\nautodist plan analysis for {stage_info_str}:\n\n{analysis_pretty_printer(spmd_desc.analysis)}')
+        offset += cur_ngpus
+        for node in stage.nodes():
+            if isinstance(node, IRFwOperation):
+                if isinstance(node, (IRGraphAnchor, IRPyFunc)) or node.name == 'multiref':
+                    continue
+                if node.cid in spmd_desc.partition_descs:
+                    p_desc = spmd_desc.partition_descs[node.cid]
+                    partition_node(node, graph, dev, p_desc)
+                    if isinstance(node, IRDimops):
+                        _logger.debug(f'apply {node} with {node.anno} at {node.comment}, plan: {p_desc}')
+                    else:
+                        _logger.debug(f'replicate non-IRDimops {node.signature} with {node.comment}')
+                else:
+                    replica(graph, node, dev)
+                    _logger.debug(f'NOT included in plan, replicate {node.signature} with {node.comment}')
+
+    for dl in graph.select(ntype=IRDataOperation):
+        replica(graph, dl, devs=list(range(autodist_config.mesh_desc.ngpus)))
+
+    # apply 1f1b schedule
+    if len(stages) > 1:
+        PredefinedSched.sched_1f1b(
+            graph,
+            autodist_config.update_freq,
+            len(stages),
+        )
+
+    return graph
+
+
+def subtensor_desc(t):
+    return (t.indmap, t.grad is not None)
+
+
+def collect_tensor_split_info(graph: IRGraph, pp_desc: PipelineSearchOutput):
+    """
+    Collect information about how tensors are split across stages in the pipeline parallelism.
+    This function populates the `tensor_split_info` dictionary with details about each tensor's partitioning
+    across different stages, including whether they are replicated or partitioned.
+    """
+
     tensor_split_info = defaultdict(dict)
     for ftensor in graph.full_tensors():
         if ftensor.is_grad():
@@ -176,105 +283,7 @@ def parallelize_graph(graph: IRGraph,
                             # special case: if the stage has only one gpu, we treat it as partitioned
                             tensor_split_info[ftensor][stage_idx].add(('PARTITIONED', subtensor_desc(input)))
                 break
-            assert find_desc, f'node {consumer} not found in any stage'
-
-    # add multiref for shared parameters across stages
-    # note that we have constrained that shared parameters cannot be partitioned in SPMDSolver, other input tensors
-    # belonging to the same operator can be partitioned. For example, in some LLMs, the embedding matrix is shared
-    # with the output layer. In this case, the batch dim / seq dim of the activation tensor can be partitioned.
-    for ftensor, stage_info in tensor_split_info.items():
-        if not ftensor.is_param():
-            continue
-        splits = set()
-        find_replicated = False
-        for stage_splits in stage_info.values():
-            splits.update(stage_splits)
-            if any(s[0] == 'REPLICATED' for s in stage_splits):
-                find_replicated = True
-        splits = list(splits)
-        # For safety, we will add multiref when detecting shared param are all replicated for pipeline parallelism.
-        # The reason is that stages may have different number of devices, it is hard to synchronize gradients directly
-        # by inserting reducers although weights are all REPLICAED.
-        if len(splits) > 1 or (len(pp_desc.spmd_descs) > 1 and find_replicated):
-            _logger.info(f'add multiref for shared param {ftensor}')
-            graph.multiref(ftensor, comment='shared param')
-
-    # graph staging
-    if len(pp_desc.spmd_descs) > 1:
-        stages = []
-        for spmd_desc in pp_desc.spmd_descs:
-            stage = []
-            for cid in spmd_desc.partition_descs:
-                if cid not in cid2node:
-                    raise RuntimeError(f'node {cid} not found in {cid2node}, make sure the plan is correct')
-                stage.append(cid2node[cid])
-            stages.append(stage)
-        graph.staging([s[0] for s in stages])
-        stages = graph.select(ntype=IRSegment, flatten=False)
-        stages = [s for s in stages if s.isfw()]
-    else:
-        stages = [graph]
-
-    if autodist_config.pipeline_nstages != 'auto' and len(stages) != autodist_config.pipeline_nstages:
-        raise RuntimeError("pipeline_nstages doesn't match the number of stages (based on your pipeline_pivots config) in the plan")
-
-    # add multiref to an activation tensor when the states of the tensor and its grad are different
-    # among consumers and current segment's outputs
-    for idx, (stage, spmd_desc) in enumerate(zip(stages, pp_desc.spmd_descs)):
-        for ftensor in stage.full_tensors():
-            if ftensor.is_grad() or ftensor.is_param():
-                continue
-            if idx not in tensor_split_info[ftensor]:
-                continue
-            splits = copy.deepcopy(tensor_split_info[ftensor][idx])
-            for output in IRCell.get_objects_from_complex(stage.outputs()):
-                if isinstance(output, IRSubTensor) and output.parent == ftensor:
-                    splits.add(('REPLICATED', subtensor_desc(output)))
-            if len(splits) > 1:
-                _logger.debug(f'add multiref for {ftensor} in stage {stage}')
-                stage.multiref(ftensor, comment='activation')
-
-    # partition and assign nodes to devices
-    # TODO(yizhu1): network topo aware device map
-    offset = 0
-    for idx, (spmd_desc, stage) in enumerate(zip(pp_desc.spmd_descs, stages)):
-        cur_ngpus = spmd_desc.mesh_desc.ngpus
-        dev = [offset + i for i in range(cur_ngpus)]
-        stage_info_str = f'stage {idx} on devices {dev} with mem {search_out.stage_mems[idx]:.2f} GB'
-        _logger.info(f'\nautodist plan analysis for {stage_info_str}:\n\n{analysis_pretty_printer(spmd_desc.analysis)}')
-        offset += cur_ngpus
-        for node in stage.nodes():
-            if isinstance(node, IRFwOperation):
-                if isinstance(
-                        node,
-                    (IRGraphAnchor, IRPyFunc)) or node.name == 'multiref':
-                    continue
-                if node.cid in spmd_desc.partition_descs:
-                    p_desc = spmd_desc.partition_descs[node.cid]
-                    partition_node(node, graph, dev, p_desc)
-                    if isinstance(node, IRDimops):
-                        _logger.debug(
-                            f'apply {node} with {node.anno} at {node.comment}, plan: {p_desc}'
-                        )
-                    else:
-                        _logger.debug(
-                            f'replicate non-IRDimops {node.signature} with {node.comment}'
-                        )
-                else:
-                    replica(graph, node, dev)
-                    _logger.debug(
-                        f'NOT included in plan, replicate {node.signature} with {node.comment}'
-                    )
-
-    for dl in graph.select(ntype=IRDataOperation):
-        replica(graph, dl, devs=list(range(autodist_config.mesh_desc.ngpus)))
-
-    # apply 1f1b schedule
-    if len(stages) > 1:
-        PredefinedSched.sched_1f1b(
-            graph,
-            autodist_config.update_freq,
-            len(stages),
-        )
-
-    return graph
+            # operator inserted by nnscaler
+            if consumer.name not in ('multiref', 'identity'):
+                assert find_desc, f'node {consumer} not found in any stage'
+    return tensor_split_info

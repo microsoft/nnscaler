@@ -274,6 +274,7 @@ def pas_autodist(graph: IRGraph, cfg: 'ComputeConfig') -> IRGraph:
     recompute_modules = pas_cfg.get('recompute_modules', '')
     pipeline_pivots = pas_cfg.get('pipeline_pivots', '')
     max_pipeline_bubble_ratio = pas_cfg.get('max_pipeline_bubble_ratio', 0.2)
+    max_pipeline_unbalance_ratio = pas_cfg.get('max_pipeline_unbalance_ratio', 0.5)
     use_apex_fused_adam_v2 = pas_cfg.get('use_apex_fused_adam_v2', False)
     parallel_profile = pas_cfg.get('parallel_profile', True)
     transient_mem_coef = pas_cfg.get('transient_mem_coef', 2)
@@ -340,6 +341,7 @@ def pas_autodist(graph: IRGraph, cfg: 'ComputeConfig') -> IRGraph:
         pipeline_pivots=pipeline_pivots,
         pipeline_nstages=pipeline_nstages,
         max_pipeline_bubble_ratio=max_pipeline_bubble_ratio,
+        max_pipeline_unbalance_ratio=max_pipeline_unbalance_ratio,
         parallel_profile=parallel_profile,
         transient_mem_coef=transient_mem_coef,
     )

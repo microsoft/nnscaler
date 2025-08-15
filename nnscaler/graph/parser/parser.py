@@ -262,7 +262,12 @@ class FxModuleParser:
                 _logger.warning(f'Find unknown pytorch operation: {fsig}')
                 fname = fsig.split('.')[-1] if '.' in fsig else fsig
                 ir_node = IRFwOperation(fname, fsig, input_vals, 1, **kwargs)
-            # case2: python runtime function
+            # case2: custom autograd function
+            elif FxModuleParser._is_custom_autograd_op(node):
+                # custom autograd function
+                _logger.warning(f'Find unknown custom autograd operation: {fsig}. You should register it with nnscaler.register_op')
+                ir_node = IRFwOperation(fsig, fsig, input_vals, 1, **kwargs)
+            # case3: python runtime function
             else:
                 _logger.warning(f'Set python runtime function: {fsig}')
                 is_constant = True
@@ -275,6 +280,10 @@ class FxModuleParser:
                 if not isinstance(output, IRObject):
                     # avoid nested IRObject
                     output = IRObject(name=node.name, value=output, is_constant=is_constant)
+                elif not isinstance(output, IRTensor):
+                    # make sure is_constant is set correctly
+                    # IRTensor is always non-constant
+                    output.is_constant = is_constant
                 ir_node = IRPyFunc(fsig, input_vals, [output], **kwargs)
 
         if not isinstance(ir_node, IRCell):
@@ -357,6 +366,7 @@ class FxModuleParser:
         #    only user registered functions and `getattr` will have undefined output.
         #    So I think the original intention is to avoid folding user registered functions.
         # 5. Only fold primitive types (int, float, bool, None, str, Ellipsis) and its complex types
+        # 6. Only fold constant_foldable node
         def _is_primitive_type(val):
             # we don't fold a list/tuple/dict with length larger than this
             # Just a quick filter, and may not work when val has multiple nested levels
@@ -369,7 +379,8 @@ class FxModuleParser:
             return isinstance(val, (int, float, bool, type(None), str, type(Ellipsis)))
 
         # Note when it is not IRObject as a whole, we will not fold it
-        if constant_folding and len(ir_node.outputs()) == 1 \
+        if constant_folding and ir_node.constant_foldable \
+            and len(ir_node.outputs()) == 1 \
             and isinstance(ir_node.output(0), IRObject) \
             and not isinstance(ir_node.output(0), IRTensor) \
             and not contains_undefined_output \
@@ -543,3 +554,11 @@ class FxModuleParser:
         # an IRTensor, thus cannot be considered as a pytorch autograd operator.
         return signature.startswith('torch.') and \
                isinstance(frame.get_var(node.name), IRFullTensor)
+
+    @staticmethod
+    def _is_custom_autograd_op(node: torch.fx.Node) -> bool:
+        node_target = node.target
+        return callable(node_target) \
+            and getattr(node_target, '__name__', None) == 'apply' \
+            and isinstance(getattr(node_target, '__self__', None), Type) \
+            and issubclass(node_target.__self__, torch.autograd.Function)

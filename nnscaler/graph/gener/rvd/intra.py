@@ -420,7 +420,7 @@ class IntraPathFinder:
                 min_cost, visit = np.inf, None
                 for idx in unvisited:
                     if cost[idx] < min_cost:
-                        min_cost = idx
+                        min_cost = cost[idx]
                         visit = idx
                 if visit is None: break  # for remaining states that cannot reach
                 for neighbor in np.where(edges[visit] != np.inf)[0]:

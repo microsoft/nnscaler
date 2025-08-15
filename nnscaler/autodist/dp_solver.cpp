@@ -1,5 +1,3 @@
-// cppimport
-
 /*
  * Copyright (c) Microsoft Corporation.
  * Licensed under the MIT License.
@@ -625,6 +623,10 @@ PYBIND11_MODULE(dp_solver, m) {
       .def("solve", &DPSolver::solve)
       .def("get_results", &DPSolver::get_results);
 }
+
+// the following is used to build the cpp file in cppimport
+// which is just for local development convenience
+// For production, `setup.py` will be used to build the cpp file
 /*
 <%
 setup_pybind11(cfg)

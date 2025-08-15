@@ -377,6 +377,7 @@ Please Note:
       @dataclass
       class HookMapConfig:
           after_setup: str = None
+          on_finalize: str = None
 
           on_train_start: str = None
           on_train_end: str = None
@@ -391,6 +392,9 @@ Please Note:
           on_val_step_start: str = None
           on_val_step_end: str = None
 
+          on_step_start: str = None
+          on_step_end: str = None
+
           after_aggregate_train_step_outputs: str = None
           after_aggregate_val_step_outputs: str = None
 
@@ -403,12 +407,17 @@ Please Note:
           before_optimizer_step: str = None
           after_optimizer_step: str = None
 
+          before_log_train_metrics: str = None
+          before_log_val_metrics: str = None
+
           on_load_checkpoint: str = None
           on_save_checkpoint: str = None
 
   * ``after_setup`` (``str``): The hook function to be called after setting up the trainer.
     Only be called when ``run_mode == 'run'``.
     Signature:  ``def after_setup(trainer: 'Trainer') -> None:``
+  * ``on_finalize`` (``str``): The hook function to be called when the training is done.
+    Signature:  ``def on_finalize(trainer: 'Trainer') -> None:``
   * ``on_train_start`` (``str``): The hook function to be called at the start of the training stage. Signature:  ``def on_train_start(trainer: 'Trainer') -> None:``
   * ``on_train_end`` (``str``): The hook function to be called at the end of the training stage. Signature:  ``def on_train_end(trainer: 'Trainer') -> None:``
   * ``on_val_start`` (``str``): The hook function to be called at the start of the validation stage. Signature:  ``def on_val_start(trainer: 'Trainer') -> None:``
@@ -416,12 +425,14 @@ Please Note:
   * ``on_epoch_start`` (``str``): The hook function to be called at the start of each epoch. Signature:  ``def on_epoch_start(trainer: 'Trainer', epoch: int) -> None:``
   * ``on_epoch_end`` (``str``): The hook function to be called at the end of each epoch. Signature:  ``def on_epoch_end(trainer: 'Trainer', epoch: int) -> None:``
   * ``on_train_step_start`` (``str``): The hook function to be called at the start of each training step.
-    Signature:  ``def on_train_step_start(trainer: 'Trainer', batches: List[Any], idx: int) -> None:``
-  * ``on_train_step_end`` (``str``): The hook function to be called at the end of each training step. Signature:  ``def on_train_step_end(trainer: 'Trainer', outputs: List[Any], batches: List[Any], idx: int) -> None:``
-  * ``on_val_step_start`` (``str``): The hook function to be called at the start of each validation step. Signature:  ``def on_val_step_start(trainer: 'Trainer', batches: List[Any], idx: int) -> None:``
-  * ``on_val_step_end`` (``str``): The hook function to be called at the end of each validation step. Signature:  ``def on_val_step_end(trainer: 'Trainer', outputs: List[Any], batches: List[Any], idx: int) -> None:``
-  * ``after_aggregate_train_step_outputs`` (``str``): The hook function to be called after aggregating the outputs of the model in the training step. Signature:  ``def after_aggregate_train_step_outputs(trainer: 'Trainer', aggregated_outputs: 'AggregatedOutputs', train_loss: float, idx: int) -> None:``
-  * ``after_aggregate_val_step_outputs`` (``str``): The hook function to be called after aggregating the outputs of the model in the validation step. Signature:  ``def after_aggregate_val_step_outputs(trainer: 'Trainer', aggregated_outputs: 'AggregatedOutputs', val_loss: float, idx: int) -> None:``
+    Signature:  ``def on_train_step_start(trainer: 'Trainer', batches: List[Any]) -> None:``
+  * ``on_train_step_end`` (``str``): The hook function to be called at the end of each training step. Signature:  ``def on_train_step_end(trainer: 'Trainer', outputs: List[Any]) -> None:``
+  * ``on_val_step_start`` (``str``): The hook function to be called at the start of each validation step. Signature:  ``def on_val_step_start(trainer: 'Trainer', batches: List[Any]) -> None:``
+  * ``on_val_step_end`` (``str``): The hook function to be called at the end of each validation step. Signature:  ``def on_val_step_end(trainer: 'Trainer', outputs: List[Any]) -> None:``
+  * ``on_step_start`` (``str``): The hook function to be called at the start of each step. Signature:  ``def on_step_start(self, trainer: 'Trainer', epoch: int, idx: int) -> None:``
+  * ``on_step_end`` (``str``): The hook function to be called at the end of each step. Signature:  ``def on_step_end(self, trainer: 'Trainer', epoch: int, idx: int, step_metrics: TrainStepMetrics, aggregated_outputs: 'AggregatedOutputs') -> None:``
+  * ``after_aggregate_train_step_outputs`` (``str``): The hook function to be called after aggregating the outputs of the model in the training step. Signature:  ``def after_aggregate_train_step_outputs(trainer: 'Trainer', aggregated_outputs: 'AggregatedOutputs', train_loss: float) -> None:``
+  * ``after_aggregate_val_step_outputs`` (``str``): The hook function to be called after aggregating the outputs of the model in the validation step. Signature:  ``def after_aggregate_val_step_outputs(trainer: 'Trainer', aggregated_outputs: 'AggregatedOutputs', val_loss: float) -> None:``
   * ``before_zero_grad`` (``str``): The hook function to be called before zeroing the gradients. Signature:  ``def before_zero_grad(trainer: 'Trainer') -> None:``
   * ``after_zero_grad`` (``str``): The hook function to be called after zeroing the gradients. Signature:  ``def after_zero_grad(trainer: 'Trainer') -> None:``
   * ``before_sync_grad`` (``str``): The hook function to be called before syncing the gradients between ranks.
@@ -439,8 +450,14 @@ Please Note:
     Signature:  ``def before_optimizer_step(trainer: 'Trainer') -> None:``
   * ``after_optimizer_step`` (``str``): The hook function to be called after the optimizer step.
     Signature:  ``def after_optimizer_step(trainer: 'Trainer') -> None:``
+  * ``before_log_train_metrics`` (``str``): The hook function to be called before logging the training metrics. You can use this to modify the training metrics before logging.
+    Signature:  ``def before_log_train_metrics(self, trainer: 'Trainer', step_metrics: TrainStepMetrics, aggregated_outputs: 'AggregatedOutputs') -> None:``
+  * ``before_log_val_metrics`` (``str``): The hook function to be called before logging the validation metrics. You can use this to modify the validation metrics before logging.
+    Signature:  ``def before_log_val_metrics(self, trainer: 'Trainer', metrics: ValMetrics) -> None:``
   * ``on_load_checkpoint`` (``str``): The hook function to be called after loading the checkpoint.
     If you saved something with ``on_save_checkpoint`` this is your chance to restore this.
+    Please note when checkpoints are merged, the custom data saved in the checkpoint
+    will be collected and saved as array in merged checkpoint. You must handle this case.
     Signature:  ``def on_load_checkpoint(trainer: 'Trainer', checkpoint: Dict[str, Any]) -> None:``
   * ``on_save_checkpoint`` (``str``): The hook function to be called before saving the checkpoint.
     If you want to save something, you can add it to the checkpoint here.

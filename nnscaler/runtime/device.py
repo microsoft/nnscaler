@@ -20,6 +20,7 @@ _LARGE_TIMEOUT = datetime.timedelta(seconds=21600)
 
 class _DeviceGroup:
     def __init__(self):
+        self._is_pg_initer = False
         if CompileFlag.dev_mode or not is_running_distributed():
             self.rank = 0
             self.world_size = 1
@@ -31,6 +32,7 @@ class _DeviceGroup:
                 torch.distributed.init_process_group(
                     backend='nccl', timeout=_LARGE_TIMEOUT
                 )
+                self._is_pg_initer = True
 
             # disable it for now due to connection refused error when nnodes > 1
             # TODO: investigate the root cause
@@ -52,6 +54,11 @@ class _DeviceGroup:
         self.groups: Dict = { '1'*self.world_size: None }
         self.streams: Dict[str, torch.cuda.Stream] = {
             'default': torch.cuda.default_stream()}
+
+    def close(self):
+        if self._is_pg_initer:
+            torch.distributed.destroy_process_group()
+            self._is_pg_initer = False
 
     def group_exists(self, ranks):
         """
@@ -143,3 +150,14 @@ def DeviceGroup() -> _DeviceGroup:
     if _instance is None:
         _instance = _DeviceGroup()
     return _instance
+
+
+def init_device():
+    _ = DeviceGroup()
+
+
+def uninit_device():
+    global _instance
+    if _instance is not None:
+        _instance.close()
+        _instance = None

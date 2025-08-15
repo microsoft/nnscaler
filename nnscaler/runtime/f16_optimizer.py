@@ -141,6 +141,18 @@ class MixedPrecisionF16OptimizerMixin(TrainHook):
                 continue
             p.data.copy_(p32.data)
 
+    def _sync_fp16_params_to_fp32(self):
+        # copy FP16 params to FP32
+        for p, p32 in zip(self.f16_params, self.fp32_params):
+            if not p.requires_grad:
+                continue
+            p32.data.copy_(p.data)
+
+    def after_load_checkpoint(self, trainer, checkpoint) -> None:
+        if 'nnscaler' not in checkpoint:
+            # this checkpoint is not created by nnscaler.
+            self._sync_fp16_params_to_fp32()
+
     def overrided_scale_grads(self, scale: float):
         """
         Scale the gradients by a factor.

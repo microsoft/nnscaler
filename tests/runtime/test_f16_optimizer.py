@@ -42,8 +42,8 @@ def trainer_worker(save_dir):
 
     if torch.distributed.get_rank() == 0:
         for i in range(2):
-            x = torch.load(ckpt0_savedir / 'last' / f'{i}.ckpt')
-            y = torch.load(ckpt1_savedir / 'last' / f'{i}.ckpt')
+            x = torch.load(ckpt0_savedir / 'last' / f'{i}.ckpt', weights_only=False)
+            y = torch.load(ckpt1_savedir / 'last' / f'{i}.ckpt', weights_only=False)
             # actually they are not close
             # assert_close(x['model'], y['model'])
             # assert_close(x['optimizer'], y['optimizer'])

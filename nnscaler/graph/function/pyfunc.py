@@ -13,9 +13,10 @@ class IRPyFunc(IRFwOperation):
     """
 
     def __init__(self, signature: str,
-                 inputs: Tuple[IRObject], outputs: Tuple[IRObject], **kwargs):
+                 inputs: Tuple[IRObject], outputs: Tuple[IRObject],
+                 *, constant_foldable=True, **kwargs):
         name = signature.split('.')[-1]
-        super().__init__(name, signature, inputs, len(outputs))
+        super().__init__(name, signature, inputs, len(outputs), constant_foldable=constant_foldable)
         for idx, t in enumerate(outputs):
             self.set_output(idx, t)
         self.kwargs.update(**kwargs)

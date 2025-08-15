@@ -195,11 +195,11 @@ def on_before_grad_clip(trainer: Trainer):
     _correctnes_worker_update_history.append((grads, weights))
 
 
-def after_aggregate_train_step_outputs(trainer: Trainer, aggregated_outputs, train_loss, idx):
+def after_aggregate_train_step_outputs(trainer: Trainer, aggregated_outputs, train_loss):
     _correctnes_worker_train_loss_history.append(train_loss)
 
 
-def on_train_step_end(trainer: 'Trainer', outputs, batches, idx: int) -> None:
+def on_train_step_end(trainer: 'Trainer', outputs) -> None:
     _correctnes_worker_single_loss_history.append(outputs[0].item())
 
 
@@ -243,7 +243,7 @@ def correctnes_worker_cli(
     with_tp=False
 ):
 
-    def on_val_step_end(trainer: Trainer, outputs, batches, idx) -> None:
+    def on_val_step_end(trainer: Trainer, outputs) -> None:
         _correctnes_worker_val_loss_history.append(outputs[0].item())
 
     assert precision == '32-true'

@@ -160,7 +160,7 @@ def _load_merged(parallel_model: torch.nn.Module, ckpt_dir):
     torch.distributed.barrier()
     if torch.distributed.get_rank() == 0:
         ckpt_files = [ckpt_dir / ckpt_file_template.format(rank=i) for i in range(torch.distributed.get_world_size())]
-        ckpt_state_dicts = [torch.load(f) for f in ckpt_files]
+        ckpt_state_dicts = [torch.load(f, weights_only=False) for f in ckpt_files]
         model_state_dicts = [ckpt['model'] for ckpt in ckpt_state_dicts]
         optimizer_state_dicts = [ckpt['optimizer'] for ckpt in ckpt_state_dicts]
         merged_model_state_dicts, merged_optimizer_state_dict = merge_state_dicts(model_state_dicts, optimizer_state_dicts)

@@ -3,7 +3,7 @@
 
 from dataclasses import asdict, dataclass, field, replace
 import importlib
-from typing import Any, Dict, List, Literal, Optional, TYPE_CHECKING, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, TYPE_CHECKING, Union, TypeVar
 from typing_extensions import get_args
 from pathlib import Path
 import logging
@@ -20,11 +20,16 @@ import yaml
 import torch
 
 import nnscaler
-from nnscaler.utils import fields, transform_recursively
+from nnscaler.utils import fields, transform_recursively, load_type
 from nnscaler.parallel import ComputeConfig, build_optimizer, ReuseType, BroadcastGenFilesStrategy, _PREDEFINED_POLICIES
 from nnscaler.runtime.module import ParallelModule
 
-from .arg_parser import deserialize_dataclass, merge_args, parse_args, _TYPE_KEY, _VALUE_TYPE_KEY, _VALUE_KEY
+from .arg_parser import (
+    deserialize_dataclass,
+    merge_args, parse_args,
+    _TYPE_KEY, _VALUE_TYPE_KEY, _VALUE_KEY,
+    resolve_args
+)
 from .loggers.logger_base import LoggerBase
 from .train_hook import TrainHook
 
@@ -43,6 +48,8 @@ _PRECISION_MAP = {
     'bf16': torch.bfloat16,
     'none': None  # as it is. no conversion will happen.
 }
+_SELF_ARG_VALUE = 'self'
+_LOSS_TYPE = TypeVar('_LOSS_TYPE')
 
 
 def _get_tensor_dtype(precision: Dict[_TENSOR_TYPE, _PRECISION_TYPE], tensor_type: _TENSOR_TYPE) -> torch.dtype:
@@ -96,6 +103,17 @@ def _resolve_precision(precision: Union[str, Dict[_TENSOR_TYPE, _PRECISION_TYPE]
     return precision
 
 
+def _factory_normalize(value):
+    if isinstance(value, dict) and _TYPE_KEY in value:
+        kwargs = {
+            k: v for k, v in value.items()
+            if k != _TYPE_KEY
+        }
+        return load_type(value[_TYPE_KEY])(**kwargs)
+    else:
+        return value
+
+
 def fix_input(input, input_dtype=None):
     if isinstance(input, dict):
         return {k: fix_input(v, input_dtype) for k, v in input.items()}
@@ -139,37 +157,6 @@ class PolicyMixin:
         return load_type(self.pas_policy)
 
 
-def load_type(type_name: str):
-    """
-    Load function/class from its full qualified name
-    """
-    if callable(type_name):  # a function or class
-        return type_name
-
-    parts = type_name.split('.')
-
-    # s: the number of parts to be the namespace
-    # s == 0: use builtins
-    # so the range() part includes 0 (with stop=-1)
-    for s in range(len(parts) - 1, -1, -1):
-        if s == 0:
-            nm = builtins
-        else:
-            namespace = '.'.join(parts[:s])
-            try:
-                nm = importlib.import_module(namespace)
-                break
-            except (ImportError, ModuleNotFoundError):
-                pass
-
-    try:
-        for i in range(s, len(parts)):
-            nm = getattr(nm, parts[i])
-        return nm
-    except AttributeError as e:
-        raise RuntimeError(f"Failed to load type {type_name}") from e
-
-
 @dataclass
 class AggregatedOutputs:
     """
@@ -183,6 +170,37 @@ class AggregatedOutputs:
     num_tokens: Optional[int] = None
     # any other custom outputs
     aggregated_outputs: Any = None
+
+    @classmethod
+    def aggregate(cls,
+        loss_outputs: list[_LOSS_TYPE],
+        sync_group: torch.distributed.ProcessGroup,
+        loss_fn: Callable[[_LOSS_TYPE], torch.Tensor],
+        ntokens_fn: Callable[[_LOSS_TYPE], torch.Tensor] | None = None,
+    ) -> 'AggregatedOutputs':
+        losses, ntokens = [], []
+        for output in loss_outputs:
+            losses.append(loss_fn(output))
+            if ntokens_fn is not None:
+                ntokens.append(ntokens_fn(output))
+
+        loss_sum = torch.sum(torch.stack(losses), dtype=torch.float64)
+        torch.distributed.all_reduce(loss_sum, group=sync_group)
+
+        if ntokens_fn is not None:
+            ntokens_sum = torch.sum(torch.tensor(ntokens, dtype=torch.int64, device=torch.cuda.current_device()))
+            torch.distributed.all_reduce(ntokens_sum, group=sync_group)
+        else:
+            ntokens_sum = None
+
+        num_batches = torch.tensor(len(losses), device=torch.cuda.current_device())
+        torch.distributed.all_reduce(num_batches, group=sync_group)
+
+        return AggregatedOutputs(
+            loss_sum=loss_sum.item(),
+            num_batches=num_batches.item(),
+            num_tokens=ntokens_sum.item() if ntokens_sum is not None else None,
+        )
 
 
 @dataclass(frozen=True)
@@ -215,7 +233,11 @@ class ModuleParallelizeConfig:
     # Please note if you specify this
     # pipeline parallelism will be disabled, and you must ensure ComputeConfig.use_end2end is False
     type: str = None
-    args: Dict[str, Any] = field(default_factory=dict)
+    # the module args to be used for creating the module
+    # If run_mode is 'compile' and `args` is not None
+    # we can parallelize submodules instead of creating whole model.
+    # This is useful sometimes.
+    args: Optional[Dict[str, Any]] = None
     # the full qualified name of the function to generate dummy forward args
     # Its type should be `Callable[[TrainerArgs],Dict[str, Any]]`
     forward_args_gen_fn: str = None
@@ -231,8 +253,15 @@ class ModuleParallelizeConfig:
     gen_reuse: Optional[str] = None
     pas_policy: Optional[str] = None
     broadcast_strategy: Optional[str] = None
-    instance_name: Optional[str] = None
-    precision: Union[str, Dict[_TENSOR_TYPE, _PRECISION_TYPE], None] = None
+    # sometimes you want to dynamically set the instance name
+    # for example, you can set it to the hash of related files
+    # In that case, we can pass a dict with callable __type field.
+    instance_name: Optional[str] = field(default=None, metadata={
+        'normalize': _factory_normalize
+    })
+    precision: Optional[Dict[_TENSOR_TYPE, _PRECISION_TYPE]] = field(default=None, metadata={
+        'skip_deserialization': True,
+    })
 
     def __post_init__(self):
         if not self.type:
@@ -250,9 +279,14 @@ class ModuleParallelizeConfig:
     def model_type(self):
         return load_type(self.type)
 
-    def create_model(self, trainer_args: 'TrainerArgs') -> torch.nn.Module:
-        kwargs = trainer_args.create_kwarg(self.args)
-        return self.model_type(**kwargs)
+    def create_model(self, trainer_args: 'TrainerArgs', module_args: Optional[tuple[tuple, dict]]=None) -> torch.nn.Module:
+        if self.args:
+            args, kwargs = (), trainer_args.create_kwarg(self.args)
+        elif module_args:
+            args, kwargs = module_args
+        else:
+            raise ValueError("`module_args` or `args` must be provided")
+        return self.model_type(*args, **kwargs)
 
     def create_dummy_forward_args(self, trainer_args: 'TrainerArgs') -> dict[str, Any]:
         forward_args_gen_fn = load_type(self.forward_args_gen_fn)
@@ -270,9 +304,9 @@ class ModelConfig:
     parallel_modules: list[ModuleParallelizeConfig] = field(default_factory=list)
 
     def __post_init__(self):
-        parallel_sub_modules = [load_type(m.type) for m in self.parallel_modules]
-        if set(parallel_sub_modules) != set(parallel_sub_modules):
-            raise ValueError(f"parallelized sub modules must be unique")
+        if len(set(m.type for m in self.parallel_modules)) != len(self.parallel_modules):
+            raise ValueError(f"parallelized sub modules must be unique by type")
+
 
 @dataclass
 class OptimizerConfig:
@@ -283,6 +317,8 @@ class OptimizerConfig:
     # loss reduction method
     # mean: average the loss over all micro-batches
     # sum: sum the loss of all micro-batches
+    # per-token-mean: average the gradients over all tokens
+    #    you must specify `aggregate_outputs_fn` and return the number of tokens
     # Please note in validation stage, this configuration is ignored
     # the loss is always averaged over all batches
     loss_reduction: str = 'mean'
@@ -303,8 +339,11 @@ class OptimizerConfig:
             raise ValueError(f"Invalid gradient_accumulation {self.grad_reduction}")
         if self.grad_reduction == 'per-token-mean' and not self.aggregate_outputs_fn:
             raise ValueError("aggregate_outputs_fn is required when grad_reduction is 'per-token-mean'")
-        if self.loss_reduction not in ('mean', 'sum'):
+        if self.loss_reduction == 'per-token-mean' and not self.aggregate_outputs_fn:
+            raise ValueError("aggregate_outputs_fn is required when loss_reduction is 'per-token-mean'")
+        if self.loss_reduction not in ('mean', 'sum', 'per-token-mean'):
             raise ValueError(f"Invalid loss_reduction {self.loss_reduction}")
+
 
 @dataclass
 class DatasetConfig:
@@ -344,6 +383,29 @@ class LRSchedulerConfig:
 
 
 @dataclass
+class ResumeOptions:
+    # sometimes you want to dynamically set checkpoint path
+    # for example, you can set it to finetune model if no `last` checkpoint exists
+    checkpoint: str = field(default='last', metadata={
+        'normalize': _factory_normalize
+    })
+    # the full qualified name of the function to
+    # convert the checkpoint to nnscaler format
+    # It should be `Callable[[Dict[str, Any]], Dict[str, Any]]`
+    # Only applied when `checkpoint` is a file.
+    # Please note you should handle the case
+    # when checkpoint file comes from a factory method
+    convert_fn: Optional[str] = None
+    # whether to merge the checkpoint files
+    # Only used when `checkpoint` is a directory.
+    # `True` means will load the merged checkpoint (without saving)
+    # `False` means will load the sharded checkpoint files
+    # `None` means will load the sharded checkpoint files if the world size is not changed.
+    #    and will load merged checkpoint if the world size is changed.
+    with_merged: Optional[bool] = None
+
+
+@dataclass
 class CheckpointConfig:
     save_dir: str = './checkpoints'
     no_save: bool = False
@@ -369,27 +431,35 @@ class CheckpointConfig:
     # resume training from a checkpoint folder/file
     # can be 'last'/'best'/a specific folder/file
     # we will not resume if resume_from is last or best but the corresponding checkpoint does not exist
-    resume_from: str = None
+    resume_from: Optional[ResumeOptions] = field(default=None, metadata={
+        'normalize': lambda x: {'checkpoint': x} if isinstance(x, str) else x
+    })
 
-    def get_resume_checkpoint_dir(self) -> Optional[Path]:
-        if not self.resume_from:
+    def get_resume_checkpoint(self) -> Optional[Path]:
+        if not self.resume_from or not self.resume_from.checkpoint:
             return None
-        if self.resume_from in ['last', 'best']:
-            d = Path(self.save_dir) / self.resume_from
+        if self.resume_from.checkpoint in ['last', 'best']:
+            d = Path(self.save_dir) / self.resume_from.checkpoint
             if not d.exists():
                 return None
             return d
-        return Path(self.resume_from)
+        return Path(self.resume_from.checkpoint)
+
+    @property
+    def resolved_convert_fn(self) -> Optional[Callable[[Dict[str, Any]], Dict[str, Any]]]:
+        if not self.resume_from or not self.resume_from.convert_fn:
+            return None
+        return load_type(self.resume_from.convert_fn)
 
     def __post_init__(self):
-        if self.resume_from:
-            if self.resume_from in ['last', 'best']:
+        if self.resume_from and self.resume_from.checkpoint:
+            if self.resume_from.checkpoint in ['last', 'best']:
                 if not self.save_dir:
                     raise ValueError("save_dir is required when resume_from is 'last'/'best'")
-                if not (Path(self.save_dir) / self.resume_from).exists():
-                    logger.warning(f"`{self.resume_from}` checkpoint does not exist. Will train from scratch.")
-            elif not Path(self.resume_from).exists():
-                raise ValueError(f"resume_from {self.resume_from} does not exist")
+                if not (Path(self.save_dir) / self.resume_from.checkpoint).exists():
+                    logger.warning(f"`{self.resume_from.checkpoint}` checkpoint does not exist. Will train from scratch.")
+            elif not Path(self.resume_from.checkpoint).exists():
+                raise ValueError(f"resume_from {self.resume_from.checkpoint} does not exist")
         if self.no_save:
             return
 
@@ -416,6 +486,13 @@ class LogConfig:
     type: str = None
     args: Dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self):
+        if not self.type:
+            raise ValueError("type is required")
+        if isinstance(self.type, str) and '.' not in self.type:
+            # assume it is a built-in logger
+            self.type = f'nnscaler.cli.loggers.{self.type}'
+
 
 @dataclass
 class DebugConfig:
@@ -435,6 +512,7 @@ class HookConfig:
 @dataclass
 class HookMapConfig:
     after_setup: str = None
+    on_finalize: str = None
 
     on_train_start: str = None
     on_train_end: str = None
@@ -443,6 +521,9 @@ class HookMapConfig:
 
     on_epoch_start: str = None
     on_epoch_end: str = None
+
+    on_step_start: str = None
+    on_step_end: str = None
 
     on_train_step_start: str = None
     on_train_step_end: str = None
@@ -464,7 +545,11 @@ class HookMapConfig:
     before_optimizer_step: str = None
     after_optimizer_step: str = None
 
+    before_log_train_metrics: str = None
+    before_log_val_metrics: str = None
+
     on_load_checkpoint: str = None
+    after_load_checkpoint: str = None
     on_save_checkpoint: str = None
 
 
@@ -476,8 +561,22 @@ class ArgsTrainHook(TrainHook):
                 setattr(self, k, load_type(v))
 
 
+def _deserialize_hook_config(hook) -> Union[HookConfig, HookMapConfig]:
+    if isinstance(hook, dict):
+        if 'type' in hook:
+            return deserialize_dataclass(hook, HookConfig)
+        else:
+            # treat hook map as a dict. this is for backward compatibility
+            # don't use `deserialize_dataclass` here
+            # because hooks can be functions (not str)
+            return HookMapConfig(**hook)
+    raise ValueError(f"Invalid hook config {hook}.")
+
+
 @dataclass
 class TrainerArgs(PrecisionMixin, PolicyMixin):
+    init_module: Optional[str] = None
+    vars: Dict[str, Any] = field(default_factory=dict)
     compute_config: ComputeConfig = None
 
     gen_savedir: str = './.nnscaler'
@@ -487,10 +586,18 @@ class TrainerArgs(PrecisionMixin, PolicyMixin):
     gen_reuse: str = 'auto'
     pas_policy: str = 'autodist'
     broadcast_strategy: str = 'all'
-    instance_name: str = None
+    # sometimes you want to dynamically set the instance name
+    # for example, you can set it to the hash of related files
+    # In that case, we can pass a dict with callable __type field.
+    instance_name: Optional[str] = field(default=None, metadata={
+        'normalize': _factory_normalize
+    })
     # compile: compile the model but not training
     # run: compile and run the model
     run_mode: str = 'run'
+    # the full qualified name of the function to generate dummy sample for forward
+    # Its type should be `Callable[[TrainerArgs], Any]`
+    dummy_sample_gen_fn: str = None
     # the model state dict file for tracing.
     # It is only used in tracing to serve as the initial state dict of the model.
     tracing_from_weights: str = None
@@ -499,17 +606,21 @@ class TrainerArgs(PrecisionMixin, PolicyMixin):
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
     dataloader: DataloaderConfig = field(default_factory=DataloaderConfig)
-    dataset_sampler: DatasetSamplerConfig = field(default_factory=DatasetSamplerConfig)
+    dataset_sampler: Optional[DatasetSamplerConfig] = None
     lr_scheduler: Optional[LRSchedulerConfig] = None
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     log: List[LogConfig] = field(default_factory=list)
     # It can be `HookConfig` or `HookMapConfig`
-    hook: Union[HookConfig, HookMapConfig, None] = None
+    hook: Union[HookConfig, HookMapConfig, None] = field(default=None, metadata={
+        'deserialize': _deserialize_hook_config
+    })
 
     debug: DebugConfig = field(default_factory=DebugConfig)
 
-    # TODO: mixed precision support
-    precision: Union[str, Dict[_TENSOR_TYPE, _PRECISION_TYPE], None] = None
+    # None value will be resolved in __post_init__
+    precision: Dict[_TENSOR_TYPE, _PRECISION_TYPE] = field(default=None, metadata={
+        'skip_deserialization': True,
+    })
 
     micro_batch_size: int = 1
     # You can set one of `global_batch_size` and `grad_accumulation_steps` option.
@@ -594,10 +705,15 @@ class TrainerArgs(PrecisionMixin, PolicyMixin):
             raise ValueError("dataset type is required")
         if not self.dataloader.type:
             raise ValueError("dataloader type is required")
-        if not self.dataset_sampler.type:
+        if self.dataset_sampler and not self.dataset_sampler.type:
             raise ValueError("dataset_sampler type is required")
         if self.lr_scheduler and not self.lr_scheduler.type:
             raise ValueError("lr_scheduler type is required")
+
+        if isinstance(self.hook, dict):
+            # if it is a dict, we will deserialize it to HookMapConfig
+            # This is for backward compatibility
+            self.hook = _deserialize_hook_config(self.hook)
 
         if self.seed is None and self.init_env_fn is None:
             logger.warning(
@@ -605,6 +721,8 @@ class TrainerArgs(PrecisionMixin, PolicyMixin):
                 "The training may not be reproducible "
                 "and the model weights on different devices can be different."
             )
+
+        self._vars = self.create_kwarg(self.vars)
 
     @classmethod
     def from_cli(cls, argv: List[str]) -> 'TrainerArgs':
@@ -614,11 +732,15 @@ class TrainerArgs(PrecisionMixin, PolicyMixin):
                 d = yaml.safe_load(f)
             argv = argv[2:]
 
-        merge_args(d, parse_args(argv))
+        merge_args(d, argv)
+        resolve_args(d)
+
         return cls.from_dict(d)
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> 'TrainerArgs':
+        if init_module := d.get('init_module', None):
+            importlib.import_module(init_module)
         ta = deserialize_dataclass(d, TrainerArgs)
         return ta
 
@@ -633,13 +755,11 @@ class TrainerArgs(PrecisionMixin, PolicyMixin):
 
     @classmethod
     def from_yaml(cls, path: str) -> 'TrainerArgs':
-        with open(path, 'r') as f:
-            return cls.from_dict(yaml.safe_load(f))
+        return cls.from_cli(['-f', path])
 
-    @classmethod
-    def create_kwarg(cls, value: Any):
+    def create_kwarg(self, value: Any) -> Any:
         if isinstance(value, dict):
-            value = {k: cls.create_kwarg(v) for k, v in value.items()}
+            value = {k: self.create_kwarg(v) for k, v in value.items()}
             if _TYPE_KEY in value:
                 value_type = load_type(value.pop(_TYPE_KEY))
                 return value_type(**value)
@@ -656,21 +776,46 @@ class TrainerArgs(PrecisionMixin, PolicyMixin):
             else:
                 return value
         elif isinstance(value, list):
-            return [cls.create_kwarg(i) for i in value]
+            return [self.create_kwarg(i) for i in value]
         elif isinstance(value, tuple):
-            return tuple(cls.create_kwarg(i) for i in value)
+            return tuple(self.create_kwarg(i) for i in value)
+        elif isinstance(value, str):
+            # resolved reference
+            # Note: resolved reference can only be used in various args
+            # (train/optimizer/dataloader/etc args).
+            if (value.startswith('$!(') and value.endswith(')')) \
+                or (value.startswith('$!{') and value.endswith('}')):
+                value = value[3:-1]
+                if value == 'self':
+                    return self
+                else:
+                    parts = value.split('.')
+                    if parts[0] != 'vars':
+                        raise ValueError(f"Invalid resolved reference {value}. It must be `self` or start with `vars`.")
+                    # resolve self.vars.x.y.z
+                    return self.get_resolved_var('.'.join(parts[1:]))
+            return value
         else:
             return value
 
     @property
     def model_type(self):
-        return load_type(self.model.type)
+        m = load_type(self.model.type)
+        if not inspect.isclass(m) or not issubclass(m, torch.nn.Module):
+            raise ValueError(f"Invalid model type {self.model.type}. It must be a subclass of torch.nn.Module")
+        return m
 
     @property
     def resolved_aggregate_outputs_fn(self):
         if not self.optimizer.aggregate_outputs_fn:
             return None
         return load_type(self.optimizer.aggregate_outputs_fn)
+
+    @property
+    def resolved_dummy_sample_gen_fn(self):
+        if not self.dummy_sample_gen_fn:
+            return None
+        return load_type(self.dummy_sample_gen_fn)
 
     @property
     def scaling_factor(self):
@@ -701,6 +846,19 @@ class TrainerArgs(PrecisionMixin, PolicyMixin):
         init_env_fn = load_type(self.init_env_fn)
         init_env_fn(trainer)
 
+    def get_resolved_var(self, fqn: str) -> Any:
+        """
+        Get a resolved variable from the vars dictionary.
+        The fqn is a full qualified name of the variable, e.g. 'x.y.z'.
+        """
+        parts = fqn.split('.')
+        var = self._vars
+        for part in parts:
+            if part not in var:
+                raise ValueError(f"Variable {fqn} not found in vars")
+            var = var[part]
+        return var
+
     def create_model(self) -> torch.nn.Module:
         kwargs = self.create_kwarg(self.model.args)
         return self.model_type(**kwargs)
@@ -721,19 +879,18 @@ class TrainerArgs(PrecisionMixin, PolicyMixin):
         kwargs = self.create_kwarg(dataset_args)
         dataset_class = load_type(self.dataset.type)
         dataset = dataset_class(**kwargs)
-        if isinstance(dataset_class, torch.utils.data.IterableDataset):
-            raise ValueError("IterableDataset is not supported")
         return dataset
 
     def create_sampler(self, dataset, stage='train'):
-        sampler_args = getattr(self.dataset_sampler, f'{stage}_args')
-        sampler_args = sampler_args or self.dataset_sampler.train_args
+        dataset_sampler = self.dataset_sampler or DatasetSamplerConfig()
+        sampler_args = getattr(dataset_sampler, f'{stage}_args')
+        sampler_args = sampler_args or dataset_sampler.train_args
         kwargs = self.create_kwarg(sampler_args)
         kwargs['dataset'] = dataset
         kwargs['num_replicas'] = self.compute_config.runtime_ngpus // self.compute_config.plan_ngpus
         # if not distributed, we use the rank 0 sampler
         kwargs['rank'] = int(os.environ.get('RANK', 0)) // self.compute_config.plan_ngpus
-        sampler_class = load_type(self.dataset_sampler.type)
+        sampler_class = load_type(dataset_sampler.type)
         return sampler_class(**kwargs)
 
     def create_dataloader(self, stage='train', dataset=None):
@@ -751,8 +908,15 @@ class TrainerArgs(PrecisionMixin, PolicyMixin):
             # here we don't use self.collate_fn to avoid its implementation hacking
             kwargs['collate_fn'] = load_type(kwargs['collate_fn'])
         kwargs['batch_size'] = self.micro_batch_size
-        kwargs['sampler'] = self.create_sampler(kwargs['dataset'], stage)
+
         dataloader_class = load_type(self.dataloader.type)
+        if isinstance(dataset, torch.utils.data.IterableDataset):
+            if self.dataset_sampler:
+                raise ValueError("IterableDataset does not support sampler. "
+                                 "Please remove dataset_sampler from TrainerArgs.")
+        else:
+            kwargs['sampler'] = self.create_sampler(kwargs['dataset'], stage)
+
         return dataloader_class(**kwargs)
 
     def create_lr_scheduler(self, optimizer: torch.optim.Optimizer) -> torch.optim.lr_scheduler.LRScheduler:
@@ -774,13 +938,7 @@ class TrainerArgs(PrecisionMixin, PolicyMixin):
         if not self.hook:
             return TrainHook()  # empty hook
 
-        if isinstance(self.hook, dict):
-            if 'type' in self.hook:
-                hook_config = HookConfig(**self.hook)
-            else:
-                hook_config = HookMapConfig(**self.hook)
-        else:
-            hook_config = self.hook
+        hook_config = self.hook
 
         if isinstance(hook_config, HookConfig):
             kwargs = self.create_kwarg(hook_config.args)

@@ -75,5 +75,14 @@ try:
     parser.register(apex_fused_rms_norm_anno)(FusedRMSNormFunction.apply)
     parser.register(apex_fused_rms_norm_affine_anno)(FusedRMSNormAffineFunction.apply)
 
+
+    # wrap at a higher level since `Function.apply` may not be called in newer versions of apex
+    from apex.normalization.fused_layer_norm import fused_layer_norm, fused_layer_norm_affine, fused_rms_norm, fused_rms_norm_affine
+
+    parser.register(apex_fused_layer_norm_anno)(fused_layer_norm)
+    parser.register(apex_fused_layer_norm_affine_anno)(fused_layer_norm_affine)
+    parser.register(apex_fused_rms_norm_anno)(fused_rms_norm)
+    parser.register(apex_fused_rms_norm_affine_anno)(fused_rms_norm_affine)
+
 except:
     _logger.warning('skip apex ops as it is not installed.')

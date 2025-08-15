@@ -1,6 +1,8 @@
 #  Copyright (c) Microsoft Corporation.
 #  Licensed under the MIT License.
 
+import builtins
+import importlib
 from contextlib import contextmanager
 from functools import wraps
 from typing import (
@@ -180,6 +182,7 @@ def enforce_zero_num_worker(cls) -> Generator[None, None, None]:
     def _new__init__(self, *args, **kwargs) -> None:
         kwargs['num_workers'] = 0
         kwargs['prefetch_factor'] = None
+        kwargs['persistent_workers'] = False
         _old__init__(self, *args, **kwargs)
     cls.__init__ = _new__init__
     yield
@@ -320,6 +323,41 @@ def fields(model: TDataClass, /) -> TDataClass:
     This is a workaround for the lack of `__name__` of dataclass field.
     """
     return cast(TDataClass, _GetFields(model))
+
+
+def load_type(type_name: str):
+    """
+    Load function/class from its full qualified name
+    """
+    if callable(type_name):  # a function or class
+        return type_name
+
+    parts = type_name.split('.')
+
+    last_ex = None
+    # s: the number of parts to be the namespace
+    # s == 0: use builtins
+    # so the range() part includes 0 (with stop=-1)
+    for s in range(len(parts) - 1, -1, -1):
+        if s == 0:
+            nm = builtins
+        else:
+            namespace = '.'.join(parts[:s])
+            try:
+                nm = importlib.import_module(namespace)
+                break
+            except (ImportError, ModuleNotFoundError) as e:
+                last_ex = e
+
+    try:
+        for i in range(s, len(parts)):
+            nm = getattr(nm, parts[i])
+        return nm
+    except AttributeError as e:
+        # give a hint of the import error
+        # TODO: a better way?
+        e.__context__ = last_ex
+        raise RuntimeError(f"Failed to load type {type_name}") from e
 
 
 class accum_mode:

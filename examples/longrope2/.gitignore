@@ -1,0 +1,7 @@
+data/fineweb-edu*
+data/RedPajama-Data-1T*
+data/mix-context-win-*
+*.log
+runs
+checkpoints*/
+gpucore.*

@@ -695,6 +695,8 @@ class IRDimops(IRFwOperation):
                  signature: str, annos: Tuple[str],
                  inputs: List[Union[IRTensor, IRObject]],
                  transform_rules: Optional[Tuple[TransformRule]] = None,
+                 *,
+                 constant_foldable=False,
                  **kwargs):
         """!
         Create a IRDimops
@@ -732,7 +734,7 @@ class IRDimops(IRFwOperation):
             )
 
         n_outputs = len(self._oannos)
-        super().__init__(name, signature, inputs, n_outputs, **kwargs)
+        super().__init__(name, signature, inputs, n_outputs, constant_foldable=constant_foldable, **kwargs)
 
     @property
     def anno(self) -> OpAnno:

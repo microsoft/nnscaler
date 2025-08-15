@@ -17,7 +17,8 @@ class IRFwOperation(IRCell):
     """
 
     def __init__(self, name: str, signature: str,
-                 inputs: List[IRObject], num_outputs: int, **kwargs):
+                 inputs: List[IRObject], num_outputs: int,
+                 *, constant_foldable=False, **kwargs):
         """!
         Create a forward operation.
 
@@ -28,6 +29,7 @@ class IRFwOperation(IRCell):
         """
         # recompute schedule
         self._recompute = None
+        self._constant_foldable = constant_foldable
         super().__init__(name, signature, len(inputs), num_outputs)
 
         # setup input
@@ -75,6 +77,14 @@ class IRFwOperation(IRCell):
                     f'find shape inference not match: {outputs[oidx].shape} vs {infered_shapes[oidx]}'
                     f'\nnode: {self}'
                 )
+
+    @property
+    def constant_foldable(self) -> bool:
+        """
+        Get whether the operator is constant foldable.
+        Constant foldable operators can be folded during graph optimization.
+        """
+        return self._constant_foldable
 
     @property
     def recompute(self) -> Optional[int]:

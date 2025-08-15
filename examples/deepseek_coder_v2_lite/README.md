@@ -11,7 +11,7 @@ To run this example, you need to install the following packages:
 ```text
 nnscaler
 transformers==4.40.0
-datasets==2.20.0
+datasets==3.6.0
 apex
 flash-attn
 grouped_gemm==1.1.4

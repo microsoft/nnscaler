@@ -221,6 +221,9 @@ def test_Where():
 
 
 def test_FullSlice():
+    op = F.FullSlice(IRTensor([2, 3, 4]), None)
+    assert len(op._annos_candidates) == 1 and op._annos_candidates[0] == 'a b c, ? -> 1 a b c'
+
     op = F.FullSlice(IRTensor([2, 3, 4]), 1, [1.2, -1], 2)
     assert len(op._annos_candidates) == 1 and op._annos_candidates[0] == 'a^ b^ c^, ?, ?, ? -> 2'
 
@@ -963,6 +966,20 @@ def test_Split():
     assert len(op._annos_candidates) == 1 and op._annos_candidates[0] == '5 b c d -> 2 b c d, 2 b c d, 1 b c d'
     op = F.Split(IRTensor([7, 3, 4, 2]), split_size_or_sections=IRObject(value=[2, 2, 3], is_constant=False))
     assert len(op._annos_candidates) == 1 and op._annos_candidates[0] == '7 b c d -> 2 b c d, 2 b c d, 3 b c d'
+
+
+def test_ViewAsComplex():
+    op = F.ViewAsComplex(IRTensor([2, 3, 2]))
+    assert len(op._annos_candidates) == 1 and op._annos_candidates[0] == 'a b 2 -> a b'
+    op = F.ViewAsComplex(IRTensor([2]))
+    assert len(op._annos_candidates) == 1 and op._annos_candidates[0] == '2 -> 1'
+
+
+def test_ViewAsReal():
+    op = F.ViewAsReal(IRTensor([2, 3]))
+    assert len(op._annos_candidates) == 1 and op._annos_candidates[0] == 'a b -> a b 2'
+    op = F.ViewAsReal(IRTensor(shape=None))
+    assert len(op._annos_candidates) == 1 and op._annos_candidates[0] == '1 -> 2'
 
 
 def factors(n):

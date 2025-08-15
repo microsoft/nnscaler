@@ -262,21 +262,49 @@ def CubeArange(start: Union[int, IRObject], end: Union[int, IRObject], step: Uni
     return IRDimops(CubeArange, 'arange', signature, [anno], [], rules, **kwargs)
 
 
-def Arange(*args, out=None, dtype=None, layout=None,
+def Arange(*args, start=None, end=None, step=None, out=None, dtype=None, layout=None,
            device=None, requires_grad=False, signature=None):
     """
     torch.arange(start=0, end, step=1, *, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False) → Tensor
     """
     assert layout is None
-    if len(args) == 1:
-        start, end, step = 0, args[0], 1
+    if len(args) == 0:
+        if end is None:
+            # torch.arange() is invalid
+            raise ValueError("torch.arange() requires end to be set")
+        if start is None and step is not None:
+            # torch.arange(end=end, step=step) is invalid
+            raise ValueError("start should be set when step is provided")
+        resolved_start, resolved_end, resolved_step = \
+            (0 if start is None else start), end, (1 if step is None else step)
+    elif len(args) == 1:
+        if start is not None:
+            # torch.arange(number, start=start) is invalid
+            # torch.arange(number, start=start, end=end) is invalid
+            # torch.arange(number, start=start, step=step) is invalid
+            # torch.arange(number, start=start, end=end, step=step) is invalid
+            raise ValueError("start should not be set when only one argument is provided")
+        if end is None and step is not None:
+            # torch.arange(number, step=step) is invalid
+            raise ValueError("end should be set when step is provided")
+        if end is None:
+            # case 1: torch.arange(number)  # number is end
+            resolved_start, resolved_end, resolved_step = 0, args[0], 1
+        else:
+            # case 2: torch.arange(number, end=end)  # number is start
+            # or torch.arange(number, end=end, step=step)  # number is start
+            resolved_start, resolved_end, resolved_step = args[0], end, (1 if step is None else step)
     elif len(args) == 2:
-        start, end, step = args[0], args[1], 1
+        if start is not None or end is not None:
+            raise ValueError("start, end should not be set when two arguments are provided")
+        resolved_start, resolved_end, resolved_step = args[0], args[1], (1 if step is None else step)
     elif len(args) == 3:
-        start, end, step = args
+        resolved_start, resolved_end, resolved_step = args
+        if start is not None or end is not None or step is not None:
+            raise ValueError("start, end, step should not be set when three arguments are provided")
     else:
-        raise RuntimeError(f'Invalid number {len(args)} of args in Arange.')
-    return CubeArange(start, end, step, dtype, requires_grad=requires_grad)
+        raise ValueError(f'Invalid number {len(args)} of args in Arange.')
+    return CubeArange(resolved_start, resolved_end, resolved_step, dtype, requires_grad=requires_grad)
 
 
 def CubeLinspace(start: Union[int, IRObject], end: Union[int, IRObject], steps: Union[int, IRObject],
@@ -867,6 +895,35 @@ def Clamp(input, min=None, max=None, *, out=None, signature = None):
     assert out is None
     annos = ['* -> *']
     return IRDimops(Clamp, 'clamp', signature, annos, [input], min=min, max=max)
+
+
+def ViewAsComplex(input, signature = None):
+    """
+    torch.view_as_complex(input)
+    """
+    assert input.shape[-1] == 2
+    edim_in = ShapeAnno.create_shape_str(input.shape)
+    edim_in[-1] = '2'
+    if len(edim_in) == 1:
+        edim_ou = ['1']
+    else:
+        edim_ou = copy.copy(edim_in[:-1])
+    anno = OpAnno.create_op_str([edim_in], [edim_ou])
+    return IRDimops(ViewAsComplex, 'view_as_complex', signature, [anno], [input])
+
+
+def ViewAsReal(input, signature = None):
+    """
+    torch.view_as_real(input)
+    """
+    if input.is_scalar_tensor():
+        edim_in, edim_ou = ['1'], ['2']
+    else:
+        edim_in = ShapeAnno.create_shape_str(input.shape)
+        edim_ou = copy.copy(edim_in)
+        edim_ou.append('2')
+    anno = OpAnno.create_op_str([edim_in], [edim_ou])
+    return IRDimops(ViewAsReal, 'view_as_real', signature, [anno], [input])
 
 
 def ClampMin(input, min, *, out=None, signature = None):
@@ -2437,7 +2494,7 @@ def GetItem(a: Any, b: Any, signature = None) -> Union[Any, IRPyFunc]:
     # tensor slice
     if isinstance(obj, IRTensor):
         # TODO: support general tensor slicing: https://pytorch.org/cppdocs/notes/tensor_indexing.html
-        index = (index,) if isinstance(index, (int, slice, IRTensor, IRObject)) else tuple(index)
+        index = (index,) if isinstance(index, (int, slice, IRTensor, IRObject, type(None))) else tuple(index)
         return FullSlice(obj, *index)
     # object slice
     if isinstance(obj, IRObject):
@@ -3328,6 +3385,16 @@ def Sigmoid(input, *, out=None, signature=None):
         raise ValueError("Expected 'out' to be None")
     annos = ['* -> *']
     return IRDimops(Sigmoid, 'sigmoid', signature, annos, [input])
+
+
+def Item(input, signature = None):
+    """
+    torch.Tensor.item()
+    """
+    # set output to IRObject.missing,
+    # because the output is unknown here.
+    # It will be filled with real value in parser.
+    return IRPyFunc(signature, inputs=[input], outputs=[IRObject.missing], constant_foldable=False)
 
 
 def DictKeys(o: Union[Dict, IRObject], signature=None):

@@ -108,7 +108,7 @@ def _check_deduped(model: torch.nn.Module, ckpt_dir):
         ckpt_dir / CKPT_FILE_NAME_TEMPLATE.format(i)
         for i in range(torch.distributed.get_world_size())
     ]
-    ckpt_state_dicts = [torch.load(f) for f in ckpt_files]
+    ckpt_state_dicts = [torch.load(f, weights_only=False) for f in ckpt_files]
     model_state_dicts = [ckpt['model'] for ckpt in ckpt_state_dicts]
     optimizer_state_dicts = [ckpt['optimizer'] for ckpt in ckpt_state_dicts]
     dedupped_model_state_dicts = [ckpt['model-dedup'] for ckpt in ckpt_state_dicts]

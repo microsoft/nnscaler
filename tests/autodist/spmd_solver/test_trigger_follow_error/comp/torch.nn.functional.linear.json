@@ -1,0 +1,92 @@
+{
+  "(2, 16, 16)-(16, 16)-(2, 16, 16) : torch.float32-torch.float32-torch.float32 : False-True-True": {
+    "in_mem_info": [
+      2048
+    ],
+    "param_mem_info": [
+      1024
+    ],
+    "buffer_mem_info": [],
+    "fw_span": 0.043286802247166634,
+    "bw_span": 0.1421193592250347,
+    "infer_memory": 5120,
+    "train_mem_info": [
+      2048
+    ],
+    "train_mem2in_idx": [
+      0
+    ]
+  },
+  "(1, 16, 16)-(16, 16)-(1, 16, 16) : torch.float32-torch.float32-torch.float32 : False-True-True": {
+    "in_mem_info": [
+      1024
+    ],
+    "param_mem_info": [
+      1024
+    ],
+    "buffer_mem_info": [],
+    "fw_span": 0.04025171510875225,
+    "bw_span": 0.18368610180914402,
+    "infer_memory": 3072,
+    "train_mem_info": [
+      1024
+    ],
+    "train_mem2in_idx": [
+      0
+    ]
+  },
+  "(2, 8, 16)-(16, 16)-(2, 8, 16) : torch.float32-torch.float32-torch.float32 : False-True-True": {
+    "in_mem_info": [
+      1024
+    ],
+    "param_mem_info": [
+      1024
+    ],
+    "buffer_mem_info": [],
+    "fw_span": 0.03982819616794586,
+    "bw_span": 0.18744319677352905,
+    "infer_memory": 3072,
+    "train_mem_info": [
+      1024
+    ],
+    "train_mem2in_idx": [
+      0
+    ]
+  },
+  "(2, 16, 8)-(16, 8)-(2, 16, 16) : torch.float32-torch.float32-torch.float32 : False-True-True": {
+    "in_mem_info": [
+      1024
+    ],
+    "param_mem_info": [
+      512
+    ],
+    "buffer_mem_info": [],
+    "fw_span": 0.04101274535059929,
+    "bw_span": 0.18919017165899277,
+    "infer_memory": 3584,
+    "train_mem_info": [
+      1024
+    ],
+    "train_mem2in_idx": [
+      0
+    ]
+  },
+  "(2, 16, 16)-(8, 16)-(2, 16, 8) : torch.float32-torch.float32-torch.float32 : False-True-True": {
+    "in_mem_info": [
+      2048
+    ],
+    "param_mem_info": [
+      512
+    ],
+    "buffer_mem_info": [],
+    "fw_span": 0.043114274740219116,
+    "bw_span": 0.18649823032319546,
+    "infer_memory": 3584,
+    "train_mem_info": [
+      2048
+    ],
+    "train_mem2in_idx": [
+      0
+    ]
+  }
+}

@@ -160,7 +160,7 @@ class ConcreteTracer(TracerBase):
             node.meta['nn_module_stack'] = collections.OrderedDict()
 
         def unwrap_nested_proxy(proxy: ep.ConcreteProxy):
-                return pytree_utils.tree_map_only(ep.ConcreteProxy, unwrap_nested_proxy, proxy.value)
+            return pytree_utils.tree_map_only(ep.ConcreteProxy, unwrap_nested_proxy, proxy.value)
 
         # unwrap all proxy in the node result here, because no proxy should be record in the tensor metadata
         node_result = pytree_utils.tree_map_only(ep.ConcreteProxy, unwrap_nested_proxy, node_result)
@@ -189,8 +189,10 @@ class ConcreteTracer(TracerBase):
 
             args_unwrapped = pytree_utils.tree_map_only(ep.ConcreteProxy, unwrap_nested_proxy, args)
             kwargs_unwrapped = pytree_utils.tree_map_only(ep.ConcreteProxy, unwrap_nested_proxy, kwargs)
-
-            if self.need_revert(target):
+            # A lot of autograd functions are using torch.compile
+            # We must revert the patcher to the original function so torch.compile can work.
+            # (For non-torch.compile functions, this is not necessary, but it is safe to do so.)
+            if self.need_revert(target) or wrap_utils.is_autograd_apply(target):
                 with self.patcher.revert():
                     value_unwrapped, args_run, kwargs_run = self.strategy.run_target(kind, target, args_unwrapped, kwargs_unwrapped)
             else:

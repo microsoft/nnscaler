@@ -10,7 +10,7 @@ import huggingface_hub
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, DataCollatorForLanguageModeling
 from lm_models.utils import nnscaler_lm_init
-from chunk_linear_cross_entropy import chunk_linear_cross_entropy
+from customized_ops.chunk_linear_cross_entropy import chunk_linear_cross_entropy
 
 from nnscaler.utils import set_default_logger_level
 from nnscaler.cli.trainer import Trainer

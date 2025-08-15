@@ -1,8 +1,6 @@
 #  Copyright (c) Microsoft Corporation.
 #  Licensed under the MIT License.
 
-import pytest
-
 from nnscaler.graph.tracer import concrete_trace, wrap_utils
 from nnscaler.graph.tracer.metadata import DICT_KEYS_TYPE, DICT_VALUES_TYPE, DICT_ITEMS_TYPE
 import torch

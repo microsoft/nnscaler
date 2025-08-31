@@ -17,7 +17,6 @@ import json
 import yaml
 import numpy
 import logging
-import functools
 from dataclasses import dataclass, asdict
 from collections import defaultdict
 from pathlib import Path
@@ -92,61 +91,6 @@ class ModuleMemCostDesc:
 
 
 class SPMDSolver:
-    """
-    Assume the dataflow graph is
-           a
-          / \
-         b   c
-         |  / \
-         d  e  f
-         | /   |
-         g     h
-    and operators are stored in a topological order [a, b, d, c, e, f, g, h].
-
-    In SPMD solver, dynamic programming is used to find the optimal partition plan where
-    dp[p(u), M] is the optimal plan for the subgraph ending with u in partition state p,
-    with memory bound M. if v is the predecessor of u in the topological order, then
-    dp[p(u), M] = min(dp[q(v), M - mem(p(u))] + comm_cost(p(u), q(v))) + comp_cost(p(u)) + comm_cost(p(u))
-    where q(v) is the partition state of v, mem(p(u)) is the memory cost of p(u),
-    comm_cost(p(u), q(v)) is the communication cost between p(u) and q(v), and
-    comp_cost(p(u)) is the computation cost of p(u), comm_cost(p(u)) is the communication
-    cost of p(u) (like the allreduce cost in model update).
-
-    However, u and v may be disconnected in the dataflow graph, like [d, c], [e, f], [f, g]
-    and [g, h] in the example above. To calculate the communication cost between p(u) and q(v),
-    we need to store additional information in the partition state. For example, we need to maintain
-    the partition state of node d in the partition state of node c, so that we can calculate the
-    communication cost when reaching node g.
-
-    To achieve this, we calcuate the `cut_ops` for each node, which is the set of nodes that
-    need to be maintained in the partition state of the current node. The cut ops for the example
-    above are:
-    a: [a]
-    b: [a, b]
-    d: [a, d]
-    c: [d, c]
-    e: [d, c, e]
-    f: [d, e, f]
-    g: [f, g]
-    h: [h]
-
-    To be more specific, the `cut_ops` is calculated by the following steps:
-    1. calculate the `out_degs` for each node, which is the number of consumers of the node
-    2. traverse the nodes in the topological order
-        - decrease each producer's `out_degs` by 1, if the `out_degs` is 0, remove the producer
-          from the `unclosed_idx` and set current node's idx (time) as the producer's 'close_time'
-        - set current node's `cut_ops` as the union of `unclosed_idx` and the node itself
-        - add the node to `unclosed_idx` if its #consumers > 0
-
-    However, in real-world scenarios, certain positions might have a large number of `cut_ops`,
-    and each op may have more than one partitioning strategy (for example, when the input data flow graph
-    is a complete graph). In such cases, the search space becomes very large, making it impossible to solve
-    within limited time and space. To help users reduce the search space, we calculate a metric called
-    `importance_ratio` for each op, which describes the percentage reduction in search space if the partitioning
-    strategy for that op is restricted to just one.
-    Thus, users can view the top 10 ops with the highest `importance ratio` output by autodist and use the
-    `partition constraint` interface to restrict the partitioning space of these ops, thereby speeding up the search process.
-    """
 
     def __init__(
         self,
@@ -174,9 +118,42 @@ class SPMDSolver:
             _logger.info('no partition constraint is loaded')
 
         self.cost_database = graph.cost_database
-        self.cost_database.profile_comp(self.device_num, autodist_config.parallel_profile, autodist_config.re_profile)
+        self.cost_database.profile_comp(self.device_num)
         self.stage_num = stage_num
 
+        # assume the dataflow graph is
+        #        a
+        #       / \
+        #      b   c
+        #      |  / \
+        #      d  e  f
+        #      | /   |
+        #      g     h
+        # the ops are stored in a topological order [a, b, d, c, e, f, g, h]
+        # in spmd solver, dynamic programming is used to find the optimal partition plan
+        # dp[p(u), M] is the optimal plan for the subgraph ending with u in partition state p,
+        # with memory bound M. if v is the predecessor of u in the topological order, then
+        # dp[p(u), M] = min(dp[q(v), M - mem(p(u))] + comm_cost(p(u), q(v))) + comp_cost(p(u)) + comm_cost(p(u))
+        # where q(v) is the partition state of v, mem(p(u)) is the memory cost of p(u),
+        # comm_cost(p(u), q(v)) is the communication cost between p(u) and q(v), and
+        # comp_cost(p(u)) is the computation cost of p(u), comm_cost(p(u)) is the communication
+        # cost of p(u) (like the allreduce cost in model update).
+        # However, u and v may not be connected in the dataflow graph, like [d, c], [e, f], [f, g]
+        # and [g, h] in the example above. To calculate the communication cost between p(u) and q(v),
+        # we need to store additional information in the partition state. For example, we need to maintain
+        # the partition state of node d in the partition state of node c, so that we can calculate the
+        # communication cost when reaching node g.
+        # to achieve this, we calcuate the 'cut ops' for each node, which is the set of nodes that
+        # need to be maintained in the partition state of the current node. The cut ops for the example
+        # above are:
+        # a: [a]
+        # b: [a, b]
+        # d: [a, d]
+        # c: [d, c]
+        # e: [d, c, e]
+        # f: [d, e, f]
+        # g: [f, g]
+        # h: [h]
         self.initialize()
 
     def initialize(self):
@@ -366,7 +343,7 @@ class SPMDSolver:
                                 return False
 
             if p_ids[0] != -1:
-                if not operator.ir_cell.algorithm('dim').satisfy(
+                if not operator.ir_cell.algorithms('dim').satisfy(
                         p_idx, p_dim, p_nums[0]):
                     return False
             return True
@@ -470,27 +447,17 @@ class SPMDSolver:
         self.follow_ids = list(range(self.graph.op_num))
         self.father_ids = list(range(self.graph.op_num))
 
-        def follow(op_idx: int, follow_idx: int):
-            # an operator is not allowed to be followed if it has a sum dimension
-            # this constraint is added to make sure the output shapes of the partitions
-            # are different.
-            follow_op = self.get_operator(follow_idx)
-            if not follow_op.has_sum_dim and not follow_op.has_attr:
-                self.follow_ids[op_idx] = follow_idx
-                self.father_ids[op_idx] = self.get_father_id(follow_idx)
-
         for i, op in enumerate(self.graph.operator_list):
+            # - op consumes tensors from only one producer
+            # - op has only one input tensor
+            # - the producer has only one input tensor
             if len(self.producers[i]) == 1:
-                # consumes tensors from only one producer and has only one input tensor
                 if len(op.in_tensors) == 1:
-                    follow(i, self.producers[i][0])
-                elif not op.in_tensors and isinstance(op.ir_cell, IRDimops):
-                    raise RuntimeError(f'find operator {op.ir_cell} has producer but no input tensor')
-            elif len(self.producers[i]) > 1:
-                producer_father_ids = [self.get_father_id(j) for j in self.producers[i]]
-                # all producers have the same father
-                if len(set(producer_father_ids)) == 1:
-                    follow(i, self.producers[i][0])
+                    j = self.producers[i][0]
+                    # constrain the following chain starts from a unary operator
+                    if len(self.graph.operator_list[j].in_tensors) == 1:
+                        self.follow_ids[i] = j
+                        self.father_ids[i] = self.get_father_id(j)
 
         _logger.info('finish building following relationships')
 
@@ -549,19 +516,20 @@ class SPMDSolver:
                         self.get_op_partition_count(i))))
                     father_id2preserved_pids[i] = set(p_fathers[-1])
                 else:
-                    # store the candidate father idxs for each partition
-                    cur_p_fathers = [-1 for _ in range(self.get_op_partition_count(i))]
+                    cur_p_fathers = [-1] * self.get_op_partition_count(i)
                     for producer in self.producers[i]:
                         if self.get_father_id(producer) != fi:
                             continue
                         # assume there is only one tensor from producer to consumer
                         idx_map = find_idx_map(self.get_operator(producer),
                                                self.get_operator(i))
-                        if not idx_map:
-                            raise RuntimeError(f'find no idx_map {idx_map} between {self.get_operator(producer)} and {self.get_operator(i)}')
+                        if len(idx_map) != 1:
+                            raise RuntimeError(
+                                f'find multiple or no idx_map {idx_map}')
                         u, v = idx_map[0]
                         for j, tgt_p in enumerate(self._op_partitions[i]):
-                            p_father = []
+                            have_changed = False
+                            p_father = -1
                             for k, src_p in enumerate(
                                     self._op_partitions[producer]):
                                 # use shape to check follow relationship between partitions
@@ -569,22 +537,17 @@ class SPMDSolver:
                                 if src_p.ir_cell.outputs()[u].shape == tgt_p.ir_cell.inputs()[v].shape and \
                                 not src_p.is_partial_val:
                                     p_producer = p_fathers[producer][k]
-                                    if p_producer != -1:
-                                        p_father.append(p_producer)
-                            if cur_p_fathers[j] == -1:
-                                cur_p_fathers[j] = p_father
-                            else:
-                                cur_p_fathers[j] = list(set(cur_p_fathers[j]).intersection(set(p_father)))
-                    for j in range(self.get_op_partition_count(i)):
-                        if not cur_p_fathers[j]:
-                            cur_p_fathers[j] = -1
-                        else:
-                            error_msg = f'find multiple p_fathers {cur_p_fathers[j]} for {self.get_operator(i)}' \
-                                f', this may due to its producer has multiple partitions but hard to distinguish' \
-                                f' at current operator\'s perspective, you can try to\n 1. add partition constraint' \
-                                f' to the producer or the consumer \n 2. double check annotations of related ops'
-                            assert len(cur_p_fathers[j]) == 1, error_msg
-                            cur_p_fathers[j] = cur_p_fathers[j][0]
+                                    if p_producer == -1:
+                                        p_father = -1
+                                    else:
+                                        if not have_changed:
+                                            p_father = p_producer
+                                    have_changed = True
+                            # if p_father = -1, this partition will be filtered out
+                            if cur_p_fathers[j] != -1:
+                                assert p_father == cur_p_fathers[
+                                    j], f'{i} {self.get_operator(i).ir_cell} {fi} {self.get_operator(fi).ir_cell}'
+                            cur_p_fathers[j] = p_father
                     p_fathers.append(cur_p_fathers)
                     # -1 will be filtered out in the intersection operation below
                     father_id2preserved_pids[fi] = father_id2preserved_pids[
@@ -619,8 +582,8 @@ class SPMDSolver:
             cur_p_fathers = self.p_fathers[i]
             partitions = [None] * p_num
             for j, p_father in enumerate(self.p_fathers[i]):
-                if p_father == -1 or partitions[p_father] is not None:
-                    raise RuntimeError(f'illegal p_fathers {self.p_fathers[i]} for {self.get_operator(i).ir_cell}')
+                if p_father == -1:
+                    raise RuntimeError(f'find -1 in p_fathers for operator {i}')
                 partitions[p_father] = self._op_partitions[i][j]
             self._op_partitions[i] = partitions
             self.p_fathers[i] = list(range(p_num))
@@ -652,7 +615,7 @@ class SPMDSolver:
             assert all(weights_require_grad) or not any(
                 weights_require_grad
             ), f'expect all weights require grad or not, got {weights_require_grad}'
-            if isinstance(tgt_p, OpPartition) and any(weights_require_grad):
+            if isinstance(tgt_p, IRDimops) and any(weights_require_grad):
                 weight_comm_time = self.cost_database.calc_weight_update_time(
                     cur_partition=tgt_p)
             else:
@@ -660,12 +623,11 @@ class SPMDSolver:
         else:
             weight_comm_time = 0
 
-        cfg = self.autodist_config
-        if not cfg.consider_mem:
+        if not self.autodist_config.consider_mem:
             node_mem, node_buffer, act_mem, opt_transient_mem, in_mem = 0, 0, 0, 0, 0
         else:
             node_mem, node_buffer, act_mem, opt_transient_mem, in_mem = self.cost_database.get_mem_and_buffer(
-                tgt_p, self.is_train, self.stage_num, cfg.world_size, cfg.ngpus, cfg.zero_stage, cfg.zero_ngroups, cfg.opt_resident_coef, cfg.opt_transient_coef)
+                tgt_p, self.is_train, self.stage_num)
 
         # communication cost induced by partitioning activation tensors of the given op partition
         comm_vecs = []
@@ -715,8 +677,6 @@ class SPMDSolver:
 
     def calc_partition_info(self):
         self.partition_info: List[List[PartitionCostDesc]] = list()
-        state_num = 0
-        prefix_state_sums: List[int] = [0] * self.graph.op_num
         for i in range(self.graph.op_num):
             cur_info = []
             _logger.debug(f'calc partition info for {self.get_operator(i)}')
@@ -730,33 +690,6 @@ class SPMDSolver:
                 cur_info.append(cost_desc)
                 _logger.debug(f'{self._op_partitions[i][j]} {cost_desc}')
             self.partition_info.append(cur_info)
-            cut_partition_cnts = [self.get_op_partition_count(idx) for idx in self.cut_ops[i]]
-            cur_state_num = functools.reduce(lambda x, y: x * y, cut_partition_cnts, 1)
-            state_num += cur_state_num
-            prefix_state_sums[i] = state_num
-            _logger.debug(f'{i}-th operator follow {self.get_father_id(i)} with cut ops {self.cut_ops[i]}, {cut_partition_cnts}, {cur_state_num}')
-        _logger.info(f'total state num is {state_num}')
-        if state_num > 1024 * 1024:
-            _logger.warning(f'too many states, please consider to add constraints to partition spaces of following operators')
-        importance_ratios: List[Tuple[float, int]] = list()
-        desc_str = 'output each operator\'s importance ratio (percentages of states that can be reduced by forcing the operator to be partitioned in a single partition)\n'
-        for i in range(self.graph.op_num):
-            partition_cnt = self.get_op_partition_count(i)
-            if partition_cnt == 1:
-                continue
-            if i not in self.close_times:
-                continue
-            related_state_num = prefix_state_sums[self.close_times[i] - 1]
-            if i > 0:
-                related_state_num -= prefix_state_sums[i - 1]
-            ratio = related_state_num / partition_cnt / state_num * (partition_cnt - 1)
-            importance_ratios.append((ratio, i))
-        importance_ratios.sort(reverse=True)
-        for idx in range(min(10, len(importance_ratios))):
-            ratio, i = importance_ratios[idx]
-            node = self.get_operator(i).ir_cell
-            desc_str += f'operator {node} has {self.get_op_partition_count(i)} partitions, importance ratio {ratio:.3f}\nat {node.comment}\n\n'
-        _logger.debug(desc_str)
         _logger.info('finish spmd solver initializetion')
 
     def estimate_min_mem(self, start: int, end: int) -> int:
@@ -869,11 +802,8 @@ class SPMDSolver:
                 transient_mem_cost = transient_mem[0]
             else:
                 transient_mem_cost = transient_mem[0] + transient_mem[1]
-            transient_mem_cost *= self.autodist_config.transient_mem_coef
-            if not self.autodist_config.is_train:
-                transient_mem_cost /= 2
-        else:
-            transient_mem_cost = 0
+            if self.autodist_config.is_train:
+                transient_mem_cost *= 2
         cost += transient_mem_cost
         return ModuleMemCostDesc(cost, mem, act_mem, opt_transient_mem, recompute_mem_cost, transient_mem_cost)
 
@@ -921,7 +851,6 @@ class SPMDSolver:
         out_degs = [len(op.consumers) for op in self.graph.operator_list]
         unclosed_idx = set()
         self.cut_ops: List[List[int]] = list()
-        self.close_times: Dict[int, int] = dict()
         for i, op in enumerate(self.graph.operator_list):
             for pred in op.producers:
                 pred_idx = cid2idx[pred.ir_cell.cid]
@@ -929,7 +858,6 @@ class SPMDSolver:
                 out_degs[pred_idx] -= 1
                 if out_degs[pred_idx] == 0:
                     unclosed_idx.remove(pred_idx)
-                    self.close_times[pred_idx] = i
             ret = list(unclosed_idx) + [i]
             ret.sort()
             self.cut_ops.append(ret)
@@ -1079,9 +1007,9 @@ class SPMDSolver:
         prob += act_mem <= max_act_opt_transient
         prob += opt_transient_mem <= max_act_opt_transient
         if self.autodist_config.is_train:
-            transient_coef = 2 * self.autodist_config.transient_mem_coef
+            transient_coef = 4
         else:
-            transient_coef = self.autodist_config.transient_mem_coef
+            transient_coef = 2
         prob += mem - act_mem + max_act_opt_transient + transient_coef * max_transient + recompute_mem <= self.mem_bound
 
         # 4.3. constraint over e
@@ -1164,12 +1092,15 @@ class SPMDSolver:
                 offset += 1
         plans = []
         all_time_cost = objective
+        inner_time_cost = 0
         for i in range(start, end + 1):
             plans.append((i, s_val[i - start]))
+            p_cost_desc = self.partition_info[i][s_val[i - start]]
+            inner_time_cost += p_cost_desc.comp_time + p_cost_desc.weight_update_time
         mem_cost = self.calc_mem_cost(plans).total_cost
-        return SPMDSearchOutput(self.build_tp_desc(plans),
+        return SPMDSearchOutput(self.partition_path2desc(plans),
                                 mem_cost / 1024 / 1024 / 1024, all_time_cost,
-                                self.calc_inner_time_cost(plans))
+                                inner_time_cost)
 
     def do_ilp(self, intervals: List[Tuple[int, int]],
                topk: int) -> List[List[SPMDSearchOutput]]:
@@ -1187,31 +1118,23 @@ class SPMDSolver:
 
     def do_dp(self, intervals: List[Tuple[int, int]],
               topk: int) -> List[List[SPMDSearchOutput]]:
-        try:
-            import nnscaler.autodist.dp_solver as dp_solver
-        except ImportError:
-            raise RuntimeError(
-                'Failed to import dp_solver. '
-                'Please install nnscaler with: pip install -e .'
-            )
+        import cppimport.import_hook
+        import nnscaler.autodist.dp_solver as dp_solver
 
-        if self.autodist_config.memory_granularity < 1024:
-            raise RuntimeError('dp solver assumes the memory granularity is at least 1024 bytes')
-        buf_mul = self.autodist_config.transient_mem_coef
-        if not self.is_train: buf_mul /= 2
-        mem_divisor = self.autodist_config.memory_granularity
-        solver = dp_solver.DPSolver(self.autodist_config.verbose, self.mem_bound // mem_divisor, topk)
+        mode = 0 if self.is_train else 1
+        mem_div = 64
+        mem_bound = int(self.mem_bound) // mem_div
+        solver = dp_solver.DPSolver(self.autodist_config.verbose, mode, mem_bound, mem_div, topk)
         for start, end in intervals:
             solver.add_interval(start, end)
         for idx in range(self.graph.op_num):
-            op = self.graph.operator_list[idx]
             solver.add_node(idx, self.father_ids[idx], self.cut_ops[idx],
-            self.producers[idx], self.get_op_partition_count(idx), op.recompute, op.recompute_start_op, op.recompute_last_op)
+            self.producers[idx], self.get_op_partition_count(idx))
             for i, partition in enumerate(self._op_partitions[idx]):
                 p_cost_desc = self.partition_info[idx][i]
                 solver.add_partition(idx, i, p_cost_desc.comp_time + p_cost_desc.weight_update_time,
-                p_cost_desc.mem // mem_divisor, p_cost_desc.in_mem // mem_divisor, int(buf_mul * p_cost_desc.transient_mem // mem_divisor),
-                p_cost_desc.activation_mem // mem_divisor, p_cost_desc.opt_transient_mem // mem_divisor,
+                p_cost_desc.mem // mem_div, p_cost_desc.transient_mem // mem_div,
+                p_cost_desc.activation_mem // mem_div, p_cost_desc.opt_transient_mem // mem_div,
                 self.p_fathers[idx][i], p_cost_desc.comm_time)
         solver.solve()
         ret = []
@@ -1219,8 +1142,8 @@ class SPMDSolver:
             cpp_results = solver.get_results(start, end)
             descs = []
             for result in cpp_results:
-                desc = self.build_tp_desc(result.path)
-                descs.append(SPMDSearchOutput(desc, result.memory * mem_divisor / 1024 / 1024 / 1024, result.all_time, self.calc_inner_time_cost(result.path)))
+                desc = self.partition_path2desc(result.path)
+                descs.append(SPMDSearchOutput(desc, result.memory * mem_div / 1024 / 1024 / 1024, result.all_time, result.inner_time))
             ret.append(descs)
         return ret
 
@@ -1268,7 +1191,6 @@ class SPMDSolver:
                 sig2split_info[sig] = []
             sig2comp_time[sig] += desc.comp_time
             op_idx2comp_time[op_idx] = desc.comp_time
-            comp_time_sum += desc.comp_time
             comm_cost = 0
             for k, comm_vec in enumerate(desc.comm_time):
                 producer = self.producers[op_idx][k]
@@ -1288,6 +1210,7 @@ class SPMDSolver:
             if sig not in sig2comm_time:
                 sig2comm_time[sig] = 0
             sig2comm_time[sig] += comm_cost
+            comp_time_sum += desc.comp_time
             comm_time_sum += comm_cost
 
         sig2comp_time = sorted(sig2comp_time.items(), key=lambda x: x[1], reverse=True)
@@ -1389,41 +1312,18 @@ class SPMDSolver:
             raise RuntimeError(
                 f'unsupported solver {self.autodist_config.solver}')
 
-
-    def node_desc2idx(self, node_idx: int, node_desc: NodePartitionDesc) -> int:
-        '''
-        convert the node partition description to the corresponding index
-
-        Args:
-            node_idx (int): the index of the node
-            node_desc (NodePartitionDesc): the partition description of the node
-
-        Returns:
-            int: the index of the partition
-        '''
-        for i, p in enumerate(self._op_partitions[node_idx]):
-            op = p.operator
-            p_info = tuple([
-                (op.dim_id2pos(dim), num)
-                for dim, num in zip(p.partition_dims, p.partition_nums)
-            ])
-            if p_info == node_desc.desc:
-                return i
-        raise RuntimeError(f'fail to find the partition {node_desc} for node {self.get_operator(node_idx)}')
-
-
     def partition_path2desc(
-            self, plan: List[Tuple[int, int]]) -> Dict[int, NodePartitionDesc]:
+            self, plans: List[Tuple[int, int]]) -> Dict[int, NodePartitionDesc]:
         '''
         convert the partition representation: (op_idx, partition_idx) to (op_cid, partition_desc)
 
         Args:
-            plan (List[Tuple[int, int]]): the partition plan to be converted
+            plans (List[Tuple[int, int]]): the partition plan to be converted
 
         Returns:
             Dict[int, NodePartitionDesc]: the converted partition plan
         '''
-        partitions = [self._op_partitions[u][v] for u, v in plan]
+        partitions = [self._op_partitions[u][v] for u, v in plans]
 
         partition_descs = {}
         for p in partitions:
@@ -1434,23 +1334,10 @@ class SPMDSolver:
             ])
             partition_descs[op.ir_cell.cid] = NodePartitionDesc(desc=p_info)
 
-        return partition_descs
-
-
-    def build_tp_desc(self, plan: List[Tuple[int, int]]) -> TensorParallelDesc:
-        '''
-        build the tensor parallelism description for the plan
-
-        Args:
-            plan (List[Tuple[int, int]]): the plan to be converted
-
-        Returns:
-            TensorParallelDesc: the tensor parallelism description
-        '''
-        return TensorParallelDesc(partition_descs=self.partition_path2desc(plan),
+        return TensorParallelDesc(partition_descs=partition_descs,
                                   mesh_desc=self.mesh_desc,
                                   recompute_groups=[],
-                                  analysis=self.analyze_plan(plan))
+                                  analysis=self.analyze_plan(plans))
 
 
 def analysis_pretty_printer(analysis: Dict[str, Any]) -> str:

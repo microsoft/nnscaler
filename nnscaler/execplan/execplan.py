@@ -40,19 +40,19 @@ class ExeReuseCell(IRCell):
     @property
     def device(self) -> int:
         return self._cell.device
-
+    
     @property
     def cell(self) -> IRCell:
         return self._cell
-
+    
     def isfw(self) -> bool:
         return self._cell.isfw()
-
+    
     def dispatch(self, devid: int, _mirror = True):
         assert len(self.device) > 0 and devid in self.device, f"Cannot dispatch of ReuseCell {self} to device {devid}"
         if devid in self._cached_dispatched:
             return self._cached_dispatched[devid]
-
+        
         inputs = []
         for t, cell_t in zip(self._inputs, self._cell.inputs()):
             if isinstance(cell_t, IRSubTensor) and devid not in cell_t.device:
@@ -70,7 +70,7 @@ class ExeReuseCell(IRCell):
             IRCell.make_pair(reuse, mreuse)
         self._cached_dispatched[devid] = reuse
         return reuse
-
+    
     def __repr__(self) -> str:
         return f'ReuseCell-{self.device}(name={self._cell.name}{self._cell.cid}, inputs={self.inputs()}, outputs={self.outputs()})'
 
@@ -96,9 +96,9 @@ class ExecutionPlan:
         A schedule plan has multiple micro-batches, where each micro-batch
         goes through the all operators in the model graph. So an operator
         will be executed multiple times with different data from different micro-batches.
-
-        The IRGraph only contains operators / IRTensors / IRObjects of one micro-batch.
-        To represent data of a different micro-batch, we need to map the data in IRGraph to a
+        
+        The IRGraph only contains operators / IRTensors / IRObjects of one micro-batch. 
+        To represent data of a different micro-batch, we need to map the data in IRGraph to a 
         new one with different IDs.
         """
         graph_inputs = schedplan.graph.inputs()
@@ -124,7 +124,7 @@ class ExecutionPlan:
                     micro_objs.setdefault(micro_idx, {}).setdefault(tensor.parent.grad, fgrad)
                     t.grad = fgrad.select(tensor.grad.indmap, tensor.grad.valmap)
             return t
-
+        
         micro_fcells: Dict[(int, IRCell), ExeReuseCell] = {}
         def block2reuse(node: Block) -> ExeReuseCell:
             if node.content.isfw():
@@ -144,7 +144,7 @@ class ExecutionPlan:
             else:
                 mcell = block2reuse(Block(node.content.mirror, node.mid, node.span))
                 return mcell.mirror
-
+            
         topo_seqs: List[IRCell] = []
         for block in schedplan.nodes():
             if isinstance(block, Block):
@@ -152,7 +152,7 @@ class ExecutionPlan:
             assert isinstance(block, IRCell)
             topo_seqs.append(block)
 
-        # set up returned outputs by packing output results from each micro-batch into a list
+        # set up returning outputs by packing output results from each micro-batch into a list
         outputs = []
         for mid in range(schedplan.nmicros):
             outs = []
@@ -291,7 +291,7 @@ class ExecutionPlan:
                 if isinstance(node, IRDataOperation): return 0
                 if isinstance(node, IRAdapter): return 0.25
                 return 1 if node.isfw() else 2
-
+        
         if map2mem is None:
             def map2mem(node):
                 if isinstance(node, IRSegment):
@@ -359,7 +359,7 @@ class ExecutionPlan:
                             start_time = max(start_time, end_time)
                             break
                 start_times.append(start_time)
-
+            
             start_time = max(start_times)
             for device in node.device:
                 # time
@@ -409,7 +409,7 @@ class ExecutionPlan:
                 unwrap_node = node.cell if isinstance(node, ExeReuseCell) else node
                 if end - start == 0:
                     continue
-                # draw
+                # draw 
                 color = map2color(unwrap_node)
                 rec = Rectangle((start, devid + 0.5), end-start, 1,
                                 color=color, ec='black', lw=1.5)
@@ -428,7 +428,7 @@ class ExecutionPlan:
                         break
                 fontsize[0] = min(fontsize[0], fs)
                 txts.append(txt)
-
+            
         # set font size to same
         for txt in txts:
             txt.set_fontsize(fontsize[0])

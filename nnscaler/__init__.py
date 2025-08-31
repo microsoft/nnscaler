@@ -10,20 +10,12 @@ from .parallel import (
     parallelize,
     build_optimizer,
     merge_state_dicts,
-    load_merged_state_dict,
+    load_merged_state_dicts,
     deduped_state_dict,
     load_deduped_state_dict,
     broadcast_weights,
-    load_sharded_state_dict,
-    sync_grad_when,
 )
 from nnscaler.graph.parser.register import register_op
-from nnscaler.runtime.function.function import (
-    anchor,
-    constant_folding,
-    no_constant_folding,
-    fold_constant,
-)
 
 
 def init():
@@ -45,21 +37,8 @@ def init():
         None
     """
     from nnscaler import runtime
-    runtime.device.init_device()
+    _ = runtime.device.DeviceGroup()
     _ = runtime.resource.EnvResource()
-
-
-def uninit():
-    """
-    Uninitialize the nnscaler library.
-
-    It will destroy the torch distributed nccl process_group
-
-    Returns:
-        None
-    """
-    from nnscaler.runtime.device import uninit_device
-    uninit_device()
 
 
 def _check_torch_version():
@@ -68,7 +47,7 @@ def _check_torch_version():
     torch_version = str(torch.__version__).split('+')[0]
     torch_version = tuple(int(v) for v in torch_version.split('.')[:2])
     if torch_version < (2, 0):
-        logging.warning(f"expected PyTorch version >= 2.0 but got {torch_version}")
+        logging.warn(f"expected PyTorch version >= 2.0 but got {torch_version}")
 
 
 _check_torch_version()

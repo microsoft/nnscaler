@@ -1,10 +1,8 @@
 #  Copyright (c) Microsoft Corporation.
 #  Licensed under the MIT License.
 
-from typing import Generator, Iterable, List, Any, Optional, Tuple, Dict
+from typing import Generator, Iterable, List, Any, Optional, Tuple
 import logging
-
-import torch
 
 from nnscaler.ir.cten import IRCell, IRTensor, IRObject
 from nnscaler.ir.tensor import IRSubTensor
@@ -47,8 +45,6 @@ def _safe_repr_value(val: Any, prefix_attr: Optional[str] = None) -> Any:
     Returns:
         the val that can be repr safely
     """
-    if isinstance(val, IRValue):
-        return val
     if isinstance(val, IRObject):
         tensor_name = val.name
         tensor_name = tensor_name.replace('.', '_')
@@ -65,21 +61,9 @@ def _safe_repr_value(val: Any, prefix_attr: Optional[str] = None) -> Any:
     elif isinstance(val, tuple):
         # TODO: support subclasses of tuple, like torch.Size?
         return tuple(_safe_repr_value(v, prefix_attr) for v in val)
-    elif isinstance(val, (int, str, bool, float, type(None), bytes, type(Ellipsis), torch.dtype)):
+    elif isinstance(val, (int, str, bool, float, type(None), bytes, type(Ellipsis))):
         return val
-    elif isinstance(val, torch.device):
-        # use device string representation
-        # this should be rarely used
-        # as we will ignore device parameters.
-        return val.type if val.index is None else f'{val.type}:{val.index}'
     raise ValueError(f'Unsupported data type: {type(val)}')
-
-
-def _safe_str_dict(val: Dict[str, Any], prefix_attr: Optional[str] = None) -> Dict[str, str]:
-    """
-    Return str-able value of a dict of tensors or values.
-    """
-    return {k: repr(_safe_repr_value(v, prefix_attr)) for k, v in val.items()}
 
 
 class CodeEmission:
@@ -110,7 +94,6 @@ class CodeEmission:
         """
         modifier = lambda t: IRValue(self.tensor_name(t, prefix_attr))
         val = IRSegment.modify_objects_of_complex(val, modifier)
-        # TODO: use repr() instead of str()
         return str(val)
 
     def tuple_name(self, tensors: List[Any],
@@ -129,7 +112,6 @@ class CodeEmission:
             if isinstance(t, IRTensor) and skip_attr and t.is_attr():
                 continue
             names.append(self.tensor_name(t, prefix_attr))
-        # TODO: use repr()
         name = '(' + ', '.join(names + ['']) + ')'
         return name
 
@@ -156,25 +138,17 @@ class CodeEmission:
     def kwargs_name(self, **kwargs) -> str:
         """Get kwarg name"""
         names = []
+        # FIXME make the str include `""`
+        # for name, val in kwargs.items():
+        #     if isinstance(val, str) and not val.startswith('self.'):
+        #         kwargs[name] = '"' + val + '"'
         # turn object into name
         modifier = lambda t: IRValue(self.tensor_name(t))
         kwargs = IRSegment.modify_objects_of_complex(kwargs, modifier)
         for name, val in kwargs.items():
-            # TODO: use repr() instead of str()
-            # names.append(f'{name}={repr(val)}')
-            # the problem here is current adapter prims use dtype as str for code generation
-            # It is too big change for now, and will fix it later.
             names.append(f'{name}={val}')
         name = ', '.join(names)
         return name
-
-    def kwargs_dict(self, **kwargs) -> Dict[str, str]:
-        """Get kwarg dict
-        Key is the orignial string
-        And value is the `repr` of the value,
-        so you can safely use it in the code generation
-        """
-        return _safe_str_dict(kwargs)
 
 
 class FuncEmission(CodeEmission):
@@ -220,58 +194,24 @@ class FuncEmission(CodeEmission):
         # setup arg string
         inputs = [self.tensor_name(t, prefix_attr=prefix_attr) for t in node.inputs()]
         # setup kwarg string
-        kwargs = self.kwargs_dict(**node.kwargs)
+        kwargs = dict(**node.kwargs)
+        for name, val in kwargs.items():
+            if isinstance(val, str) and not val.startswith('self.'):
+                kwargs[name] = '"' + val + '"'
+        # turn IRObject into name
+        modifier = lambda t: IRValue(self.tensor_name(t))
+        kwargs = IRSegment.modify_objects_of_complex(kwargs, modifier)
 
         emit_rule = self._emit_rules.map(signature)
         body = emit_rule(node, inputs, kwargs, runtime_devid, plan_ndevs, runtime_ndevs)
 
         if len(node.outputs()) == 0:
-            codes.append(body)
+            code = body
         else:
-            irobj_path = {}
-            def r(t, current_path):
-                if isinstance(t, IRObject):
-                    irobj_path[t] = current_path
-                elif isinstance(t, (list, tuple)):
-                    for i, v in enumerate(t):
-                        r(v, current_path + [i])
-                elif isinstance(t, dict):
-                    for k, v in t.items():
-                        r(v, current_path + [k])
-                else:
-                    # do nothing
-                    pass
-            r(node.outputs(), [])
-            if all(len(x) == 1 for x in irobj_path.values()):
-                # if all IRObjects are leafs, we can directly assign the output
-                outputs = [self.tensor_name(t) for t in node.outputs()]
-                outputs = ', '.join(outputs)
-                codes.append(f'{outputs} = {body}')
-            else:
-                outputs = []
-                im_outputs = []
-                for t in node.outputs():
-                    if isinstance(t, IRObject):
-                        outputs.append(self.tensor_name(t))
-                    else:
-                        # new intermediate output
-                        im_ouptut = self.tensor_name(IRObject('im_output'))
-                        im_outputs.append(im_ouptut)
-                        outputs.append(im_ouptut)
-                codes.append(f'{", ".join(outputs)} = {body}')
-
-                for t, path in irobj_path.items():
-                    if len(path) == 1: # immediate output, skip
-                        continue
-                    out = outputs[path[0]]
-                    for p in path[1:]:
-                        out = f'{out}[{repr(p)}]' # extract step by step
-                    codes.append(f'{self.tensor_name(t)} = {out}')
-                # release intermediate outputs
-                # because they are not used in the future, and don't managed by lifecycle
-                for im_output in im_outputs:
-                    codes.append(f'del {im_output}')
-
+            outputs = [self.tensor_name(t) for t in node.outputs()]
+            outputs = ', '.join(outputs)
+            code = f'{outputs} = {body}'
+        codes.append(code)
         return codes
 
     def emit_adapter(self, node: IRAdapter, prefix_attr: Optional[str] = None,
@@ -341,31 +281,21 @@ class FuncEmission(CodeEmission):
         tnames : Generator = (self.tensor_name(t) for t in tensors)
         return 'del ' + ', '.join(tnames)
 
-    def get_backward_callsite_io_tensors(
-        self, bwop: IRCell
-    ) -> Tuple[List[IRSubTensor], List[IRSubTensor], List[IRSubTensor], List[IRSubTensor]]:
+    def get_backward_callsite_io_tensors(self, bwop: IRCell) -> Tuple:
         """
         Get backward inputs and outputs
-
-        A tuple of 4 lists will be returned:
         ```
         (input_tensors, output_tensors, output_grads, input_grads)
         #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~  ~~~~~~~~~~~
         #inputs to 'backward'                         outputs of 'backward'
         ```
-        See `nnscaler.runtime.executor.backward` for more details.
 
-        Args:
-            bwop (IRCell): backward node
-
-        Returns:
-            tupe of 4 lists:
-            input_tensors (List[IRSubTensor]): forward input tensors (also backward iutput)
-            output_tensors (List[IRSubTensor]): forward output tensors (also backward input)
-            output_grads (List[IRSubTensor]): gradient of forward output tensors
-                (also backward input)
-            input_grads (List[IRSubTensor]): gradient of forward input tensors
-                (also backward output)
+        @return input_tensors List[IRSubTensor]: forward input tensors (backward input)
+        @return output_tensors List[IRSubTensor]: forward output tensors (backward output)
+        @return output_grads List[IRSubTensor]: gradient of forward output tensors
+            (backward input)
+        @return input_grads List[IRSubTensor]: gradient of forward input tensors
+            (backward output)
         """
         assert not bwop.isfw()
         fwop: IRCell = bwop.mirror

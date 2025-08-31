@@ -1,14 +1,7 @@
 #  Copyright (c) Microsoft Corporation.
 #  Licensed under the MIT License.
 
-"""
-The functions in this file might be inserted as node to graph, to ensure that the inserted node can generate the correct code,
-please following the assumption:
-  - should execute under default context (not under for example, torch.no_grad) no matter what the producer and consumer context are.
-"""
-
-from contextlib import contextmanager
-from typing import Optional, List, Tuple, Union, Any
+from typing import Optional, List, Tuple, Union
 import torch
 import torch.nn.functional as TorchF
 import operator
@@ -23,62 +16,11 @@ def identity(tensor: torch.Tensor) -> torch.Tensor:
     return tensor
 
 
-def ifexpr(cond: bool, true_value: Any, false_value: Any) -> Any:
-    """
-    if expression
-    Please note there is no short-circuit evaluation in this function.
-    """
-    return true_value if cond else false_value
-
-
 def anchor(name: str):
     """
     anchor operation for graph navigation
     """
     return None
-
-
-@contextmanager
-def constant_folding(constant_folding: bool = True):
-    """
-    Context manager to enable/disable constant folding.
-    You can put it inside your forward function to control the constant folding behavior.
-    Please note as we don't set it as leaf function in tracer,
-    it will not be present in the traced graph.
-    """
-    from nnscaler.graph.tracer.metadata import _GLOBAL_OP_CONTEXT
-
-    old_constant_folding = _GLOBAL_OP_CONTEXT.constant_folding
-    _GLOBAL_OP_CONTEXT.constant_folding = constant_folding
-    try:
-        yield
-    finally:
-        _GLOBAL_OP_CONTEXT.constant_folding = old_constant_folding
-
-
-def no_constant_folding():
-    """
-    Context manager to disable constant folding.
-    """
-    return constant_folding(constant_folding=False)
-
-
-def fold_constant(a: Any) -> Any:
-    """
-    Fold a constant(non-tensor) if constant folding is enabled.
-
-    Please note this should be only used in `constant_folding` block
-    to make sure the input to a `constant_folding` block is not wrapped in an IRObject in the graph.
-
-    Example:
-    ```
-    a = some_func()  # the value is wrapped in IRObject in graph
-    with constant_folding():
-        a = fold_constant(a)  # unwrap value
-        torch.add(t, a)       #  in graph a is a constant
-    ```
-    """
-    return a
 
 
 def multiref(tensor: torch.Tensor, times: int) -> Tuple[torch.Tensor]:
@@ -89,8 +31,6 @@ def multiref(tensor: torch.Tensor, times: int) -> Tuple[torch.Tensor]:
 
 
 def to(tensor: torch.Tensor, dtype_or_device: Union[torch.device, torch.dtype]) -> torch.Tensor:
-    # deprecated
-    # keep it only for backward compatibility
     return tensor.to(dtype_or_device)
 
 
@@ -156,40 +96,21 @@ def conv3d(input: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tenso
 
 def embedding(input: torch.Tensor, weight: torch.Tensor, padding_idx: Optional[int], start: int, stop: int):
     """
-    add start/stop to make vocab dim partitionable.
-
-    for example, if the vocab size is 100, and partition the weigth on vocab dim to 4 part,
-    then on each part, it will have different start/stop:
-        1: [start=0, stop=25]
-        2: [start=25, stop=50]
-        3: [start=50, stop=75]
-        4: [start=75, stop=100]
-    before do embedding, the input index outside the range will be masked,
-    and directly assign 0.0 to the masked position on the output.
-
-    If vocab dim is partitioned, the results are summed to ensure the correctness of the final result.
+    Embedding
 
     Inputs:
         input: torch.Tensor [*]
         weight: [vocab size, embed size]
-        start: int, the weight split start index on vocab dim
-        stop: int, the weight split stop index on vocab dim
+        start: int
+        stop: int
 
     Outputs:
         output: [*, embed_size]
     """
     input = input.long()
     input_mask = (input < start) | (input >= stop)
-    # make the range of value in the input to [0, stop-start)
-    # note that the embedding is implemented like a look up table.
     masked_input = input.clone() - start
     masked_input[input_mask] = 0
-    # if padding_idx is inside [start, stop), should map it to [0, stop-start)
-    # if padding_idx is outside [start, stop), directly make it None
-    if padding_idx is not None and start <= padding_idx < stop:
-        padding_idx -= start
-    else:
-        padding_idx = None
     output = TorchF.embedding(
         masked_input, weight, padding_idx,
         None, 2.0, False, False
@@ -346,18 +267,6 @@ def setitem(__a, *__bc):
         __b, __c = __bc[:-1], __bc[-1]
     operator.setitem(__a, __b, __c)
     return __a
-
-
-def dict_keys(d: dict):
-    return tuple(d.keys())
-
-
-def dict_values(d: dict):
-    return tuple(d.values())
-
-
-def dict_items(d: dict):
-    return tuple(d.items())
 
 
 def print_time(content: str):

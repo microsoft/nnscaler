@@ -93,15 +93,14 @@ def estimate_mem_lower_bound(
     1. activations, parameters, buffers and gradients are distributed evenly across plan_ngpus
     2. the optimizer memory is distributed evenly across zero_group_size (when zero stage 1 is enabled) or plan_ngpus
     '''
-    opt_resident_mem = cfg.opt_resident_coef * param_mem
-    opt_transient_mem = cfg.opt_transient_coef * param_mem
-
     # avg memory cost of activation, param (grad), buffer
     activation_mem = activation_mem / plan_ngpus
     param_mem = param_mem / plan_ngpus
     buffer_mem = buffer_mem / plan_ngpus
 
     # avg opt mem
+    opt_resident_mem = cfg.opt_resident_coef * param_mem
+    opt_transient_mem = cfg.opt_transient_coef * param_mem
     if cfg.zero_stage == 1:
         opt_resident_mem = opt_resident_mem / zero_group_size
         opt_transient_mem = opt_transient_mem / zero_group_size
@@ -523,14 +522,8 @@ class ModelGraph:
     def __init__(self, ir_graph: IRGraph, autodist_config: AutoDistConfig):
         self.ir_graph = ir_graph
         self.autodist_config = autodist_config
-        self.cost_database = CostDatabase(
-                                self.ir_graph,
-                                profile_dir=autodist_config.profile_dir,
-                                plan_ngpus=autodist_config.ngpus,
-                                memory_granularity=autodist_config.memory_granularity,
-                                ignore_small_tensor_threshold=autodist_config.ignore_small_tensor_threshold,
-                             )
-        self.cost_database.profile_comp(1, autodist_config.parallel_profile, autodist_config.re_profile)
+        self.cost_database = CostDatabase(self.ir_graph, self.autodist_config)
+        self.cost_database.profile_comp(partition_degree=1)
 
         self.scope_tree_root = self.reconstruct_scope_tree()
         self.scope_leaf_nodes = self.scope_tree_root.select(lambda x: x.is_leaf)
@@ -589,7 +582,7 @@ class ModelGraph:
             the indices of pivot operators in the operator list
         '''
         # TODO(yizhu1): check recompute_modules are between pivots
-        if not self.autodist_config.pipeline_enabled:
+        if not self.autodist_config.pipeline:
             raise RuntimeError('pipeline is not enabled')
         pp_pivot_modules = self.autodist_config.pipeline_pivots.split(',')
         pp_pivot_modules = [module for module in pp_pivot_modules if module]
@@ -712,13 +705,7 @@ class ModelGraph:
                 ret += fetch_module(child, next_prefix)
             return ret
 
-        # the root module's name is not tracked in the tracer, to enable recomputing the
-        # whole module, we add a special 'ROOT' module name
-        if 'ROOT' in recompute_modules:
-            modules = [self.scope_tree_root]
-        else:
-            modules = fetch_module(self.scope_tree_root, [])
-
+        modules = fetch_module(self.scope_tree_root, [])
         train_mem = 0
         for module in modules:
             train_mem = max(train_mem, module.train_mem)
@@ -761,13 +748,10 @@ class ModelGraph:
             for i, idx in enumerate(train_mem2in_idx):
                 if idx == -1:
                     continue
-                tensor = operator.ir_cell.inputs()[idx]
-                assert isinstance(tensor, IRTensor), f'expect tensor, but get {type(tensor)}'
-                if tensor.tid in counted_tensors:
+                if operator.in_tensors[idx].tid in counted_tensors:
                     operator.omit_train_idx.append(i)
                 else:
-                    counted_tensors.add(tensor.tid)
-
+                    counted_tensors.add(operator.in_tensors[idx].tid)
             # deduplicate parameter and buffer tensors
             # assume the traverse order of input tensors is the same as
             # the order in profiling
@@ -809,9 +793,6 @@ class ModelGraph:
                     if isinstance(t, IRTensor):
                         output_tensors.add(t)
             for node in group:
-                # Since we only profile IRDimops, skip if the node is not
-                if not isinstance(node, IRDimops):
-                    continue
                 is_border = False
                 for t in node.inputs():
                     if isinstance(t, IRTensor) and not t.is_attr():
@@ -904,17 +885,20 @@ class ModelGraph:
                     src_op.add_consumer(dst_op)
                     dst_op.add_producer(src_op)
 
-        # Infer batch dims
-        # Assume operators with parameters consume and generate tensors
-        # with batch dim. A search is followed to propagate the possible
-        # batch dim to the whole graph.
+        # infer batch dims
         seed_ops = []
         visited = set()
         for op in operator_list:
-            if any([t.is_param() for t in op.in_tensors]):
-                _logger.debug(f'add seed op {op.ir_cell}')
-                seed_ops.append(op)
-                visited.add(op.ir_cell.cid)
+            if len(op.producers) == 0 and len(op.in_tensors) > 0:
+                contain_non_param = False
+                for t in op.in_tensors:
+                    if not t.is_attr():
+                        contain_non_param = True
+                        break
+                if contain_non_param:
+                    _logger.info(f'add seed op {op.ir_cell}')
+                    seed_ops.append(op)
+                    visited.add(op.ir_cell.cid)
         dq = deque(seed_ops)
         while len(dq) > 0:
             op = dq.popleft()
@@ -945,7 +929,6 @@ class ModelGraph:
             if end - start + 1 != len(interval):
                 raise RuntimeError('recompute nodes are not continuous')
             self._recompute_group_idxs.append(interval)
-            self.operator_list[end].recompute_last_op = True
 
     @property
     def recompute_group_idxs(self) -> List[List[int]]:

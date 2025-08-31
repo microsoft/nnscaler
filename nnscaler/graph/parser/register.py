@@ -14,7 +14,7 @@ import torch
 from torch import ScriptFunction
 
 from nnscaler.graph.function.dimops import IRDimops, OpAnno, TransformRule
-from nnscaler.graph.tracer.wrap_utils import is_autograd_apply, is_autograd_op
+from nnscaler.graph.tracer.wrap_utils import is_autograd_apply
 from nnscaler.ir.operator import IRTensor, IRFwOperation
 
 _logger = logging.getLogger(__name__)
@@ -172,10 +172,6 @@ def register_op(annotation: Union[str, Callable], name: Optional[str] = None,
         if not callable(fn):
             raise TypeError("Expected a runtime function")
 
-        if inspect.isclass(fn) and is_autograd_op(fn):
-            _ = decorator(fn.apply)  # register `apply` method of the autograd function
-            return fn  # return the class itself
-
         # step 1. get function signature and inputs
         def get_import_path(fn: Callable) -> str:
             if is_autograd_apply(fn):
@@ -245,14 +241,7 @@ def register_op(annotation: Union[str, Callable], name: Optional[str] = None,
             anno = OpAnno(anno)
             ninputs = len(anno.inputs())
             if len(args) < ninputs:
-                # try to fill args with kwargs
-                args = list(args)
-                kwargs = dict(kwargs)
-                for idx in range(len(args), ninputs):
-                    if arg_names[idx] in kwargs:
-                        args.append(kwargs.pop(arg_names[idx]))
-                    else:
-                        raise ValueError(f"calling function {signature} should include at least {ninputs} *args")
+                raise ValueError(f"calling function {signature} should include at least {ninputs} *args")
             tensors = args[:ninputs]
             for idx, t in enumerate(tensors):
                 # argument check

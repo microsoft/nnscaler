@@ -80,16 +80,6 @@ class Frame:
         else:
             raise ValueError("graph_arg (int) must be >= 0")
 
-    def del_val(self, var_name: str):
-        """
-        Delete a variable from the current frame.
-        Do nothing if the variable doesn't exist.
-
-        Args:
-            var_name (str): variable name
-        """
-        self._vars[-1].pop(var_name, None)
-
     def set_var(self, var_name: str, val: Any):
         """
         Reset a variable with arbitrary value.
@@ -114,11 +104,7 @@ class Frame:
         # first check whether we have variable in this frame
         if var_name in self._vars[-1]:
             return self._vars[-1][var_name]
-        # See rule 8 in graph/function/functions.py
-        raise KeyError(
-            f"Cannot find var name {var_name} in {self._vars}. "
-            f"Please check whether the variable is from a function that is annotated as no-output."
-        )
+        raise KeyError(f"Cannot find var name {var_name} in {self._vars}")
 
     def add_attr(self, tensor: IRTensor, concrete_value: torch.Tensor, name: str):
         """Add module attribute content

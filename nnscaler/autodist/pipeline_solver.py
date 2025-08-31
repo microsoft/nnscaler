@@ -46,6 +46,7 @@ def _collect_tp_intervals(
     tp_degree: int,
     stage_num: int,
     interval_groups: List[List[IntervalInfo]],
+    spmd_solver: SPMDSolver,
 ) -> List[int]:
     '''
     collect intervals for given tp_degree and stage_num
@@ -99,6 +100,8 @@ def _collect_tp_intervals(
         start, end = group[0].start, group[0].end
         if calc_min_mem(start, end) > cfg.memory_constraint:
             continue
+        if spmd_solver.estimate_min_mem(start, end) > cfg.memory_constraint:
+            continue
         local_fw_span = model_graph.query_fw_span(start, end) / tp_degree
         if local_fw_span < min_fw_span or local_fw_span > max_fw_span:
             continue
@@ -133,12 +136,19 @@ def _compute_tp_info(
     no_solution_states = set()
 
     def process_case(device_num, stage_num):
+        solver = SPMDSolver(graph=model_graph,
+                            mesh_desc=_dev_num2mesh_desc(
+                                device_num, cfg.mesh_desc.col),
+                            autodist_config=cfg,
+                            stage_num=stage_num)
+
         selected_group_idxs = _collect_tp_intervals(
             model_graph,
             cfg,
             device_num,
             stage_num,
             interval_groups,
+            solver,
         )
         intervals = []
         for i in selected_group_idxs:
@@ -149,35 +159,8 @@ def _compute_tp_info(
         _logger.info(
             f'process case: tp {device_num}, s {stage_num}, {len(intervals)} intervals'
         )
-        if not intervals:
-            return None, [], []
-        # postpone the initialization of SPMDSolver to save time
-        cur_cfg = copy.deepcopy(cfg)
-        # In current parallel profiler's implementation, the profiling is divided into
-        # following steps:
-        #   1. searialize the input graph
-        #   2. lauch the multi-process profiling by python's spawn method
-        #   3. each process loads the serialized graph and do profiling
-        #   4. transport the profiling result back to the main process
-        # It helps to reduce the profiling time when the graph has not been met before.
-        # But the procedure itself has a large overhead.
-        # In PipelineSolver, the SPMDSolver is constructed and used to search the optimal
-        # plan for multiple times. For given `tp_degree`, cases that need to be profiled
-        # are the same. As a result, we set `cfg.parallel_profile` to True at the first time
-        # and set it to False for the rest of the time.
-        if stage_num == 1:
-            cur_cfg.parallel_profile = True
-        else:
-            cur_cfg.parallel_profile = False
-        cur_cfg.world_size = cfg.world_size // cfg.mesh_desc.ngpus * device_num
-        cur_cfg.mesh_desc = _dev_num2mesh_desc(device_num, cfg.mesh_desc.col)
-        solver = SPMDSolver(graph=model_graph,
-                            mesh_desc=cur_cfg.mesh_desc,
-                            autodist_config=cur_cfg,
-                            stage_num=stage_num)
-
         solver_ret = solver.solve(intervals, 1)
-        return solver, intervals, solver_ret
+        return intervals, solver_ret
 
     def _calc_upper_bound(tp_degree: int):
         # bubble time percentage <= bubble_ratio:
@@ -189,45 +172,19 @@ def _compute_tp_info(
                                  (1 - bubble_ratio) * micro_batch_num + 1)
         return min(cfg.mesh_desc.ngpus - tp_degree + 1, upper_bound)
 
-    # intervals in a same group share a distributed plan. To make the code generation
-    # correct, we need to adjust the plan for each interval based on each offset with
-    # respect to the first interval in the group.
-    def shift_plan(solver, spmd_desc, offset: int, shifted_start: int, shifted_end: int):
-        assert offset >= 0, f'invalid offset {offset}'
-        if offset == 0:
-            return spmd_desc
-        new_spmd_desc = copy.deepcopy(spmd_desc)
-        new_partition_descs = dict()
-        plan = list()
-        shifted_idx = shifted_start
-        for k, v in spmd_desc.desc.partition_descs.items():
-            new_partition_descs[k + offset] = v
-            plan.append((shifted_idx, solver.node_desc2idx(shifted_idx, v)))
-            shifted_idx += 1
-        assert shifted_idx == shifted_end + 1, f'expect {shifted_end + 1}, got {shifted_idx}'
-        new_spmd_desc.desc.partition_descs = new_partition_descs
-        new_spmd_desc.desc.analysis = solver.analyze_plan(plan)
-        return new_spmd_desc
-
+    # TODO(yizhu1): use multiprocessing to speed up
     tp_info = {}
     for tp_degree in legal_tp_degrees:
-        stage_num_bound = _calc_upper_bound(tp_degree)
-        if cfg.pipeline_nstages != 'auto':
-            stage_num_bound = min(stage_num_bound, cfg.pipeline_nstages)
-        for stage_num in range(1, stage_num_bound + 1):
-            solver, intervals, solver_ret = process_case(tp_degree, stage_num)
+        for stage_num in range(1, _calc_upper_bound(tp_degree) + 1):
+            intervals, solver_ret = process_case(tp_degree, stage_num)
             for interval, spmd_descs in zip(intervals, solver_ret):
                 start, end = interval
                 if spmd_descs:
                     for group in interval_groups:
                         if group[0].start == start and group[0].end == end:
-                            # iso -> isomorphic
-                            for iso_interval in group:
-                                iso_start, iso_end = iso_interval.start, iso_interval.end
-                                offset = model_graph.operator_list[iso_start].ir_cell.cid - \
-                                         model_graph.operator_list[start].ir_cell.cid
-                                tp_info[(tp_degree, stage_num, iso_start,
-                                         iso_end)] = shift_plan(solver, spmd_descs[0], offset, iso_start, iso_end)
+                            for interval in group:
+                                tp_info[(tp_degree, stage_num, interval.start,
+                                         interval.end)] = spmd_descs[0]
                 else:
                     no_solution_states.add((start, end, tp_degree))
                     _logger.info(
@@ -296,21 +253,10 @@ def calc_optimal_pp_plan(
                             if T[cur_idx][0] > val:
                                 T[cur_idx] = [val, prev_idx]
 
-    # why there are two bests here:
-    # if the model is too small, the best solution may not fully utilize all gpus (because of comm overhead, etc)
-    # this violates the user's plan_ngpus config so we must pick another
-    # here it records both bests to identify this case and warn the user
-    # best_time/state: the overall best solution
-    # valid_best_time/state: the best solution when we respect plan_ngpus config
-    best_time = math.inf
+    best_time = float('inf')
     best_state = (-1, -1, -1, -1)
-    valid_best_time = math.inf
-    valid_best_state = (-1, -1, -1, -1)
-
     micro_batch_num = autodist_config.update_freq
     for stage_num in range(1, ngpus + 1):
-        if autodist_config.pipeline_nstages != 'auto' and autodist_config.pipeline_nstages != stage_num:
-            continue
         for pp_dev_num in range(stage_num, ngpus + 1):
             for tp_degree in range(1, pp_dev_num - stage_num + 1 + 1):
                 if tp_degree not in legal_tp_degrees:
@@ -322,15 +268,10 @@ def calc_optimal_pp_plan(
                 cur_time = T[cur_idx][0] * (micro_batch_num - 1 + stage_num)
                 if best_time > cur_time:
                     best_time, best_state = cur_time, cur_idx
-                if pp_dev_num == ngpus and valid_best_time > cur_time:
-                    valid_best_time, valid_best_state = cur_time, cur_idx
 
     _logger.info(
-        f'best time/s: {valid_best_time}, state (s, pp, tp, i): {valid_best_state}')
-    if best_state != valid_best_state:
-        _s, pp, _tp, _i = best_state
-        _logger.warning(f'the model is too small for {ngpus} GPUs; please use {pp} GPUs for better performance')
-    if valid_best_state == (-1, -1, -1, -1):
+        f'best time/s: {best_time}, state (s, pp, tp, i): {best_state}')
+    if best_state == (-1, -1, -1, -1):
         raise RuntimeError('fail to find a valid pipeline plan')
 
     spmd_outs = []
@@ -346,12 +287,12 @@ def calc_optimal_pp_plan(
         if prev_idx[0] != -1:
             build_answer(*prev_idx)
 
-    build_answer(*valid_best_state)
+    build_answer(*best_state)
 
     spmd_descs = [spmd_out.desc for spmd_out in spmd_outs]
     pp_desc = PipelineParallelDesc(spmd_descs, [], autodist_config.mesh_desc)
     stage_mems = [spmd_out.memory for spmd_out in spmd_outs]
     stage_all_times = [spmd_out.all_time for spmd_out in spmd_outs]
     stage_comp_times = [spmd_out.comp_time for spmd_out in spmd_outs]
-    return PipelineSearchOutput(pp_desc, valid_best_time, stage_mems, stage_all_times,
+    return PipelineSearchOutput(pp_desc, best_time, stage_mems, stage_all_times,
                                 stage_comp_times)

@@ -17,12 +17,12 @@ class IRPad(IRFwOperation):
         assert len(kwargs) == 3, "Expected 2 kwargs: mode, value"
         super().__init__(name, signature, inputs, 1, **kwargs)
 
-    def infer_shape(self) -> dict[int, tuple[int, ...]]:
+    def infer_shape(self) -> bool:
         """
         Output shape inference given the input shapes
         """
         if len(self.input(0).shape) == 0:
-            return {}
+            return False
 
         pad  = self.kwargs['pad']
         assert len(pad) % 2 == 0, "IRPad::infer_shape len(pad) % 2 == 0"
@@ -31,7 +31,8 @@ class IRPad(IRFwOperation):
         for pad_idx, pad_size in enumerate(pad):
             shape[-1 - (pad_idx // 2)] += pad_size
 
-        return {0: shape}
+        self.output(0).shape = shape
+        return True
 
     def new(self, inputs: List, outputs: List, pad = None):
         """
@@ -46,7 +47,7 @@ class IRPad(IRFwOperation):
                    pad=pad, mode=mode, value=value)
         assert len(outputs) == 1
         op.set_output(0, outputs[0])
-        op.verify_shape()
+        op.infer_shape()
         return op
 
 
@@ -59,12 +60,12 @@ class IRConv2D(IRFwOperation):
         assert len(kwargs) == 4, "Expected 4 kwargs: stride, padding, dialation, groups"
         super().__init__(name, signature, inputs, 1, **kwargs)
 
-    def infer_shape(self) -> dict[int, tuple[int, ...]]:
+    def infer_shape(self) -> bool:
         """
         Output shape inference given the input shapes
         """
         if len(self.input(0).shape) == 0 or len(self.input(1).shape) == 0:
-            return {}
+            return False
         N = self.input(0).shape[0]
         iH, iW = self.input(0).shape[2:4]
         oC = self.input(1).shape[0]
@@ -76,7 +77,8 @@ class IRConv2D(IRFwOperation):
         oH = (iH + padding[0] + padding[1] - dilation[0] * (dH - 1) - 1) // stride[0] + 1
         oW = (iW + padding[2] + padding[3] - dilation[1] * (dW - 1) - 1) // stride[1] + 1
         shape = [N, oC, oH, oW]
-        return {0: shape}
+        self.output(0).shape = shape
+        return True
 
     def new(self, inputs: List, outputs: List):
         """
@@ -91,7 +93,7 @@ class IRConv2D(IRFwOperation):
                       stride=stride, padding=padding, dilation=dilation, groups=groups)
         assert len(outputs) == 1
         op.set_output(0, outputs[0])
-        op.verify_shape()
+        op.infer_shape()
         return op
 
 
@@ -104,12 +106,12 @@ class IRConv3D(IRFwOperation):
         assert len(kwargs) == 4, "Expected 4 kwargs: stride, padding, dialation, groups"
         super().__init__(name, signature, inputs, 1, **kwargs)
 
-    def infer_shape(self) -> dict[int, tuple[int, ...]]:
+    def infer_shape(self) -> bool:
         """
         Output shape inference given the input shapes
         """
         if len(self.input(0).shape) == 0 or len(self.input(1).shape) == 0:
-            return {}
+            return False
         N = self.input(0).shape[0]
         iC = self.input(0).shape[1]
         iT, iH, iW = self.input(0).shape[2:5]
@@ -127,7 +129,8 @@ class IRConv3D(IRFwOperation):
         oW = (iW + 2 * padding[2] - dilation[2] * (dW - 1) - 1) // stride[2] + 1
         shape = [N, oC, oT, oH, oW]
 
-        return {0: shape}
+        self.output(0).shape = shape
+        return True
 
     def new(self, inputs: List, outputs: List):
         """
@@ -142,5 +145,5 @@ class IRConv3D(IRFwOperation):
                       stride=stride, padding=padding, dilation=dilation, groups=groups)
         assert len(outputs) == 1
         op.set_output(0, outputs[0])
-        op.verify_shape()
+        op.infer_shape()
         return op

@@ -5,17 +5,16 @@ from typing import Any, Dict, Union
 import logging
 from pathlib import Path
 import operator
-import warnings
 
 from nnscaler.ir.tensor import IRFullTensor
 from nnscaler.graph.parser.register import CustomizedOps
 from nnscaler.graph import IRGraph
 from nnscaler.flags import CompileFlag
 
-from nnscaler.graph.parser import FxModuleParser
-from nnscaler.graph.tracer import concrete_trace
-from nnscaler.graph.tracer.wrap_utils import Location, is_autograd_apply, LeafWrapInfo
-from nnscaler.graph.tracer.torch_fx_patcher import side_effectful_inplace_ops
+from nnscaler.graph.parser.fx.parser import FxModuleParser
+from nnscaler.graph.parser.fx.concrete_trace_utils import concrete_trace
+from nnscaler.graph.parser.fx.concrete_trace_utils.concrete_tracer import Location, is_autograd_apply, LeafFnWrapInfo
+from nnscaler.graph.parser.fx.concrete_trace_utils.utils import side_effectful_inplace_ops
 
 import nnscaler.runtime.function as cube_rt_function
 
@@ -76,48 +75,28 @@ def to_fx_graph(model: torch.nn.Module, dummy_input) -> torch.fx.GraphModule:
     Returns:
         torch.fx.GraphModule representation of model
     """
-    # get user registered functions, and treat them as leaf functions
-    # torch function/operators/builtins/... are automatically handled as leaf functions by concrete trace
+    # get registered leaf function
     autowrap_funcs = [CustomizedOps.kOpRuntime[sign] for sign in CustomizedOps.kOpMap]
     # filter out torch.autograd.Function.apply as concrete trace already treats them as leaf function
     autowrap_funcs = [fn for fn in autowrap_funcs if not is_autograd_apply(fn)]
-    leaf_functions = {func: LeafWrapInfo([], True, None) for func in autowrap_funcs if func is not None}
-
-    # importlib functions
-    # currently only import_module is handled in the code
-    import importlib
-    leaf_functions.update({
-        func: LeafWrapInfo([Location(importlib, func.__name__)], False, None)
-        for func in [importlib.import_module]
-    })
+    leaf_functions = {func: LeafFnWrapInfo([], True, None) for func in autowrap_funcs if func is not None}
 
     # get cube runtime functions
-    cube_rt_funcs = [
-        cube_rt_function.anchor,
-        cube_rt_function.ifexpr,
-        cube_rt_function.fold_constant
-    ]
+    cube_rt_funcs = [cube_rt_function.anchor]
     leaf_functions.update({
-        func: LeafWrapInfo([Location(cube_rt_function, func.__name__)], True, None)
+        func: LeafFnWrapInfo([Location(cube_rt_function, func.__name__)], True, None)
         for func in cube_rt_funcs
     })
+    dce_ignored_funcs = set(cube_rt_funcs)
 
-    # keep all leaf functions in the graph (even if leaf functions have no return value)
-    # Please note the result graph is not always DAG, and can have outliers.
-    dce_ignored_funcs = set(leaf_functions)
-
-    with no_save_tensor_hook(), warnings.catch_warnings():
-        # ignore the warning from fx about get_attr
-        warnings.filterwarnings("ignore", message=
-            ".*does not reference an nn.Module, nn.Parameter, or buffer, which is what 'get_attr' Nodes typically target"
-        )
+    with no_save_tensor_hook():
         traced_model = concrete_trace(
             model,
             dummy_input,
             use_operator_patch=True,
             autowrap_leaf_function=leaf_functions,
             dce_ignored_function=dce_ignored_funcs,
-            strategy=CompileFlag.trace_strategy,
+            cpu_offload=True,
             record_frames=not CompileFlag.disable_code_line_info,
         )
     _rewrite_inplace_ops(traced_model)
@@ -153,6 +132,10 @@ def to_ir_graph(
             save_content=True,
         )
     module_name = traced_model.__class__.__name__
+
+    for input in inputs:
+        if isinstance(input, IRFullTensor):
+            input.requires_grad = False
 
     graph = IRGraph.from_logic_graph(nodes, inputs, outputs, module_name)
     return graph

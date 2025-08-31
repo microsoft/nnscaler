@@ -5,7 +5,6 @@ from typing import Dict, List, Optional, Tuple, Callable, Set
 import numpy as np
 import itertools
 import logging
-import copy
 
 from nnscaler.graph.function.anchor import IRGraphAnchor
 from nnscaler.graph.gener.concurrent import ConcurrentGener
@@ -29,12 +28,12 @@ _logger = logging.getLogger(__name__)
 
 def create_dummy(segment: IRSegment, inputs: bool = True, outputs: bool = True) -> List[IRFwOperation]:
     """
-    Create dummy operators segment inputs and outputs.
+    Create dummy operators segment inputs and outputs. 
 
     @param segment IRSegment: the target segment
     @param inputs bool: True for creating dummy operators to produce segement's inputs
     @param outputs bool: True for creating dummpy operators to consume segment's outputs
-
+    
     @return nodes List[IRCell]: the generated operation
     """
     # devices = segment.device
@@ -66,7 +65,7 @@ def create_dummy(segment: IRSegment, inputs: bool = True, outputs: bool = True) 
     return input_producers, output_consumers
 
 
-def expand_devices(tensors: List[Optional[IRSubTensor]],
+def expand_devices(tensors: List[Optional[IRSubTensor]], 
                    producer: bool = False, consumer: bool = False) -> List[IRSubTensor]:
     """
     Scatter a tensor if it is on multiple devices. It produces a tensor list where
@@ -107,13 +106,11 @@ class IRAdapterGener:
         Generate tensor adapter for both activations and weights
         Note weight reducers are always append to the last.
 
-        Args:
-            graph (IRGraph): the graph without adapter
-            cost_fn Optional[Callable]: takes an IRAdapterPrim and outputs a cost in float.
-            default to be None, which means communication volume is used as cost.
-
-        Returns:
-            graph (IRGraph): the graph with adapter inserted
+        @param graph IRGraph: the graph without adapter
+        @param cost_fn Optional[Callable]: takes an IRAdapterPrim and outputs a cost in float.
+            default to be None, which will use communication volume.
+    
+        @return graph IRGraph: the graph with adapter inserted
         """
         # reorder producer and consumer ordering
         graph._reorder_producer_consumer()
@@ -121,7 +118,7 @@ class IRAdapterGener:
         # remove anchor node
         graph = IRAdapterGener.remove_anchor(graph)
         _logger.info("finish removing anchor nodes")
-        # automatic replicate pyfunc
+        # automatic replace pyfunc
         graph = IRAdapterGener.auto_pyfunc(graph)
         _logger.info("finish replacing auto pyfunc")
         # automatic transform multiref
@@ -147,7 +144,7 @@ class IRAdapterGener:
             elif isinstance(anchor, IRSegment):
                 IRAdapterGener.remove_anchor(anchor)
         return graph
-
+    
     @staticmethod
     def auto_pyfunc(graph: IRGraph):
         """Transform and assign IRPyFunc.
@@ -155,12 +152,12 @@ class IRAdapterGener:
         Warning:
             Each IRPyFunc will be replicated to all devices of its segment.
 
-            To restrict the replicated devices in pipeline-like scenarios, use `graph.staging`
+            To restrict the replicaed devices in pipeline-like scenarios, use `graph.staging`
             to group the operators into segments.
-
+    
         Args:
             graph (IRGraph): the graph to be transformed
-
+        
         Returns:
             graph (IRGraph): the transformed graph
         """
@@ -200,7 +197,7 @@ class IRAdapterGener:
     def gen_weight(graph: IRGraph) -> IRGraph:
         """Generate cross-device weight reducers for gradient accumulation.
 
-        If a weight tensor is replicated across multiple devices by different / partitioned operators,
+        If a weight tensor is replicated across multiple devices by different / partitioned operators, 
         the weight tensor is required to accumulate gradients according to chain rules.
 
         However, if the weight tensor is replicated across devices by replicated operators,
@@ -246,7 +243,7 @@ class IRAdapterGener:
             dev_cids = [tuple(sorted(cids)) for cids in dev_cids.values()]
             cross_device_replicated = all(cids == dev_cids[0] for cids in dev_cids)
 
-            # otherwise, we only support fully partitioned consumers,
+            # otherwise, we only support fully partitioned consumers, 
             # the weight's gradient should be accumulated.
             fully_partitioned = len(set(c.cid for c in consumers)) == len(consumers)
 
@@ -267,7 +264,7 @@ class IRAdapterGener:
         # However, we don't support such fine-grained accumulation for now, and we only support
         # to either accumulate same sub-weight tensors or not accumulate non-overlapped sub-weight tensors.
         for ftensor, sub_ws in sub_weights.items():
-            # all the sub weights can only be
+            # all the sub weights can only be 
             # 1) replicated (sw1 == sw2) or,
             # 2) partitioned without overlapping (not sw1.overlap(sw2))
             for sw1, sw2 in itertools.combinations(sub_ws, 2):
@@ -279,7 +276,7 @@ class IRAdapterGener:
                         f"FullTensor weight: {ftensor}\n"
                         f"Consumers:\n{nl.join([repr(w.cell) for w in sub_ws])}\n"
                     )
-
+            
         # only record sub-weight that is consumed by multiple devices
         sub_weight_devices: Dict[IRSubTensor, Tuple[int,]] = dict()
         # - pop out replicated sub weights as they will have full gradients,
@@ -292,16 +289,16 @@ class IRAdapterGener:
             if len(devices) > 1:
                 devices = tuple(sorted(devices))
                 sub_weight_devices[sub_weight] = devices
-
+        
         # create reducer
-        reducers: Dict[Tuple[int,...], List[IRSubTensor]] = dict()
+        reducers: Dict[Tuple[int,], List[IRSubTensor]] = dict()
         for subw, devices in sub_weight_devices.items():
             reducers.setdefault(devices, []).append(subw)
-
         for devices, subws in reducers.items():
-            for reducer in IRWeightReducer.from_weights(subws, devices):
-                # insert reducer to as the last node.
-                graph.insert(reducer, graph.nnodes)
+            reducer = IRWeightReducer(subws)
+            reducer.device = devices
+            # insert reducer to as the last node.
+            graph.insert(reducer, graph.nnodes)
 
         return graph
 
@@ -319,7 +316,7 @@ class IRAdapterGener:
                 default to be None, which will use communication volume.
 
         Returns:
-            graph (IRGraph): the (inplace) modified graph with activation adapters.
+            graph (IRGraph): the (inplace) modified graph with activation adapters. 
         """
         def skip(ptensors: List[IRSubTensor], ctensors: List[IRSubTensor]) -> bool:
             # e.g., loss or parameter/buffer
@@ -333,37 +330,17 @@ class IRAdapterGener:
 
         input_producer, output_consumer = create_dummy(graph, inputs=True, outputs=True)
         bgraph: Optional[IRSegment] = graph.mirror
-
-        # Here are two optimization passes that are applied before generating communication adapters:
-        # - local producer fusion: If an operator is partitioned and there are multiple
-        #   different sub-tensors on the same device, insert appropriate concat or accumulate
-        #   operators to merge the results on the current device before generating communication.
-        #   This way, part of the communication between multiple devices can be converted into
-        #   local data processing.
-        #
-        # - local consumer multiref: When a full tensor has multiple consumers and, after partitioning,
-        #   there exists a device that contains multiple partitioned consumers (note that this pass assumes 
-        #   these consumers share a same sub-tensor in the forward graph), a multiref node will be
-        #   inserted before these consumers on that device. This way, during the backward pass through
-        #   the multiref node, the gradients from the consumers are automatically accumulated together,
-        #   avoiding the need for accumulation operations in the backward adapter. Note that to make
-        #   this optimization work properly, `flatten_grad` should be called to adjust the valuemap of
-        #   the gradient sub-tensors.
-        #
-        # Apart from the purpose of improving the efficiency of communication adapters, these two passes
-        # also reduce the number of sub-tensors that need to be considered when generating adapters, which
-        # can help to reduce the complexity of the adapter generation algorithm. More specifically, if the
-        # plan of the input graph is SPMD, the local consumer multiref pass will ensure the number of
-        # fptensors and bptensors is the same, which raise the possibility of generating high performance
-        # collectives, like allgather, allreduce, etc.
+    
+        # local producer fusion and local consumer multiref
         ftensors = []
         _cnt = 0
         for ftensor in graph.full_tensors():
-            # backward adapter will be generated along with the forward adapter
+            # backward will gen in forward
             if ftensor.is_param() or ftensor.is_grad():
                 continue
             # flatten gradient
             utils.flatten_grad(graph, ftensor)
+            # optimization: local fusion / multiref on producer / consumer
             ftensor = IRAdapterGener.local_producer_fusion(graph, ftensor)
             IRAdapterGener.local_consumer_multiref(graph, ftensor)
             ftensors.append(ftensor)
@@ -371,7 +348,7 @@ class IRAdapterGener:
             if _cnt % 100 == 0:
                 _logger.info(f'processed local fusion & multiref for {_cnt} tensors')
         _logger.info(f'finish local fusion & multiref for {_cnt} tensors')
-
+        
         # reorder again since inserted multiref could be mis-ordered
         graph._reorder_producer_consumer()
         _logger.info("finish reordering producer and consumer")
@@ -404,7 +381,7 @@ class IRAdapterGener:
                 bptensors = expand_devices(bptensors, producer=True)
                 bconsumers, bctensors = bgraph.consumers(ftensor.grad), bgraph.ctensors(ftensor.grad)
                 if ftensor in input_producer:
-                    bctensors = bctensors + tuple(fwop.output(0).grad for fwop in input_producer[ftensor])
+                    bctensors = bctensors + tuple(fwop.output(0).grad for fwop in input_producer[ftensor]) 
                 bctensors = expand_devices(bctensors, consumer=True)
                 assert all(len(ctensor.device) == 1 for ctensor in bctensors), "Not support for multi-device"
 
@@ -418,16 +395,14 @@ class IRAdapterGener:
                     fadapters.append(fadapter)
 
             # (activation -> graph/segment output) generation: generate communication adapters between
-            # producer operators and graph/segment output tensors. Note graph/segment output tensors
-            # always require for full-shape/value for output, while producers may partition them. Therefore,
+            # producer operatiors and graph/segment output tensors. Note graph/segment output tensors
+            # always require for full-shape/value for output, while consumers may partition them. Therefore,
             # we need to additionally generate adapters for this case.
             if ftensor in output_consumer:
                 out_fctensors = tuple(fwop.input(0) for fwop in output_consumer[ftensor])
                 out_fctensors = expand_devices(out_fctensors, consumer=True)
-                out_bptensors = [t.grad for t in out_fctensors if isinstance(t, IRSubTensor)]
-                # skip if the output is same with activation tensor
+                # dedup adapter if the output is same with activation tensor
                 if set(out_fctensors) == set(fctensors) and \
-                   set(out_bptensors) == set(bptensors) and \
                    set(t.device[0] for t in out_fctensors) == set(t.device[0] for t in fctensors):
                     pass
                 else:
@@ -507,7 +482,7 @@ class IRAdapterGener:
 
     @staticmethod
     def local_producer_fusion(graph: IRSegment, ftensor: IRFullTensor) -> IRFullTensor:
-        """
+        """!
         Fuse the producer tensors using concat and add.
         This will add a new full tensor by chaging from:
             producer --(ftensor)--> consumer
@@ -518,13 +493,10 @@ class IRAdapterGener:
         recompute group, then the additional generated cat/add are also
         apllied with same recompute region. Otherwise no recompute.
 
-        Args:
-            graph (IRSegment): the graph that contains the full tensor
-            ftensor (IRFullTensor): the full tensor to be manipulated
-
-        Returns:
-            new_ftensor IRFullTensor: the new full tensor. If cannot fuse,
-            return the original ftensor.
+        @param tensors List[IRSubTensor]: tensors to be fused in local device
+        
+        @return new_ftensor IRFullTensor: the new full tensor.
+                                          If cannot fuse, the original ftensor.
         """
         if not ftensor.requires_grad: return ftensor
 
@@ -621,7 +593,7 @@ class IRAdapterGener:
                         f"Users can try to adjust node ordering to meet with accum order\n"
                         f"{graph.debug_tensor_map_str(ftensor)}"
                     )
-
+                
                 # === Optimization: quick accumulation to early release tensor
                 lhs, rhs = ptensors[0], None
                 for ptensor in ptensors[1:]:
@@ -673,17 +645,17 @@ class IRAdapterGener:
         then create a multiref forward node for it to make
         each sub-tensor to be consumed only once in each device.
 
+        This is to adapt with pytorch autograd function.
+
         producer -> consumers[0,1]
 
         producer -> multiref -> consumer[0]
                         |-----> consumer[1]
 
-        Args:
-            graph (IRSegment): the graph that contains the full tensor
-            ftensor (IRFullTensor): the full tensor to be manipulated
+        @param graph IRGraph
+        @param ftensor IRFullTensor: the forward full tensor
 
-        Returns:
-            None: the graph is modified inplace.
+        @return None
         """
         if not ftensor.requires_grad: return
 
@@ -729,7 +701,6 @@ class IRAdapterGener:
                 )
 
             multiref = MultiRef(devtensors[devid][0], len(grads))
-            multiref.comment = 'created at IRAdapterGener:local_consumer_multiref'
             # set input gradient
             multiref.input(0).grad = accum_grad
             # set output and its gradient
@@ -760,11 +731,9 @@ class IRAdapterGener:
         Automatically transform inserted multiref.
         Multiref is transformed to align with the output tensors on each device.
 
-        Args:
-            graph (IRGraph): the graph to be transformed
+        @param graph IRGraph
 
-        Returns:
-            graph (IRGraph): the graph with transformed multiref
+        @return None
         """
         for multiref in graph.select(name='multiref', flatten=False):
             # setup recompute
@@ -785,7 +754,6 @@ class IRAdapterGener:
                 ptensors = sorted(ptensors, key=lambda t: t.device[0])
                 for tensor in ptensors:
                     mr = MultiRef(tensor, len(multiref.outputs()))
-                    mr.comment = f'create at IRAdapterGener:autoref, comment before transformation: {multiref.comment}'
                     mr.input(0).grad = tensor.grad
                     for idx, out in enumerate(multiref.outputs()):
                         output = out.parent.select(tensor.indmap, tensor.valmap)

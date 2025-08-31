@@ -8,8 +8,8 @@ Environment flags for compiling options
 import os
 
 
-def _to_bool(s: str, default=False) -> bool:
-    val = os.environ.get(s, default=default)
+def _to_bool(s: str) -> bool:
+    val = os.environ.get(s, default=0)
     return bool(int(val))
 
 
@@ -32,11 +32,6 @@ class CompileFlag:
     use_nnfusion = _to_bool('USE_NNFUSION')
     use_jit = _to_bool('USE_JIT')
     disable_code_line_info = _to_bool('DISABLE_CODE_LINE_INFO')  # will add original code information in generated code, note that this will make trace slow
-    # how to execute the functions during trace, available choices ['cpu', 'cuda', 'meta', 'cuda_run_cpu_offload', 'reuse_cache']
-    trace_strategy = os.environ.get('TRACE_STRATEGY', default='cuda_run_cpu_offload')
-    # reduce scatter adapter can reduce the communication cost, and improve the performance
-    # but sometimes it may cause communication bugs, so we provide an option to enable/disable it
-    disable_reduce_scatter_adapter = _to_bool('DISABLE_REDUCE_SCATTER_ADAPTER', False)
 
     # ============== runtime ====================
     dev_mode = _to_bool('SINGLE_DEV_MODE')  # allow to use python xx.py
@@ -50,9 +45,8 @@ class CompileFlag:
     use_zero = _to_bool('USE_ZERO')
     # use async communication to overlap gradient synchronization and backward computation
     async_reducer = _to_bool('ASYNC_REDUCER')  # use async reducer
-    # maximal reducer weight bytes for one allreduce (only effective for async):
-    # default 0 means using the default value in reducer
-    max_reducer_bucket = _to_int('MAX_REDUCER_BUCKET', default=0)
+    # maximal reducer weight bytes for one allreduce (only effective for async): default 128MB
+    max_reducer_bucket = _to_int('MAX_REDUCER_BUCKET', default=137217728)
     # perform reducer op on gradients, can be sum, avg, mean, max, min. Default is sum
     reducer_op = os.environ.get('REDUCER_OP', default='sum')
     # zero_ngroups is the number of subgroups in each original ZeRO gruop (e.g., weights reducer)
@@ -60,12 +54,6 @@ class CompileFlag:
     # it helps reduce communication cost of allgather weights in ZeRO, but increase the weights'
     # optimization states on each GPU.
     zero_ngroups = _to_int('ZERO_NUM_GROUPS', default=1)
-    # whether to use reduce scatter for zero (default False).
-    # By default we use `allreduce` for zero, which is due to
-    # 1) `reduce_scatter` will make some parameters have stale gradient after synchronization,
-    #    hence break the consistency of `.data` and `.grad` of parameters. Need to be careful when using optimizer.
-    # 2) `reduce_scatter`` doesn't significantly improve performance comparing with `allreduce`.
-    zero_use_reduce_scatter = _to_bool('ZERO_USE_REDUCE_SCATTER')
 
     # use automate mixture precision training, where weights, gradients
     # and optimizer status are kept in its original data type (can be float32),

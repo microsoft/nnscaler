@@ -4,7 +4,7 @@
 from enum import Enum
 from functools import partial
 import types
-from typing import Callable, Any, Dict, Optional, Tuple, Type, Union, TypeVar, List, Set, Literal
+from typing import Callable, Any, Dict, Optional, Tuple, Type, Union, TypeVar, List, Set
 from pathlib import Path
 import inspect
 import sys
@@ -16,7 +16,6 @@ import copy
 import os
 
 import torch
-import torch.distributed
 
 from nnscaler.codegen import ModuleCodeGen
 from nnscaler.codegen.schedule.schedule import ScheduleCodeGen
@@ -29,15 +28,14 @@ from nnscaler.graph import IRGraph
 from nnscaler.graph import parser
 from nnscaler.graph.function.anchor import IRGraphAnchor
 from nnscaler.graph.function.pyfunc import IRPyFunc
-from nnscaler.graph.function.wrapnn import convert_to_wrapnn, wrapnn
 from nnscaler.graph.gener.gen import IRAdapterGener
-from nnscaler.graph.parser import FxModuleParser
+from nnscaler.graph.parser.fx.parser import FxModuleParser
 from nnscaler.graph.schedule.predefined import PredefinedSched
 from nnscaler.graph.schedule.schedplan import SchedulePlan
 
-from nnscaler.ir.cten import IRObject, IRTensor, IR
+from nnscaler.ir.cten import IRObject, IRTensor
 from nnscaler.ir.operator import IRBpOperation, IRDataOperation
-from nnscaler.ir.tensor import IRFullTensor
+from nnscaler.ir.tensor import IRFullTensor, IRSubTensor
 from nnscaler.ir.unique import IDGenerator
 
 from nnscaler.runtime.adapter.reducer import Reducer
@@ -47,7 +45,7 @@ from nnscaler.runtime.module import AttrMeta, CubeModule, ParallelModule, Origin
 
 from nnscaler.flags import CompileFlag, RuntimeFlag
 import nnscaler.policies as policies
-from nnscaler.program import disable_global_graph
+from nnscaler.program import Program
 from nnscaler.utils import get_member_by_name, setup_stride_broadcast_group, get_shared_params
 
 logger = logging.getLogger(__name__)
@@ -70,21 +68,13 @@ for k, v in policies.__dict__.items():
 @dataclass(frozen=True)
 class ComputeConfig:
     plan_ngpus: int
-    runtime_ngpus: Optional[int] = None
+    runtime_ngpus: int
 
     # whether to fold constant when generating code
     constant_folding: bool = False
 
-    # how to execute the functions during trace
-    trace_strategy: str = 'cuda_run_cpu_offload'
-
     use_zero: bool = False
     zero_ngroups: int = 1
-    # whether to use reduce scatter for zero
-    # Please note
-    # 1. this only works when `use_zero` is True and `zero_ngroups` is 1.
-    # 2. In some cases, it can introduce parity issue. So use it with caution.
-    zero_use_reduce_scatter: bool = False
 
     # whether the generated code is for inference only
     inference_only: bool = False
@@ -95,15 +85,15 @@ class ComputeConfig:
     #  which must be a scalar tensor
     use_end2end: bool = False
 
-    # whether to use async reducer
-    # if True, the gradient all-reduce will be async,
-    # This only works when the `use_end2end` is `True` for now.
-    use_async_reducer: bool = False
-    # the maximal reducer weight bytes for one allreduce in megabytes
-    # It is also effective for sync reducer.
-    # None/0 means using the default value. (25MB for async, no limit for sync)
-    reducer_bucket_cap_mb: Optional[float] = None
-
+    # current only end2end module supports in pipeline mode.
+    # so be sure to set use_end2end=True when use_pipeline=True
+    use_pipeline: bool = False
+    # number of micro-batches
+    pipeline_nmicros: int = -1
+    # number of stages
+    pipeline_nstages: int = -1
+    # it is pas's responsibility to apply the scheduler
+    pipeline_scheduler: str = '1f1b'
     # PAS policy settings
     # you can also put any other settings that can affect code generation here.
     # but please prefix the keys with `_` to avoid conflicts with predefined keys.
@@ -141,10 +131,6 @@ class ComputeConfig:
     def __post_init__(self):
         if self.plan_ngpus <= 0:
             raise ValueError(f"plan_ngpus {self.plan_ngpus} must be > 0")
-        if self.runtime_ngpus is None:
-            super().__setattr__('runtime_ngpus', int(os.environ.get('WORLD_SIZE', 0)))
-            if not self.runtime_ngpus:
-                raise ValueError(f"runtime_ngpus is not set and WORLD_SIZE is not set.")
         if self.runtime_ngpus <= 0:
             raise ValueError(f"runtime_ngpus {self.runtime_ngpus} must be > 0")
         if self.runtime_ngpus % self.plan_ngpus != 0:
@@ -156,42 +142,32 @@ class ComputeConfig:
             # have to use __setattr__ for frozen dataclass
             super().__setattr__('zero_ngroups', 1)
 
-        if self.reducer_bucket_cap_mb and self.reducer_bucket_cap_mb < 0:
-            raise ValueError(f"reducer_bucket_cap_mb {self.reducer_bucket_cap_mb} should not be negative.")
+        if self.use_pipeline:
+            if not self.use_end2end:
+                raise ValueError("pipeline is only supported in end2end mode")
+            if self.pipeline_nmicros <= 0:
+                raise ValueError(f"pipeline_nmicros {self.pipeline_nmicros} must be > 0 when use pipeline")
+            if self.pipeline_nstages <= 0:
+                raise ValueError(f"pipeline_nstages {self.pipeline_nstages} must be > 0 when use pipeline")
+            if self.plan_ngpus % self.pipeline_nstages != 0:
+                raise ValueError(f"pipeline_nstages {self.plan_ngpus} must be a multiple of plan_ngpus {self.pipeline_nstages}")
+            if self.pipeline_scheduler not in _PREDEFINE_SCHEDS:
+                raise ValueError(f"pipeline_scheduler {self.pipeline_scheduler} is not supported. "
+                                 f"Supported schedulers are {_PREDEFINE_SCHEDS.keys()}")
+            if self.inference_only and self.pipeline_scheduler not in _PREDEFINED_INFERENCE_SCHEDS:
+                raise ValueError(f"pipeline_scheduler {self.pipeline_scheduler} is not supported in inference mode. "
+                                 f"Supported schedulers are {_PREDEFINED_INFERENCE_SCHEDS}")
+            if not self.inference_only and self.pipeline_scheduler in _PREDEFINED_INFERENCE_SCHEDS:
+                raise ValueError(f"pipeline_scheduler {self.pipeline_scheduler} is not supported in training mode.")
 
-        # TODO: Please note in current implementation of Bucket,
-        # zero_use_reduce_scatter still works when zero_ngroups > 1 in sync mode
-        # Let's hide this feature for now for consistency.
-        if self.use_zero and self.zero_use_reduce_scatter and self.zero_ngroups != 1:
-            raise ValueError("zero_use_reduce_scatter is only supported when zero_ngroups is 1.")
-
-    def apply_pipeline_scheduler(
-            self,
-            graph: IRGraph,
-            pipeline_nstages: int,
-            pipeline_nmicros: int,
-            pipeline_scheduler: str,
-    ) -> Optional[SchedulePlan]:
+    def apply_pipeline_scheduler(self, graph: IRGraph) -> Optional[SchedulePlan]:
         """
         Apply the pipeline scheduler to the graph.
+        Do nothing if not use_pipeline
         """
-        if not self.use_end2end:
-            raise ValueError("pipeline is only supported in end2end mode")
-        if pipeline_nmicros <= 0:
-            raise ValueError(f"pipeline_nmicros {pipeline_nmicros} must be > 0.")
-        if pipeline_nstages <= 0:
-            raise ValueError(f"pipeline_nstages {pipeline_nstages} must be > 0.")
-        if pipeline_scheduler not in _PREDEFINE_SCHEDS:
-            raise ValueError(f"pipeline_scheduler {pipeline_scheduler} is not supported. "
-                             f"Supported schedulers are {_PREDEFINE_SCHEDS.keys()}")
-        if self.inference_only and pipeline_scheduler not in _PREDEFINED_INFERENCE_SCHEDS:
-            raise ValueError(f"pipeline_scheduler {pipeline_scheduler} is not supported in inference mode. "
-                             f"Supported schedulers are {_PREDEFINED_INFERENCE_SCHEDS}")
-        if not self.inference_only and pipeline_scheduler in _PREDEFINED_INFERENCE_SCHEDS:
-            raise ValueError(f"pipeline_scheduler {pipeline_scheduler} is not supported in training mode.")
-
-        sched = _PREDEFINE_SCHEDS[pipeline_scheduler]
-        return sched(graph, pipeline_nmicros, pipeline_nstages)
+        if self.use_pipeline:
+            sched = _PREDEFINE_SCHEDS[self.pipeline_scheduler]
+            return sched(graph, self.pipeline_nmicros, self.pipeline_nstages)
 
     @property
     def gpu_config(self) -> Dict[str, int]:
@@ -206,8 +182,8 @@ class ComputeConfig:
             'constant_folding': self.constant_folding,
             'user_config': self.user_config,
             'inference_only': self.inference_only, # there will be no backward nodes in the graph in inference mode
+            'use_pipeline': self.use_pipeline,  # pipeline option can affect the graph generation.
             'end2end_mode': self.use_end2end,  # end2end_mode can affect the graph generation.
-            'trace_strategy': self.trace_strategy,  # different strategy might lead to different graph
         }
 
     @property
@@ -231,35 +207,6 @@ class ComputeConfig:
         else:
             return self.plan_ngpus
 
-    @property
-    def max_bucket_size_bytes(self) -> Optional[int]:
-        return int(self.reducer_bucket_cap_mb * 1024 * 1024) \
-            if self.reducer_bucket_cap_mb \
-            else None
-
-    def get_sync_group(self) -> Tuple[List[int], torch.distributed.ProcessGroup]:
-        """
-        Get sync group for the current rank.
-        The sync group is a group of ranks that have exactly the same weights, but different inputs,
-        so they should synchronize with each other to get the whole gradients/loss/etc.
-
-        Please note if sync groups haven't been created, it will create them.
-        So it will deadlock if only some of ranks call this function.
-
-        Returns:
-            Tuple[List[int], torch.distributed.ProcessGroup]: return the rank list of the group and its torch.distributed group
-        """
-        rank = torch.distributed.get_rank()
-        # create all groups
-        plan_ngpus = self.plan_ngpus
-        runtime_ngpus = self.runtime_ngpus
-        for i in range(plan_ngpus):
-            DeviceGroup().get_group(
-                list(range(i, runtime_ngpus, plan_ngpus))
-            )
-        rank_list = list(range(rank % plan_ngpus, runtime_ngpus, plan_ngpus))
-        return rank_list, DeviceGroup().get_group(rank_list)
-
     @classmethod
     def safe_dump_to_file(cls, cfg: 'ComputeConfig', file: Union[str, Path]) -> None:
         """
@@ -278,7 +225,7 @@ class ComputeConfig:
         """
         if Path(file).exists():
             try:
-                cfg = torch.load(file, weights_only=False)
+                cfg = torch.load(file)
                 if isinstance(cfg, dict): # in old version, we save the object directly (not save as dict)
                     # this can raise if cfg has extra keys.
                     # which means some fields of ComputeConfig has been removed(we should avoid this).
@@ -323,13 +270,9 @@ def _flags(flags, /, **kwargs):
 def _compile_flags(compute_config: ComputeConfig):
     return _flags(
         CompileFlag,
-        async_reducer=compute_config.use_async_reducer, reducer_op='sum',
-        max_reducer_bucket=compute_config.max_bucket_size_bytes,
-        async_comm=False,
+        async_reducer=False, reducer_op='sum', async_comm=False,
         use_zero=compute_config.use_zero,
         zero_ngroups=compute_config.zero_ngroups,
-        zero_use_reduce_scatter=compute_config.zero_use_reduce_scatter,
-        trace_strategy=compute_config.trace_strategy,
     )
 
 
@@ -348,9 +291,37 @@ def _to_cpu(val: Any):
     if isinstance(val, set):
         return {_to_cpu(t) for t in val}
     if isinstance(val, torch.Tensor):
-        requires_grad = val.is_floating_point() or val.is_complex()
-        return val.detach().clone().cpu().requires_grad_(requires_grad)
+        return val.cpu()
     return val
+
+
+def to_ir_input(sample, name):
+    """Support complex of types: Tuple, List, Dict, torch.Tensor"""
+    if isinstance(sample, tuple):
+        return tuple(to_ir_input(t, name) for t in sample)
+    if isinstance(sample, list):
+        return list(to_ir_input(t, name) for t in sample)
+    if isinstance(sample, dict):
+        return {k: to_ir_input(v, str(k)) for k, v in sample.items()}
+    if isinstance(sample, torch.Tensor):
+        # note: we will always set tensor to require gradient, which may
+        # generate backward communications in adapter. However, as long as
+        # the data doesn't require gradient in real runtime, the backward
+        # communication will not be triggered.
+        # PyTorch only supports floating point and complex tensors for autograd.
+        # To align with PyTorch, we set requires_grad to False for other types.
+        requires_grad = sample.is_floating_point() or sample.is_complex()
+        tensor = IRFullTensor(
+            shape=sample.size(),
+            name=name,
+            requires_grad=requires_grad,
+            dtype=sample.dtype
+        ).tosub()
+        tensor._value = sample
+        if requires_grad:
+            tensor.grad = tensor.parent.grad.tosub()
+        return tensor
+    return IRObject(name, value=sample, is_constant=False)
 
 
 def _contains_uncommutable_data(ir_outputs: Any):
@@ -474,7 +445,6 @@ class RegenStatus(Enum):
     NONE = 'none'   # nothing is regenerated.
     ALL = 'all'     # everything is regenerated, including graph and code
     CODE = 'code'   # only code is regenerated.
-    ERROR = 'error' # error occurs during generation.
 
 
 def _prepare_namespace(
@@ -619,15 +589,17 @@ def _prepare_and_check_reusable(
 
 def _gen_graph(
     module: torch.nn.Module,
-    dummy_forward_args: dict,
+    dummy_input: dict,
     outdir: Path,
     constant_folding: bool,
     end2end_mode: bool = False,
     inference_only: bool = False,
+    use_pipeline: bool = False,
 ):
     # reset environment
+    program = Program()
+    program.clear()
     IDGenerator().clear()
-    disable_global_graph()
 
     module.cpu()
     forward_args_default = _get_arg_default_values(module.forward)
@@ -636,12 +608,12 @@ def _gen_graph(
             raise ValueError(f"Default value type {type(v)} of forward args is not supported.")
 
     # generate fx graph
-    dummy_forward_args = _to_cpu(dummy_forward_args)
-    fx_graph = parser.to_fx_graph(module, dummy_forward_args)
+    dummy_input = _to_cpu(dummy_input)
+    fx_graph = parser.to_fx_graph(module, dummy_input)
 
     # generate ir logic graph
-    graph = parser.to_ir_graph(
-        fx_graph, dummy_forward_args, outdir, constant_folding
+    ir_graph = parser.to_ir_graph(
+        fx_graph, dummy_input, outdir, constant_folding
     )
 
     # generate dummy inputs for logic graph
@@ -656,59 +628,67 @@ def _gen_graph(
     ir_dummy_inputs = []
     for node in fx_input_nodes:
         if node.target.startswith('*'):  # *args or **kwargs
-            if node.target.strip('*') in dummy_forward_args:
+            if node.target.strip('*') in dummy_input:
                 raise ValueError(f"Input {node.target}: *args or **kwargs is not suppported")
             ir_dummy_inputs.append(None)  # always set None to *args/**kwargs
-        elif node.target in dummy_forward_args:
-            ir_dummy_inputs.append(dummy_forward_args[node.target])
+        elif node.target in dummy_input:
+            ir_dummy_inputs.append(dummy_input[node.target])
         elif forward_args[node.target] is not inspect.Parameter.empty:
             ir_dummy_inputs.append(forward_args[node.target])
         else:
-            raise ValueError(f"Input {node.target} not in dummy forward args, nor has default value.")
+            raise ValueError(f"Input {node.target} not in dummy input, nor has default value.")
     for i in range(len(ir_dummy_inputs)):
-        # note: we will always set tensor to require gradient, which may
-        # generate backward communications in adapter. However, as long as
-        # the data doesn't require gradient in real runtime, the backward
-        # communication will not be triggered.
-        ir_dummy_inputs[i] = IR.new(
-            fx_input_nodes[i].target, ir_dummy_inputs[i],
-            requires_grad=True,
-            tosub=True,
-            is_constant=False,
-        )
-        # if the input is a complex type, we should wrap it with IRObject
+        ir_dummy_inputs[i] = to_ir_input(ir_dummy_inputs[i], fx_input_nodes[i].target)
+        # if the input is not a tensor, we should wrap it with IRObject
         if not isinstance(ir_dummy_inputs[i], IRObject):
             ir_dummy_inputs[i] = IRObject(fx_input_nodes[i].target, value=ir_dummy_inputs[i], is_constant=False)
 
     # generate complete ir graph
-    ir_dummy_outputs = graph(*ir_dummy_inputs)
     if end2end_mode:
         # in end2end mode, we must use dataloader as the first argument of forward
         # we assume the first argument of forward is the data sample (which is a requirement in our doc)
-        graph.use_dataloader_input()
 
+        # the IRObject representing the `dataloader` instance, which is only used by the
+        # IRDataOperation. Since we already know the output of the dataloader,
+        # we don't need to set the value for it.
+        ir_root_obj = IRObject(name='dataloader', value=None)
+        Program().set_input([ir_root_obj])
+        data_op = IRDataOperation(ir_root_obj, ir_dummy_inputs)
+        # add the data operation to the graph, which will use `next` to get data.
+        Program().add_node(data_op)
+        ir_dummy_outputs = ir_graph(*ir_dummy_inputs)
+        graph = program.get_graph()
         # we require the first output is the loss
         if isinstance(ir_dummy_outputs, (list, tuple)):
             ir_loss = ir_dummy_outputs[0]
         else:
             ir_loss = ir_dummy_outputs
         if not isinstance(ir_loss, IRTensor) or ir_loss.shape != (1,):
-            # internally scalar tensor will be reshaped to (1,) in IRGraph
+            # TODO: update when we support scalar tensor
             raise RuntimeError(f"Loss can only be scalar tensor but got {ir_loss.shape if isinstance(ir_loss, IRTensor) else ir_loss}")
+        if not inference_only:
+            ir_loss.backward()
     else:
-        ir_loss = None
+        program.set_input(ir_dummy_inputs)
+        ir_dummy_outputs = ir_graph(*ir_dummy_inputs)
+        graph = program.get_graph()
+        if not inference_only:
+            graph.backward()
 
-    if not inference_only:
-        graph.backward(ir_loss)
-    else:
-        graph.no_backward()
+    if ir_dummy_outputs is None: ir_dummy_outputs = []
+    elif not isinstance(ir_dummy_outputs, (tuple, list)):
+        ir_dummy_outputs = [ir_dummy_outputs]
+    if use_pipeline and _contains_uncommutable_data(ir_dummy_outputs):
+        raise RuntimeError(f"Communication generation error: some of outputs are not commutable between gpus, which is not supported in pipeline parallelism.")
+    program.set_output(ir_dummy_outputs)
+    program.finalize()
 
     return graph, forward_args
 
 
 def _gencode(
         module_or_module_class: torch.nn.Module,
-        dummy_forward_args: Dict[str, Any],
+        dummy_input: dict,
         pas_policy: Callable[[IRGraph, ComputeConfig], IRGraph],
         compute_config: ComputeConfig,
         outdir: Path,
@@ -728,7 +708,7 @@ def _gencode(
 
     Args:
         module (torch.nn.Module): the module to be compiled
-        dummy_forward_args (Dict[str, Any]): the dummy input for the module forward
+        dummy_input (dict): the dummy input for the module
         pas_policy (Callable[[IRGraph, ComputeConfig], IRGraph]): the pas policy
         compute_config (ComputeConfig): the environment resource
         outdir (Path): the directory to save generated code
@@ -775,13 +755,12 @@ def _gencode(
         )
         torch.save(meta_info, origin_module_metadata_ckp)
 
-        with wrapnn(module, restore=not is_module_class) as wrapped_module:
-            graph, forward_args = _gen_graph(
-                wrapped_module, dummy_forward_args, outdir,
-                constant_folding=compute_config.constant_folding, end2end_mode=compute_config.use_end2end,
-                inference_only=compute_config.inference_only,
-            )
-
+        graph, forward_args = _gen_graph(
+            module, dummy_input, outdir,
+            constant_folding=compute_config.constant_folding, end2end_mode=compute_config.use_end2end,
+            inference_only=compute_config.inference_only,
+            use_pipeline=compute_config.use_pipeline,
+        )
         graph.dump(graph_ckp)
         torch.save(forward_args, forward_args_ckp)
 
@@ -791,18 +770,11 @@ def _gencode(
         ret = RegenStatus.CODE
         logger.info(f"Reuse graph dump in {outdir}")
         graph = IRGraph.load(graph_ckp)
-        forward_args = torch.load(forward_args_ckp, weights_only=False)
+        forward_args = torch.load(forward_args_ckp)
 
     graph = pas_policy(graph, compute_config)
     if not isinstance(graph, IRGraph):
         raise RuntimeError("Expected policy return IRGraph")
-
-    # currently graph.sched is only used for pipeline parallelism
-    # so it is not none means we are in pipeline parallelism
-    if graph.sched is not None and _contains_uncommutable_data(graph.outputs()):
-        raise RuntimeError("Communication generation error: "
-                           "some of outputs are not commutable between gpus, "
-                           "which is not supported in pipeline parallelism.")
 
     # check assignment
     for node in graph.nodes(flatten=True):
@@ -835,6 +807,16 @@ def _gencode(
     assert len(execplan.graph.device) == compute_config.plan_ngpus, f"{execplan.graph.device}"
     mgener = ModuleCodeGen(execplan, compute_config.runtime_ngpus)
     sgener = None
+
+    """ YUNCHI: INJECT HERE TO DUMP EXECPLAN """
+    import dill
+    _dp = compute_config.runtime_ngpus // compute_config.plan_ngpus
+    _pp = compute_config.pipeline_nstages
+    _tp = compute_config.pas_config["_tp_size"]
+    _nm = compute_config.pipeline_nmicros
+    with open(f"mgener.pkl", "wb") as fp:
+        dill.dump(mgener, fp)
+    """ YUNCHI: FINISH INJECTION """
     if compute_config.use_end2end:
         sgener = ScheduleCodeGen(execplan, compute_config.runtime_ngpus)
     for rank in range(compute_config.runtime_ngpus):
@@ -854,7 +836,7 @@ def _gencode(
                 outfile=fname,
                 attach=True
             )
-
+    execplan.graph.dump(outdir / "final_graph.ckp")
     return ret
 
 
@@ -893,7 +875,6 @@ def _load_parallel_module_class(
     # parallel_module_class.__module__ = module_class.__module__
     parallel_module_class.__orig_module_class__ = module_class  # save the original module class
     # override train_step and infer_step only if they are defined in the generated module (end2end module only)
-    parallel_module_class.runtime_version = getattr(gen_imported, 'runtime_version', None)
     parallel_module_class._train_step = getattr(gen_imported, '_train_step', parallel_module_class._train_step)
     parallel_module_class._infer_step = getattr(gen_imported, '_infer_step', parallel_module_class._infer_step)
     return parallel_module_class
@@ -901,7 +882,7 @@ def _load_parallel_module_class(
 
 def parallelize(
     module_or_module_class: Union[torch.nn.Module, Type[torch.nn.Module]],
-    dummy_forward_args: Dict[str, Any],
+    dummy_input: dict,
     pas_policy: Union[str, Callable[[IRGraph, ComputeConfig], IRGraph]],
     compute_config: ComputeConfig,
     *,
@@ -970,7 +951,7 @@ def parallelize(
 
     Args:
         module_or_module_class (Union[torch.nn.Module, Type[torch.nn.Module]]): the module or module class to be compiled
-        dummy_forward_args (Dict[str, Any]): the dummy input for the module forward
+        dummy_input (dict): the dummy input for the module
         pas_policy (Union[str, Callable[[IRGraph, ComputeConfig], IRGraph]]): the pas policy,
             it can be a name of builtin policies, or a custom policy function.
         compute_config (ComputeConfig): the environment resource
@@ -1021,38 +1002,26 @@ def parallelize(
     if torch.distributed.is_initialized():
         _ = DeviceGroup()
 
-    # try...finally to ensure the barrier is called
-    # even if an exception is raised in the middle of the code generation.
-    try:
-        # generate code only in node0
-        # if it is not in a torchrun environment, just generate.
-        if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-            outdir, reusable = _prepare_and_check_reusable(gen_savedir, module_class, compute_config, instance_name, reuse)
-            if not reusable:
-                config_file = outdir / ParallelModule.COMPUTE_CONFIG_FILE
-                ComputeConfig.safe_dump_to_file(compute_config, config_file)  # always refresh compute config
-                with _compile_flags(compute_config):
-                    regen_status = _gencode(
-                        module_or_module_class,
-                        dummy_forward_args,
-                        pas_policy,
-                        compute_config,
-                        outdir,
-                        module_dtype=module_dtype,
-                        module_fn=module_fn,
-                    )
-            else:
-                regen_status = RegenStatus.NONE
-                logger.info(f"Reuse generated code in {outdir}")
-    except Exception as e:
-        regen_status = RegenStatus.ERROR
-        regen_exception = e
-    else:
-        # if the code generation is successful, set `regen_exception` to `None` in all nodes
-        # If the code generation is failed, `regen_exception` will be set to `None` in non-zero rank nodes.
-        # Please note exception is not broadcasted to other nodes
-        # because it may contain unpicklable objects.
-        regen_exception = None
+    # generate code only in node0
+    # if it is not in a torchrun environment, just generate.
+    if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+        outdir, reusable = _prepare_and_check_reusable(gen_savedir, module_class, compute_config, instance_name, reuse)
+        if not reusable:
+            config_file = outdir / ParallelModule.COMPUTE_CONFIG_FILE
+            ComputeConfig.safe_dump_to_file(compute_config, config_file)  # always refresh compute config
+            with _compile_flags(compute_config):
+                regen_status = _gencode(
+                    module_or_module_class,
+                    dummy_input,
+                    pas_policy,
+                    compute_config,
+                    outdir,
+                    module_dtype=module_dtype,
+                    module_fn=module_fn,
+                )
+        else:
+            regen_status = RegenStatus.NONE
+            logger.info(f"Reuse generated code in {outdir}")
 
     if torch.distributed.is_initialized():
         # code generation can take very long time (for example, over 1 hour)
@@ -1060,6 +1029,11 @@ def parallelize(
         # because the default timeout for nccl is 30 minutes
         # (we can't control the timeout setting if torch.distributed is not initialized by us)
         DeviceGroup().long_barrier()
+
+    if broadcast_strategy != BroadcastGenFilesStrategy.NONE:
+        if not torch.distributed.is_initialized(): # we only support loading in torchrun environment
+            raise RuntimeError("Broadcast generated files failed: torch.distributed is not initialized.")
+        torch.distributed.barrier()
         # sync regen_status
         curr_rank = torch.distributed.get_rank()
         if curr_rank == 0:
@@ -1073,16 +1047,7 @@ def parallelize(
         if curr_rank != 0:
             regen_status = sent_obj[0]
 
-    # all nodes will raise an exception if the code generation is failed.
-    if regen_status == RegenStatus.ERROR:
-        raise RuntimeError("Code generation failed.") from regen_exception
-
-    if broadcast_strategy != BroadcastGenFilesStrategy.NONE:
-        if not torch.distributed.is_initialized(): # we only support loading in torchrun environment
-            raise RuntimeError("Broadcast generated files failed: torch.distributed is not initialized.")
-        torch.distributed.barrier()
-
-         # narrow down broadcast_strategy according to regen_status
+        # narrow down broadcast_strategy according to regen_status
         if regen_status == RegenStatus.NONE:
             # we don't need to broadcast anything
             broadcast_strategy = BroadcastGenFilesStrategy.NONE
@@ -1249,7 +1214,7 @@ OptimizerT = TypeVar('OptimizerT', bound=torch.optim.Optimizer)
 def build_optimizer(
     module: torch.nn.Module,
     optimizer_fn: Union[Type[OptimizerT], Callable[..., OptimizerT]],
-    compute_config: Optional[ComputeConfig] = None,
+    *args,
     **kwargs,
 ) -> Union[OptimizerT, ParallelOptimizer]:
     """
@@ -1274,9 +1239,7 @@ def build_optimizer(
         optimizer_fn (Union[Type[torch.optim.Optimizer], Callable[..., torch.optim.Optimizer]]):
             It can be the optimizer class or optimizer factory function.
             The first parameter of the optimizer_fn should be the parameters of the module.
-        compute_config (Optional[ComputeConfig]):
-            The config will be used to generate communication reducer.
-            If it is None, Default configuration will be used when creating reducer for non-parallel modules.
+        *args: other args for `optimizer_fn` besides parameters.
         **kwargs: the kwargs for optimizer constructor
 
     Returns:
@@ -1299,46 +1262,28 @@ def build_optimizer(
     non_parallel_module_reducer = None
     non_parallel_modules = [m for m in module.modules() if not isinstance(m, ParallelModule)]
     parallel_modules = [m for m in module.modules() if isinstance(m, ParallelModule)]
-
     if not parallel_modules:
         raise RuntimeError("No ParallelModule found in the module. Please make sure you have called parallelize() before build_optimizer().")
-
-    non_parallel_parameters_dict = {} # use dict for dedup and order
-    for m in non_parallel_modules:
-        for param in m.parameters(recurse=False): # only leaf parameters to avoid duplicate
-            if param is not None and param.requires_grad:
-                non_parallel_parameters_dict[param] = None
-    non_parallel_parameters = list(non_parallel_parameters_dict.keys())
 
     # check if all ParallelModules have the same gpu_config
     compute_configs = [m.compute_config for m in parallel_modules]
     for i in range(1, len(compute_configs)):
         if compute_configs[i].gpu_config != compute_configs[0].gpu_config:
             raise RuntimeError("All ParallelModules should have the same gpu_config.")
-    if compute_config and compute_config.gpu_config != compute_configs[0].gpu_config:
-        raise RuntimeError("All ParallelModules should have the same gpu_config.")
     plan_ngpus, runtime_ngpus = compute_configs[0].plan_ngpus, compute_configs[0].runtime_ngpus
 
     # we need to add all parameters of non-parallel modules to a reducer to reduce grads
     # if there are non-parallel parameters
     if plan_ngpus != runtime_ngpus and non_parallel_modules and any(p.numel() for m in non_parallel_modules for p in m.parameters(False)):
-        # For non-parallel modules, we use a Reducer to reduce the gradients.
-        # Please note here we still follow the original compute_config,
-        # although we can use a different compute_config for non-parallel modules.
-        # for example, we can always use plan_ngpus=1, and that may lead better gpu memory usage whe zero is ON.
-        group, _ = compute_configs[0].get_sync_group()
-        reducer_config = {}
-        if compute_config:
-            reducer_config = {
-                'async_op': compute_config.use_async_reducer,
-                'zero': compute_config.use_zero,
-                'max_bucket_size_bytes': compute_config.max_bucket_size_bytes,
-                'zero_use_reduce_scatter': compute_config.zero_use_reduce_scatter,
-                'zero_ngroups': compute_config.zero_ngroups,
-            }
-        non_parallel_module_reducer = Reducer(group, **reducer_config)
-        for param in non_parallel_parameters:
-            non_parallel_module_reducer.add_param(param)
+        rank = torch.distributed.get_rank()
+        # create all groups
+        for i in range(plan_ngpus):
+            DeviceGroup().get_group(list(range(i, runtime_ngpus, plan_ngpus)))
+        group = list(range(rank % plan_ngpus, runtime_ngpus, plan_ngpus))
+        non_parallel_module_reducer = Reducer(group)
+        for m in non_parallel_modules:
+            for param in m.parameters(recurse=False): # only add leaf parameters to avoid duplicate
+                non_parallel_module_reducer.add_param(param)
         non_parallel_module_reducer.build_buckets()
 
     opt_module_locs: Dict[str, ModuleParameterLocation] = {}
@@ -1351,14 +1296,9 @@ def build_optimizer(
                         m.parameters_for_optimizer() if m.compute_config.use_zero
                         else m.parameters() # `ParallelModule.merge_partial_states` supports parameters_for_optimizer() only in zero mode
                     )
-                    if p is not None and p.requires_grad
                 ]
                 if isinstance(m, ParallelModule)
-                else [
-                    (name, p)
-                    for name, p in m._parameters.items()
-                    if p is not None and p.requires_grad
-                ]
+                else m._parameters.items()
         )
         for idx, (name, param) in enumerate(gen):
             if name.endswith(pm_suffix):  # is a parameter of ParallelModule
@@ -1372,7 +1312,7 @@ def build_optimizer(
                     opt_module_locs[name].count += 1
             yield param
 
-    optimizer: torch.optim.Optimizer = optimizer_fn(_local_parameters(module), **kwargs)
+    optimizer: torch.optim.Optimizer = optimizer_fn(_local_parameters(module), *args, **kwargs)
     optimizer._non_parallel_module_reducer = non_parallel_module_reducer
     optimizer._extra_state = OptimizerExtraState(
             rank=torch.distributed.get_rank(),
@@ -1391,13 +1331,7 @@ def build_optimizer(
     def _step_post_hook(opt, *args, **kwargs):
         for m in parallel_modules:
             m.gather_params()
-        if non_parallel_module_reducer:
-            non_parallel_module_reducer.gather_params()
 
-    # Please note:
-    # register_step_pre_hook doesn't work expectly
-    # when closure is used in optimizer.step()
-    # in that case, you must call sync_shard_grad() manually
     optimizer.register_step_pre_hook(_step_pre_hook)
     optimizer.register_step_post_hook(_step_post_hook)
 
@@ -1408,19 +1342,6 @@ def build_optimizer(
             m.zero_grad()
         if non_parallel_module_reducer:
             non_parallel_module_reducer.zero_grad()
-        elif non_parallel_parameters:
-            # for the case when non-parallel modules are not managed by a reducer
-            for p in non_parallel_parameters:
-                # copied from Module.zero_grad()
-                if set_to_none:
-                    p.grad = None
-                else:
-                    if p.grad.grad_fn is not None:
-                        p.grad.detach_()
-                    else:
-                        p.grad.requires_grad_(False)
-                    p.grad.zero_()
-
     optimizer.zero_grad = types.MethodType(_patched_zero_grad, optimizer)
 
     orig_state_dict = optimizer.state_dict
@@ -1462,25 +1383,8 @@ def build_optimizer(
             grads.extend(mgrads)
 
         if non_parallel_module_reducer:
-            # all non parallel module parameters are the same across all ranks
-            # but we still need to handle the case when zero is on to get correct gnorm
             params = non_parallel_module_reducer.parameters_for_optimizer()
             mnorm, mgrads = calcuate_gnorm(params)
-            mnorm_squared = torch.square(mnorm)
-            if non_parallel_module_reducer.zero:
-                torch.distributed.all_reduce(mnorm_squared)
-                # parameters are duplicated `zero_ngroups * plan_ngpus` times.
-                # so we need to divide the norm by `zero_ngroups * plan_ngpus` to get the correct gnorm
-                # Reason (also see how non_parallel_module_reducer is constructed above):
-                # 1. Ranks in the same scale unit (plan_ngpus) have grads from exactly the same parameters.
-                #    because they are in the same position of a zero group.
-                # 2. Ranks in the same position of different zero groups have grads from exactly the same parameters
-                mnorm_squared.div_(non_parallel_module_reducer.zero_ngroups * plan_ngpus)
-            total_norm_squared += mnorm_squared
-            grads.extend(mgrads)
-        elif non_parallel_parameters:
-            # for the case when non-parallel modules are not managed by a reducer
-            mnorm, mgrads = calcuate_gnorm(non_parallel_parameters)
             total_norm_squared += torch.square(mnorm)
             grads.extend(mgrads)
 
@@ -1499,7 +1403,6 @@ def build_optimizer(
             for p in pg['params']:
                 if p.grad is not None:
                     p.grad.mul_(scale)
-
     optimizer.scale_grads = types.MethodType(_scale_grads, optimizer)
 
     def _register_reducer_pre_hook(self, fn: Callable[[Reducer, torch.Tensor], None]):
@@ -1693,30 +1596,8 @@ def merge_state_dicts(
     if not module_state_dicts:
         raise ValueError("model_state_dicts should not be empty.")
 
-    def _get_state_dict_rank(state_dict: Dict[str, Any]) -> int:
-        for k in state_dict:
-            if k.split('.')[-1] == ParallelModule.EXTRA_STATE_KEY:
-                return state_dict[k]['rank']
-        raise ValueError("Invalid state dict: no rank found.")
-
-    def _sort_state_dicts(state_dicts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        sorted_state_dicts =[None] * len(state_dicts)
-        for state_dict in state_dicts:
-            rank = _get_state_dict_rank(state_dict)
-            if sorted_state_dicts[rank] is not None:
-                raise ValueError(f"Duplicate rank {rank} in state_dicts.")
-            if rank >= len(state_dicts):
-                raise ValueError(f"Invalid rank {rank} in state_dicts.")
-            sorted_state_dicts[rank] = state_dict
-        return sorted_state_dicts
-
-    # sort state dicts by rank
-    module_state_dicts = _sort_state_dicts(module_state_dicts)
-
     pm_extra_states, pm_state_dicts, ret_state_dict = _get_parallel_module_state_dict_info(module_state_dicts)
     if optimizer_state_dicts is not None:
-        # sort state dicts by rank
-        optimizer_state_dicts = _sort_state_dicts(optimizer_state_dicts)
         opt_extra_states, opt_state_dicts, ret_opt_state_dict = _get_optimizer_state_dict_info(optimizer_state_dicts)
         # the new optimizer state dict for ParallelModules
         # key: the parallel module location in the optimizer state
@@ -1832,7 +1713,7 @@ def merge_state_dicts(
 
 
 @torch.no_grad()
-def load_merged_state_dict(
+def load_merged_state_dicts(
     module: torch.nn.Module,
     module_state_dict: Dict[str, Any],
     optimizer: Optional[Union[torch.optim.Optimizer, ParallelOptimizer]] = None,
@@ -1988,8 +1869,6 @@ def _construct_optim_state_zero(
             step, opt_states, opt_state_keys = None, {}, None
             for param in bucket.params:
                 sliced_new_val = _get_optimizer_state_of_param(param, param_ids, local_names)
-                # there are padding in the chunk, so `param.numel()` doesn't work here
-                param_numel = bucket.get_aligned_numel(param)
                 # init the chunk's optimizer state
                 if opt_state_keys is None:
                     opt_state_keys = [key for key in sliced_new_val]
@@ -2006,46 +1885,41 @@ def _construct_optim_state_zero(
 
                 # parameter range: <>
                 # bucket range: []
-                # in the following branches, we check the range including paddings.
-                # but in branch body, we only copy the valid range (without paddings) but update the chunk_offset with paddings.
                 if param_offset < bucket_chunk_start \
-                    and bucket_chunk_start < param_offset + param_numel < bucket_chunk_end:
+                    and bucket_chunk_start < param_offset + param.numel() < bucket_chunk_end:
                     # case: < [ > ]
-                    copy_size = param_offset + param_numel - bucket_chunk_start
-                    copy_size_without_padding = param_offset + param.numel() - bucket_chunk_start
-                    if copy_size_without_padding > 0:
-                        for key in opt_state_keys:
-                            opt_states[key][chunk_offset:chunk_offset+copy_size_without_padding] = sliced_new_val[key][-copy_size_without_padding:]
+                    copy_size = param_offset + param.numel() - bucket_chunk_start
+                    for key in opt_state_keys:
+                        opt_states[key][chunk_offset:chunk_offset+copy_size] = sliced_new_val[key][-copy_size:]
                     chunk_offset += copy_size
                 elif bucket_chunk_start <= param_offset < bucket_chunk_end \
-                    and bucket_chunk_start <= param_offset + param_numel < bucket_chunk_end:
+                    and bucket_chunk_start <= param_offset + param.numel() < bucket_chunk_end:
                     # case: [ <  > ]
                     for key in opt_state_keys:
                         opt_states[key][chunk_offset:chunk_offset+param.numel()] = sliced_new_val[key][:]
-                    chunk_offset += param_numel
+                    chunk_offset += param.numel()
                 elif bucket_chunk_start <= param_offset < bucket_chunk_end \
-                    and param_offset + param_numel >= bucket_chunk_end:
+                    and param_offset + param.numel() >= bucket_chunk_end:
                     # case: [ < ] >
                     copy_size = bucket_chunk_end - param_offset
-                    copy_size_without_padding = min(copy_size, param.numel())
                     for key in opt_state_keys:
-                        opt_states[key][chunk_offset:chunk_offset+copy_size_without_padding] = sliced_new_val[key][:copy_size_without_padding]
+                        opt_states[key][chunk_offset:chunk_offset+copy_size] = sliced_new_val[key][:copy_size]
                     chunk_offset += copy_size
                 elif param_offset < bucket_chunk_start \
-                    and param_offset + param_numel >= bucket_chunk_end:
+                    and param_offset + param.numel() >= bucket_chunk_end:
                     # case: < [ ] >
                     copy_size = bucket_chunk_end - bucket_chunk_start
-                    copy_size_without_padding = min(copy_size, param_offset + param.numel() - bucket_chunk_start)
-                    if copy_size_without_padding > 0:
-                        for key in opt_state_keys:
-                            opt_states[key][chunk_offset:chunk_offset + copy_size_without_padding] \
-                                = sliced_new_val[key][bucket_chunk_start-param_offset:bucket_chunk_start-param_offset + copy_size_without_padding]
+                    for key in opt_state_keys:
+                        opt_states[key][chunk_offset:chunk_offset + copy_size] \
+                            = sliced_new_val[key][bucket_chunk_start-param_offset:bucket_chunk_start-param_offset + copy_size]
                     chunk_offset += copy_size
                 else:
                     # case: [] <>, <> []
-                    logger.debug(f'Skipped: parameter range({param_offset},{param_offset + param_numel}) vs. bucket range({bucket_chunk_start},{bucket_chunk_end})')
-                param_offset += param_numel
-
+                    logger.debug(f'Skipped: parameter range({param_offset},{param_offset + param.numel()}) vs. bucket range({bucket_chunk_start},{bucket_chunk_end})')
+                param_offset += param.numel()
+            # as there is padding in chunk, slicing to obtain the correct shape opt states
+            for key in opt_state_keys:
+                opt_states[key] = opt_states[key][:opt_param[opt_param_idx].shape[0]]
             if step is not None:
                 opt_states['step'] = step
             state_dict[opt_param_idx] = opt_states
@@ -2331,14 +2205,11 @@ def load_deduped_state_dict(
 
 
 def _broadcast_opt_state(optimizer_state_dict, state_indexes: List[int], dedup_group_size: int):
-    if not state_indexes:
-        return
-
     rank = torch.distributed.get_rank()
     broadcast_group = setup_stride_broadcast_group(dedup_group_size)
     src_rank, curr_parallel_group, curr_parallel_group_ranks = broadcast_group.src_rank, broadcast_group.group, broadcast_group.ranks
 
-    logging.info(f'Rank-{rank} is broadcasting optimizer states to ranks {curr_parallel_group_ranks}, broadcast source: {src_rank}...')
+    logging.info(f'Rank-{rank} is broadcasting states to ranks {curr_parallel_group_ranks}, broadcast root: {src_rank}...')
 
     # broadcast param groups and state keys/shapes/dtypes via broadcast_object_list
     if rank == src_rank:
@@ -2362,32 +2233,27 @@ def _broadcast_opt_state(optimizer_state_dict, state_indexes: List[int], dedup_g
 
     # broadcast step
     # step is too small, so we can just broadcast all of them all together
-    # some adam/adamw optimizers may not have step in their state dict
-    # so we need to check if 'step' is in the state dict
-    if 'step' in optimizer_state_dict['state'][state_indexes[0]]:
-        if rank == src_rank:
-            step_stack = torch.stack(
-                [optimizer_state_dict['state'][k]['step'] for k in state_indexes]
-            )
-        else:
-            step_stack = torch.zeros(
-                len(state_indexes),
-                dtype=optimizer_state_dict['state'][state_indexes[0]]['step'].dtype,
-                device=torch.cuda.current_device()
-            )
-        torch.distributed.broadcast(step_stack, src=src_rank, group=curr_parallel_group)
-        if rank != src_rank:
-            for k, v in zip(state_indexes, step_stack):
-                optimizer_state_dict['state'][k]['step'].copy_(v)
+    if rank == src_rank:
+        step_stack = torch.stack(
+            [optimizer_state_dict['state'][k]['step'] for k in state_indexes]
+        )
+    else:
+        step_stack = torch.zeros(
+            len(state_indexes),
+            dtype=optimizer_state_dict['state'][0]['step'].dtype,
+            device=torch.cuda.current_device()
+        )
+    torch.distributed.broadcast(step_stack, src=src_rank, group=curr_parallel_group)
+    if rank != src_rank:
+        for k, v in zip(state_indexes, step_stack):
+            optimizer_state_dict['state'][k]['step'].copy_(v)
 
     # broadcast other states
     # TODO: can be slow?
     for k in state_indexes:
         keys = sorted(optimizer_state_dict['state'][k].keys())
-        # for mixed precision f16 optimizer, we will add custom keys
-        # assert set(keys) == {'step', 'exp_avg', 'exp_avg_sq'}
-        if 'step' in keys:
-            keys.remove('step')  # we have done step in previous.
+        assert set(keys) == {'step', 'exp_avg', 'exp_avg_sq'}
+        keys.remove('step')  # we have done step in previous.
         for key in keys:
             value = optimizer_state_dict['state'][k][key]
             torch.distributed.broadcast(value.data, src=src_rank, group=curr_parallel_group)
@@ -2424,14 +2290,14 @@ def _broadcast_weights(module: torch.nn.Module, stride_size: int):
     broadcast_group = setup_stride_broadcast_group(stride_size)
     rank = torch.distributed.get_rank()
     src_rank, curr_parallel_group, curr_parallel_group_ranks = broadcast_group.src_rank, broadcast_group.group, broadcast_group.ranks
-    logging.info(f'Rank-{rank} is broadcasting weights of {module.__class__.__name__} to ranks {curr_parallel_group_ranks}, broadcast source: {src_rank}...')
+    logging.info(f'Rank-{rank} is broadcasting weight to ranks {curr_parallel_group_ranks}, broadcast root: {src_rank}...')
 
     if isinstance(module, ParallelModule):
         if not _broadcast_single_value(src_rank, curr_parallel_group, module.non_presistent_buffers_inited):
             module._warn_uninitialized_non_persistent_buffers(raise_error=True)
 
     # we have a special optimization for ParallelModule
-    params = module.parameters_for_broadcast() if isinstance(module, ParallelModule) else list(module.parameters(False))
+    params = module.parameters_for_broadcast() if isinstance(module, ParallelModule) else module._parameters.values()
     logging.info(f'Inplace broadcasting {len(params)} parameters...')
     for i, param in enumerate(params):
         torch.distributed.broadcast(param.data, src=src_rank, group=curr_parallel_group)
@@ -2439,77 +2305,11 @@ def _broadcast_weights(module: torch.nn.Module, stride_size: int):
 
     # NOTE: may batch buffers for efficient broadcast,
     # current implementation is the most memory efficient way.
-    buffers = list(module.buffers(False))
-    logging.info(f'Inplace broadcasting {len(buffers)} buffers...')
-    for buffer in buffers:
+    logging.info(f'Inplace broadcasting {len(module._buffers)} buffers...')
+    for _, buffer in module._buffers.items():
         torch.distributed.broadcast(buffer.data, src=src_rank, group=curr_parallel_group)
 
     if isinstance(module, ParallelModule):
         module.mark_non_persistent_buffers_inited()
 
     torch.distributed.barrier()
-
-
-@torch.no_grad()
-def load_sharded_state_dict(
-    module: torch.nn.Module,
-    module_state_dict: Dict[str, Any],
-    optimizer: Optional[Union[torch.optim.Optimizer, ParallelOptimizer]] = None,
-    optimizer_state_dict: Optional[Dict[str, Any]] = None,
-    *,
-    device: Union[str, torch.device] = None
-):
-    """
-    Load the sharded state dicts to the module, and optionally the optimizer to a specified device.
-
-    Args:
-        module (torch.nn.Module): the module to be loaded
-        module_state_dict (Dict[str, Any]): the sharded model state dict
-        optimizer (Optional[torch.optim.Optimizer]): the optimizer to be loaded
-        optimizer_state_dict (Optional[Dict[str, Any]]): the sharded optimizer state dict
-        device (Union[str, torch.device]): the device to put the module and optimizer state dicts.
-            Use torch.cuda.current_device() if it is None.
-
-    Returns:
-        None
-    """
-
-    device = device or torch.cuda.current_device()
-    module.load_state_dict(module_state_dict)
-    module.to(device)
-    if optimizer:
-        if optimizer_state_dict is None:
-            raise ValueError("optimizer_state_dict should be provided when optimizer is not None.")
-        optimizer.load_state_dict(optimizer_state_dict)
-
-
-def sync_grad_when(cond: bool):
-    """
-    Context manager to enable/disable gradient synchronizations across workers.
-
-    Within this context, gradients will be accumulated
-    only when `cond` is True.
-
-    This is needed when
-
-    1. The mode is not end2end model.
-       For end2end model, gradients are synchronized across workers automatically.
-
-    2. async is enabled (`compute_config.use_async_reducer` is `True`).
-
-    If both conditions are not satisfied, this function has no effect.
-
-    Example:
-        >>> model = parallelize(model, ...)
-        >>> accum_steps = ...
-        >>> for step in range(accum_steps)
-        >>>     with sync_grad_when(step == accum_steps - 1):
-        >>>         loss = ...
-        >>>         loss.backward()
-        >>> optimizer.step()
-        >>> optimizer.zero_grad()
-
-    Args:
-        cond (bool): whether to synchronize gradients.
-    """
-    return _runtime_flags(skip_reducer=not cond)

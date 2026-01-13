@@ -720,7 +720,7 @@ def broadcast_files(
     world_size = torch.distributed.get_world_size()
     local_rank = curr_rank % local_world_size
 
-    # create groups
+    # create groups, make sure all groups are created correctly
     for i in range(local_world_size):
         group_ranks = list(range(i, world_size, local_world_size))
         DeviceGroup().get_group(group_ranks)
@@ -770,7 +770,6 @@ def broadcast_files(
 
         ranks = list(range(src, world_size, local_world_size))
         group = DeviceGroup().get_group(ranks)
-        torch.distributed.barrier(group=group)
 
         if curr_rank < local_world_size:
             file_starts = itertools.accumulate([0] + file_sizes[:-1])

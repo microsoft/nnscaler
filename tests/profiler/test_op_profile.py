@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from nnscaler.parallel import _gen_graph
+from nnscaler.ir.cten import IRObject
 from nnscaler.ir.tensor import IRTensor
 from nnscaler.ir.operator import IRFwOperation
 from nnscaler.profiler.database import get_func, profile, ProfileDataBase
@@ -49,3 +50,27 @@ def test_serialize():
     key2 = db._serialize(op)
     # test different output have different serialize
     assert key1 != key2
+
+
+def test_serialize_kwargs():
+    input_tensor = IRTensor(shape=[10, 20], dtype=torch.float)
+    output_tensor = IRTensor(shape=[10, 20], dtype=torch.float)
+    op1 = IRFwOperation('test', 'cube_test', [input_tensor], 1, dim=0, keepdim=False)
+    op1.set_output(0, output_tensor)
+    op2 = IRFwOperation('test', 'cube_test', [input_tensor], 1, keepdim=False, dim=0)
+    op2.set_output(0, output_tensor)
+    op3 = IRFwOperation('test', 'cube_test', [input_tensor], 1, dim=1, keepdim=False)
+    op3.set_output(0, output_tensor)
+    op4 = IRFwOperation('test', 'cube_test', [input_tensor], 1, dim=IRObject('dim', value=0), keepdim=False)
+    op4.set_output(0, output_tensor)
+
+    db = ProfileDataBase()
+    key1 = db._serialize(op1)
+    assert key1 == db._serialize(op2)
+    assert key1 == db._serialize(op4)
+    assert key1 != db._serialize(op3)
+    assert db._deserialize(key1) == (
+        ((10, 20), (10, 20)),
+        (torch.float32, torch.float32),
+        (False, False),
+    )

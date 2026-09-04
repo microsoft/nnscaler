@@ -20,7 +20,7 @@ import contextlib
 import _operator # required by eval()
 import nnscaler  # required by eval()
 from nnscaler.graph.function.dimops import IRDimops
-from nnscaler.ir.cten import IRTensor, IRObject
+from nnscaler.ir.cten import IR, IRTensor, IRObject
 from nnscaler.ir.operator import IRFwOperation
 from nnscaler.graph.parser.register import CustomizedOps
 from nnscaler.graph.tracer.metadata import AutocastInfo
@@ -436,7 +436,11 @@ class ProfileDataBase:
         shapes = '-'.join(str(tuple(shape)) if shape is not None else str(None) for shape in shapes)
         dtypes = '-'.join(str(dtype) for dtype in dtypes)
         requires_grads = '-'.join(str(require_grad) for require_grad in requires_grads)
-        return shapes + ' : ' + dtypes + ' : ' + requires_grads
+        key = shapes + ' : ' + dtypes + ' : ' + requires_grads
+        if node.kwargs:
+            kwargs = IR.try_unwrap(node.kwargs, unwrap_ir_tensor=True)
+            key += ' : ' + json.dumps(kwargs, sort_keys=True, default=str)
+        return key
 
     def _deserialize(self, key: str) -> Tuple[Shapes, DTypes, RequiresGrad]:
         """
@@ -455,7 +459,7 @@ class ProfileDataBase:
             dtypes DTypes: the dtypes of each input tensor
             requires_grads RequiresGrad: whether the input tensor requires gradient
         """
-        shapes, dtypes, requires_grads = key.split(' : ')
+        shapes, dtypes, requires_grads = key.split(' : ', maxsplit=3)[:3]
         shapes = tuple(eval(shape) for shape in shapes.split('-'))
         dtypes = tuple(eval(dtype) for dtype in dtypes.split('-'))
         requires_grads = tuple(eval(require_grad) for require_grad in requires_grads.split('-'))

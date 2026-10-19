@@ -500,7 +500,9 @@ class NnScalerStrategy(ParallelStrategy):
 
     @override
     def load_checkpoint(
-        self, checkpoint_path: _PATH
+        self,
+        checkpoint_path: _PATH,
+        weights_only: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
         Load the contents from a checkpoint and restore the state of the given objects.
@@ -513,10 +515,11 @@ class NnScalerStrategy(ParallelStrategy):
         if not path.exists():
             raise FileNotFoundError(f"Checkpoint file {path} not found.")
 
+        weights_only = False if weights_only is None else weights_only
         if path.is_dir():
-            state_dict: dict = torch.load(path / f'{self.global_rank}.pt', weights_only=False)
+            state_dict: dict = torch.load(path / f'{self.global_rank}.pt', weights_only=weights_only)
         else:
-            state_dict: dict = torch.load(path, weights_only=False)
+            state_dict: dict = torch.load(path, weights_only=weights_only)
         nnscaler_extra_state = state_dict.pop(self._nnscaler_extra_state_key)
         # load the extra states of the pl module
         self._lightning_module.load_state_dict(nnscaler_extra_state[self._pl_module_name_key], strict=False)

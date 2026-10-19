@@ -7,6 +7,13 @@ from nnscaler.ir.cten import IRTensor
 import torch
 
 
+def _to_serializable_tensor(value: torch.Tensor) -> torch.Tensor:
+    value = value.detach()
+    if type(value) is not torch.Tensor:
+        value = value.as_subclass(torch.Tensor)
+    return value.cpu()
+
+
 class Frame:
     """
     Frame to save call stack and variable
@@ -157,7 +164,10 @@ class Frame:
         total_size = sum([val.numel() for _, (_, val) in self._attr_map.items()])
         model_pt_part_num = (total_size + params_per_file - 1) // params_per_file
 
-        tid2value = {t.tid: val.cpu() for t, (_, val) in self._attr_map.items()}
+        tid2value = {
+            t.tid: _to_serializable_tensor(val)
+            for t, (_, val) in self._attr_map.items()
+        }
         # it can be zero if there is no param in the module (self._attr_map is empty)
         if model_pt_part_num <= 1:
             torch.save(tid2value, f'{save_file_stem}.0')

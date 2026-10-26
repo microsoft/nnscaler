@@ -4,7 +4,9 @@
 from typing import Callable, List, Set, Dict, Tuple, Optional, TYPE_CHECKING, Any, Union
 import logging
 import os
+import pickle
 import sys
+import warnings
 from pathlib import Path
 from dataclasses import dataclass, asdict
 from collections import defaultdict
@@ -291,6 +293,15 @@ class CubeModule(torch.nn.Module):
             filename (str): base file name (without '.0', '.1', etc.)
                 that saved with model parameters
         """
+        torch_version = torch.torch_version.TorchVersion(torch.__version__)
+        if torch_version < torch.torch_version.TorchVersion('2.6'):
+            warnings.warn(
+                "PyTorch versions earlier than 2.6 have a known remote code execution "
+                "vulnerability in the weights-only loader. Only load model parameter "
+                "chunks from a trusted source or upgrade to PyTorch 2.6 or later.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         npartitions = 0
         while os.path.isfile(filename + f'.{npartitions}'):
             npartitions += 1
@@ -302,7 +313,14 @@ class CubeModule(torch.nn.Module):
             for file_idx in range(npartitions):
                 # part_model contains a subset of attributes, where each attribute is a fulltensor
                 # fulltensor.tid -> torch.Tensor
-                part_model: Dict[int, torch.Tensor] = torch.load(filename + f'.{file_idx}')
+                try:
+                    part_model: Dict[int, torch.Tensor] = torch.load(
+                        filename + f'.{file_idx}', weights_only=True)
+                except pickle.UnpicklingError as exc:
+                    raise RuntimeError(
+                        f"Cannot safely load model parameter chunk {filename}.{file_idx}. "
+                        "Regenerate it with this nnScaler version."
+                    ) from exc
                 loaded_name = set()
                 for attr_name in attr_names:
                     meta = self._fullmap[attr_name]

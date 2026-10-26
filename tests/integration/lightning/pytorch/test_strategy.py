@@ -97,7 +97,7 @@ def ckpt_path_epoch_restored_worker(tmp_path):
     assert len(checkpoints) == max_epochs
     for ckpt in checkpoints:
         model = TestModel()
-        state = pl_load(ckpt / '0.pt')
+        state = pl_load(ckpt / '0.pt', weights_only=False)
         # Resume training
         trainer = Trainer(
             default_root_dir=tmp_path, max_epochs=2,
